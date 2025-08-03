@@ -153,7 +153,7 @@ class AmazonMonitor:
             # Alternative ranking extraction
             if not product_info['rank']:
                 rank_section = soup.find('div', {'id': 'detailBulletsWrapper_feature_div'})
-                if rank_section and hasattr(rank_section, 'find_all'):
+                if rank_section:
                     # Using find_all with string= returns NavigableString objects
                     rank_items = rank_section.find_all(string=re.compile(r'Amazon Best Sellers Rank'))
                     for item in rank_items:
@@ -172,7 +172,7 @@ class AmazonMonitor:
                 if not product_info['rank']:
                     # Look for rank in product details section
                     details_section = soup.find('div', {'id': 'productDetails_feature_div'})
-                    if details_section and hasattr(details_section, 'find_all'):
+                    if details_section:
                         # Using find_all with string= returns NavigableString objects
                         rank_elements = details_section.find_all(string=re.compile(r'#[\d,]+ in'))
                         for element in rank_elements:
