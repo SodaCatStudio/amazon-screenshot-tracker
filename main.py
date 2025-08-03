@@ -154,9 +154,9 @@ class AmazonMonitor:
             if not product_info['rank']:
                 rank_section = soup.find('div', {'id': 'detailBulletsWrapper_feature_div'})
                 if rank_section:
-                    # Using find_all with string= returns NavigableString objects
                     rank_items = rank_section.find_all(string=re.compile(r'Amazon Best Sellers Rank'))
                     for item in rank_items:
+                        # Implement the logic to process each rank item
                         if item and hasattr(item, 'parent'):
                             parent = item.parent
                             if parent and hasattr(parent, 'get_text'):
