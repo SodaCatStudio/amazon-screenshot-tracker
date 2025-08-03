@@ -1,0 +1,6 @@
+Flask==3.1.1
+requests==2.32.4
+beautifulsoup4==4.13.4
+schedule==1.2.2
+sqlite3
+environs==11.2.1
