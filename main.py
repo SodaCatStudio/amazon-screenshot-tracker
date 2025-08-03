@@ -152,21 +152,24 @@ class AmazonMonitor:
 
             # Alternative ranking extraction
             if not product_info['rank']:
-                rank_section = soup.find('div', {'id': 'detailBulletsWrapper_feature_div'})
-                if rank_section:
-                    rank_items = rank_section.find_all(string=re.compile(r'Amazon Best Sellers Rank'))
-                    for item in rank_items:
-                        # Implement the logic to process each rank item
-                        if item and hasattr(item, 'parent'):
-                            parent = item.parent
-                            if parent and hasattr(parent, 'get_text'):
-                                rank_text = parent.get_text()
-                                if rank_text:
-                                    rank_match = re.search(r'#([\d,]+) in (.+)', rank_text)
-                                    if rank_match:
-                                        product_info['rank'] = rank_match.group(1).replace(',', '')
-                                        product_info['category'] = rank_match.group(2).strip()
-                                        break
+                try:
+                    rank_section = soup.find('div', {'id': 'detailBulletsWrapper_feature_div'})
+                    if rank_section and hasattr(rank_section, 'find_all'):
+                        rank_items = rank_section.find_all(string=re.compile(r'Amazon Best Sellers Rank'))
+                        for item in rank_items:
+                            # Implement the logic to process each rank item
+                            if item and hasattr(item, 'parent'):
+                                parent = item.parent
+                                if parent and hasattr(parent, 'get_text'):
+                                    rank_text = parent.get_text()
+                                    if rank_text:
+                                        rank_match = re.search(r'#([\d,]+) in (.+)', rank_text)
+                                        if rank_match:
+                                            product_info['rank'] = rank_match.group(1).replace(',', '')
+                                            product_info['category'] = rank_match.group(2).strip()
+                                            break
+                except Exception as e:
+                    print(f"Error in alternative ranking extraction: {e}")
 
                 # Try another method if still no rank found
                 if not product_info['rank']:
