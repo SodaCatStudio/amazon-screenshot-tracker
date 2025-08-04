@@ -25,11 +25,9 @@ import json
 app = Flask(__name__)
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'your-fallback-secret-key')
 
-# Ensure correct initialization of LoginManager before setting properties
+# Initialize Flask-Login
 login_manager = LoginManager()
 login_manager.init_app(app)
-
-# Set login view correctly
 login_manager.login_view = 'login'
 login_manager.login_message = 'Please log in to access this page.'
 
