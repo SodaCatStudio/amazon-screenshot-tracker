@@ -1,9 +1,9 @@
 entrypoint = "main.py"
-modules = ["python-3.11"]
+modules = ["nodejs-20", "python-3.11"]
 
 [nix]
 channel = "stable-25_05"
-packages = ["cacert", "cargo", "libffi", "libiconv", "libxcrypt", "openssl", "pkg-config", "python313Packages.beautifulsoup4", "python313Packages.environs", "rustc", "gh"]
+packages = ["cacert", "cargo", "libffi", "libiconv", "libxcrypt", "openssl", "pkg-config", "python313Packages.beautifulsoup4", "python313Packages.environs", "rustc", "gh", "nano"]
 
 [unitTest]
 language = "python3"
