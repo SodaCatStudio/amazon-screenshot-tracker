@@ -1994,30 +1994,49 @@ monitor = AmazonMonitor(SCRAPINGBEE_API_KEY)
 @app.route('/')
 def index():
     """Landing page - FIXED to prevent loops and handle errors"""
+    print("🔍 INDEX: Route called")
     try:
+        print(f"🔍 INDEX: User authenticated: {current_user.is_authenticated}")
+
         if current_user.is_authenticated:
-            # Try dashboard first, fallback to landing if it fails
+            print("🔍 INDEX: Calling dashboard_view for authenticated user")
             try:
-                return dashboard_view()
-            except Exception as e:
-                print(f"❌ Dashboard error for authenticated user: {e}")
+                result = dashboard_view()
+                print("✅ INDEX: Dashboard returned successfully")
+                return result
+            except Exception as dashboard_error:
+                print(f"❌ INDEX: Dashboard error: {dashboard_error}")
+                import traceback
+                traceback.print_exc()
                 # Log them out and show landing instead of crashing
                 from flask_login import logout_user
                 logout_user()
+                print("🔍 INDEX: Falling back to landing.html after dashboard error")
                 return render_template('landing.html')
         else:
-            # Show landing page for anonymous users
-            return render_template('landing.html')
+            print("🔍 INDEX: Showing landing page for anonymous user")
+            result = render_template('landing.html')
+            print("✅ INDEX: Landing template rendered successfully")
+            return result
+
     except Exception as e:
-        print(f"❌ Critical error in index route: {e}")
+        print(f"❌ INDEX: Critical error: {e}")
         import traceback
         traceback.print_exc()
+
         # Absolute fallback - simple HTML response
+        print("🔍 INDEX: Using absolute fallback HTML")
         return """
         <h1>🏆 Amazon Screenshot Tracker</h1>
         <p>Service is starting up...</p>
         <a href="/auth/login">Login</a> | <a href="/auth/register">Register</a>
         """, 200
+
+@app.route('/test')
+def test_route():
+    """Simple test route to verify basic functionality"""
+    print("🔍 TEST: Simple test route called")
+    return "✅ Test route working! App is alive.", 200
 
 @app.route('/add_product_form')
 @login_required
