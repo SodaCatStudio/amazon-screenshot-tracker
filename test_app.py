@@ -120,6 +120,33 @@ limiter = Limiter(
 csrf = CSRFProtect()
 csrf.init_app(app)
 
+@app.route('/')
+def index():
+    """Landing page - completely standalone"""
+    print("🔍 INDEX: Standalone route called")
+
+    html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Amazon Screenshot Tracker</title>
+        <style>
+            body { font-family: Arial, sans-serif; padding: 50px; text-align: center; }
+            .btn { padding: 15px 30px; background: #ff9900; color: white; text-decoration: none; border-radius: 5px; margin: 10px; }
+        </style>
+    </head>
+    <body>
+        <h1>🏆 Amazon Screenshot Tracker</h1>
+        <p>Track your Amazon product rankings and capture achievement screenshots!</p>
+        <a href="/auth/login" class="btn">Login</a>
+        <a href="/auth/register" class="btn">Sign Up</a>
+    </body>
+    </html>
+    """
+
+    print("✅ INDEX: Returning standalone HTML")
+    return html, 200
+
 class EmailNotifier:
     """Handle all email notifications for the application"""
     def __init__(self):
