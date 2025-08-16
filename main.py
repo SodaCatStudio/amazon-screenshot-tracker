@@ -1993,18 +1993,33 @@ monitor = AmazonMonitor(SCRAPINGBEE_API_KEY)
 
 @app.route('/')
 def index():
-    """Landing page - FIXED to prevent loops"""
-    if current_user.is_authenticated:
-        # Show dashboard content for authenticated users
-        try:
-            return dashboard_view()
-        except Exception as e:
-            print(f"Dashboard error: {e}")
-            # If dashboard fails, show landing instead of redirecting
-            return render_template('landing.html')
-    else:
-        # Show landing page for anonymous users
-        return render_template('landing.html')
+    """Simple landing page that always works"""
+    try:
+        # Simple response that doesn't depend on complex logic
+        return """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Amazon Screenshot Tracker - Beta</title>
+            <style>
+                body { font-family: Arial, sans-serif; padding: 50px; text-align: center; }
+                .container { max-width: 600px; margin: 0 auto; }
+                .btn { padding: 15px 30px; background: #ff9900; color: white; text-decoration: none; border-radius: 5px; }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>🏆 Amazon Screenshot Tracker</h1>
+                <p>Track your Amazon product rankings and capture achievement screenshots!</p>
+                <a href="/auth/login" class="btn">Login</a>
+                <a href="/auth/register" class="btn">Sign Up</a>
+            </div>
+        </body>
+        </html>
+        """
+    except Exception as e:
+        # Fallback if even this fails
+        return f"App is running! Error: {str(e)}", 200
 
 @app.route('/add_product_form')
 @login_required
