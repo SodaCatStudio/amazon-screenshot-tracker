@@ -2001,7 +2001,7 @@ class AmazonMonitor:
         return achievements
 
 # Initialize components
-db_manager = DatabaseManager()
+#db_manager = DatabaseManager()
 monitor = AmazonMonitor(SCRAPINGBEE_API_KEY)
 
 @app.route('/')
