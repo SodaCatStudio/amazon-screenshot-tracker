@@ -97,15 +97,12 @@ def execute_with_returning(cursor, query, params=None):
         return cursor.lastrowid
 
 app = Flask(__name__)
+def create_app():
+    """Application factory pattern for better WSGI compatibility"""
+    return app
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', secrets.token_hex(32))
 if not app.secret_key:
     raise ValueError("FLASK_SECRET_KEY must be set in environment variables!")
-
-limiter = Limiter(
-    app=app,
-    key_func=get_remote_address,
-    default_limits=["50 per day", "10 per hour"]
-)
 
 app.config['WTF_CSRF_ENABLED'] = True
 @app.before_request
@@ -121,10 +118,22 @@ auth = Blueprint('auth', __name__)
 
 # Initialize Flask-Login with security settings
 login_manager = LoginManager()
-login_manager.init_app(app)
+
+csrf = CSRFProtect()
+
+limiter = Limiter(
+    app=app,
+    key_func=get_remote_address,
+    default_limits=["50 per day", "10 per hour"]
+)
+
 login_manager.login_view = 'auth.login'  # type: ignore
 login_manager.login_message = 'Please log in to access this page.'
 login_manager.session_protection = 'strong'  # Protect against session hijacking
+
+login_manager.init_app(app)
+csrf.init_app(app)
+limiter.init_app(app)
 
 # Security configurations
 app.config['SESSION_COOKIE_SECURE'] = IS_PRODUCTION  # HTTPS only in production
@@ -170,7 +179,6 @@ app.config['WTF_CSRF_TIME_LIMIT'] = None  # No time limit
 app.config['WTF_CSRF_CHECK_DEFAULT'] = True
 print(f"CSRF Enabled: {app.config.get('WTF_CSRF_ENABLED', 'Not Set')}")
 print(f"Secret Key Length: {len(app.config['SECRET_KEY'])}")
-csrf = CSRFProtect(app)
 
 csp = {
     'default-src': [
@@ -227,6 +235,11 @@ if not app.debug:
 
     app.logger.setLevel(logging.INFO)
     app.logger.info('Amazon Bestseller Monitor startup')
+
+@app.route('/health')
+@csrf.exempt  # Exempt from CSRF
+def health_check():
+    return "OK", 200
 
 @app.errorhandler(404)
 def bad_request(error):
@@ -3107,3 +3120,9 @@ if __name__ == '__main__':
     else:
         # Development mode
         app.run(debug=True, host='0.0.0.0', port=port)
+
+if __name__ != '__main__':
+    # When running under gunicorn
+    print("🔧 Configuring app for gunicorn...")
+    # Ensure all initialization happens here too
+    db_manager = DatabaseManager()
