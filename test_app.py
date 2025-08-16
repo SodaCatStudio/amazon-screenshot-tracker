@@ -926,6 +926,14 @@ class User(UserMixin):
 def load_user(user_id):
     return User.get(user_id)
 
+@app.before_request
+def log_request():
+    print(f"📍 Request: {request.method} {request.path}")
+    if current_user.is_authenticated:
+        print(f"   User: {current_user.email}")
+    else:
+        print("   User: Anonymous")
+
 @app.route('/health')
 def health():
     return "OK", 200
