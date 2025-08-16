@@ -3,7 +3,7 @@ modules = ["python-3.11"]
 
 [nix]
 channel = "stable-25_05"
-packages = ["cacert", "cargo", "libffi", "libiconv", "libxcrypt", "openssl", "pkg-config", "python313Packages.beautifulsoup4", "python313Packages.environs", "rustc"]
+packages = ["cacert", "cargo", "libffi", "libiconv", "libxcrypt", "openssl", "pkg-config", "python313Packages.beautifulsoup4", "python313Packages.environs", "rustc", "gh"]
 
 [unitTest]
 language = "python3"
