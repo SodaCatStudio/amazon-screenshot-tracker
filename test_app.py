@@ -466,6 +466,27 @@ class EmailNotifier:
 # Initialize email notifier AFTER the class definition
 email_notifier = EmailNotifier()
 
+class APIKeyEncryption:
+    def __init__(self):
+        # Generate a key from your secret
+        secret = app.config['SECRET_KEY'].encode()
+        self.cipher = Fernet(base64.urlsafe_b64encode(secret[:32].ljust(32, b'0')))
+
+    def encrypt(self, api_key):
+        """Encrypt API key before storing"""
+        if not api_key:
+            return None
+        return self.cipher.encrypt(api_key.encode()).decode()
+
+    def decrypt(self, encrypted_key):
+        """Decrypt API key for use"""
+        if not encrypted_key:
+            return None
+        return self.cipher.decrypt(encrypted_key.encode()).decode()
+
+# Initialize encryption
+api_encryption = APIKeyEncryption()
+
 @app.route('/health')
 def health():
     return "OK", 200
