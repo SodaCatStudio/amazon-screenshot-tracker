@@ -1993,33 +1993,31 @@ monitor = AmazonMonitor(SCRAPINGBEE_API_KEY)
 
 @app.route('/')
 def index():
-    """Simple landing page that always works"""
+    """Landing page - FIXED to prevent loops and handle errors"""
     try:
-        # Simple response that doesn't depend on complex logic
-        return """
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Amazon Screenshot Tracker - Beta</title>
-            <style>
-                body { font-family: Arial, sans-serif; padding: 50px; text-align: center; }
-                .container { max-width: 600px; margin: 0 auto; }
-                .btn { padding: 15px 30px; background: #ff9900; color: white; text-decoration: none; border-radius: 5px; }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <h1>🏆 Amazon Screenshot Tracker</h1>
-                <p>Track your Amazon product rankings and capture achievement screenshots!</p>
-                <a href="/auth/login" class="btn">Login</a>
-                <a href="/auth/register" class="btn">Sign Up</a>
-            </div>
-        </body>
-        </html>
-        """
+        if current_user.is_authenticated:
+            # Try dashboard first, fallback to landing if it fails
+            try:
+                return dashboard_view()
+            except Exception as e:
+                print(f"❌ Dashboard error for authenticated user: {e}")
+                # Log them out and show landing instead of crashing
+                from flask_login import logout_user
+                logout_user()
+                return render_template('landing.html')
+        else:
+            # Show landing page for anonymous users
+            return render_template('landing.html')
     except Exception as e:
-        # Fallback if even this fails
-        return f"App is running! Error: {str(e)}", 200
+        print(f"❌ Critical error in index route: {e}")
+        import traceback
+        traceback.print_exc()
+        # Absolute fallback - simple HTML response
+        return """
+        <h1>🏆 Amazon Screenshot Tracker</h1>
+        <p>Service is starting up...</p>
+        <a href="/auth/login">Login</a> | <a href="/auth/register">Register</a>
+        """, 200
 
 @app.route('/add_product_form')
 @login_required
@@ -2407,72 +2405,90 @@ def dashboard():
 
 def dashboard_view():
     """Dashboard view with API key check"""
-    if not current_user.is_authenticated:
-        return redirect(url_for('auth.login'))
-
-    user_email = current_user.email
-    user_id = current_user.id
-
-    conn = sqlite3.connect('amazon_monitor.db')
-    cursor = conn.cursor()
-
-    # Check if user has API key
-    has_api_key = False
     try:
-        cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = ?', (user_id,))
-        result = cursor.fetchone()
-        has_api_key = bool(result and result[0])
-    except Exception:
-        pass
+        print(f"🔍 Dashboard called for user: {current_user.is_authenticated}")
 
-    # Get user's products - use user_id if available, fallback to email
-    if hasattr(current_user, 'id'):
-        cursor.execute('''
-            SELECT id, product_title, current_rank, current_category, is_bestseller, 
-                   last_checked, created_at, active
-            FROM products 
-            WHERE user_id = ? OR user_email = ?
-            ORDER BY created_at DESC
-        ''', (user_id, user_email))
-    else:
-        cursor.execute('''
-            SELECT id, product_title, current_rank, current_category, is_bestseller, 
-                   last_checked, created_at, active
-            FROM products 
-            WHERE user_email = ?
-            ORDER BY created_at DESC
-        ''', (user_email,))
+        if not current_user.is_authenticated:
+            print("❌ User not authenticated in dashboard_view")
+            return redirect(url_for('auth.login'))
 
-    products = cursor.fetchall()
+        user_email = current_user.email
+        user_id = current_user.id
+        print(f"✅ Processing dashboard for user: {user_email}")
 
-    # Get bestseller screenshots for user
-    if hasattr(current_user, 'id'):
-        cursor.execute('''
-            SELECT bs.id, p.product_title, bs.rank_achieved, bs.category, bs.achieved_at
-            FROM bestseller_screenshots bs
-            JOIN products p ON bs.product_id = p.id
-            WHERE p.user_id = ? OR p.user_email = ?
-            ORDER BY bs.achieved_at DESC
-        ''', (user_id, user_email))
-    else:
-        cursor.execute('''
-            SELECT bs.id, p.product_title, bs.rank_achieved, bs.category, bs.achieved_at
-            FROM bestseller_screenshots bs
-            JOIN products p ON bs.product_id = p.id
-            WHERE p.user_email = ?
-            ORDER BY bs.achieved_at DESC
-        ''', (user_email,))
+        # Use context manager for database connection
+        conn = get_db()
+        try:
+            cursor = conn.cursor()
 
-    screenshots = cursor.fetchall()
+            # Check if user has API key
+            has_api_key = False
+            try:
+                cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = %s', (user_id,))
+                result = cursor.fetchone()
+                has_api_key = bool(result and result[0])
+            except Exception as api_check_error:
+                print(f"⚠️ API key check failed: {api_check_error}")
+                has_api_key = False
 
-    conn.close()
+            # Get user's products
+            if hasattr(current_user, 'id'):
+                cursor.execute('''
+                    SELECT id, product_title, current_rank, current_category, is_bestseller, 
+                           last_checked, created_at, active
+                    FROM products 
+                    WHERE user_id = %s OR user_email = %s
+                    ORDER BY created_at DESC
+                ''', (user_id, user_email))
+            else:
+                cursor.execute('''
+                    SELECT id, product_title, current_rank, current_category, is_bestseller, 
+                           last_checked, created_at, active
+                    FROM products 
+                    WHERE user_email = %s
+                    ORDER BY created_at DESC
+                ''', (user_email,))
 
-    # Pass the email to the template from current_user, not from request
-    return render_template('dashboard.html', 
-         email=user_email,
-         products=products, 
-         screenshots=screenshots,
-         has_api_key=has_api_key)  # Pass this to template
+            products = cursor.fetchall()
+
+            # Get bestseller screenshots for user
+            if hasattr(current_user, 'id'):
+                cursor.execute('''
+                    SELECT bs.id, p.product_title, bs.rank_achieved, bs.category, bs.achieved_at
+                    FROM bestseller_screenshots bs
+                    JOIN products p ON bs.product_id = p.id
+                    WHERE p.user_id = %s OR p.user_email = %s
+                    ORDER BY bs.achieved_at DESC
+                ''', (user_id, user_email))
+            else:
+                cursor.execute('''
+                    SELECT bs.id, p.product_title, bs.rank_achieved, bs.category, bs.achieved_at
+                    FROM bestseller_screenshots bs
+                    JOIN products p ON bs.product_id = p.id
+                    WHERE p.user_email = %s
+                    ORDER BY bs.achieved_at DESC
+                ''', (user_email,))
+
+            screenshots = cursor.fetchall()
+
+            return render_template('dashboard.html', 
+                 email=user_email,
+                 products=products, 
+                 screenshots=screenshots,
+                 has_api_key=has_api_key)
+
+        finally:
+            # Always close database connection
+            conn.close()
+
+    except Exception as e:
+        print(f"❌ Dashboard error: {e}")
+        import traceback
+        traceback.print_exc()
+
+        # Return a simple error page instead of crashing
+        flash('Dashboard temporarily unavailable. Please try again.', 'error')
+        return render_template('landing.html')
 
 # Settings page route
 @app.route('/settings')
