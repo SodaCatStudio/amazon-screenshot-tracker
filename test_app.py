@@ -95,6 +95,8 @@ def execute_with_returning(cursor, query, params=None):
 app = Flask(__name__)
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'test-key')
 
+auth = Blueprint('auth', __name__)
+
 load_dotenv()
 IS_PRODUCTION = os.environ.get('FLASK_ENV') == 'production'
 
@@ -954,6 +956,12 @@ def index():
 
     print("✅ INDEX: Returning standalone HTML")
     return html, 200
+
+@auth.route('/login')
+def login():
+    return "Login page", 200
+
+app.register_blueprint(auth, url_prefix='/auth')
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
