@@ -984,6 +984,7 @@ def login():
     return "Login page", 200
 
 app.register_blueprint(auth, url_prefix='/auth')
+db_manager = DatabaseManager()
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
