@@ -120,33 +120,6 @@ limiter = Limiter(
 csrf = CSRFProtect()
 csrf.init_app(app)
 
-@app.route('/')
-def index():
-    """Landing page - completely standalone"""
-    print("🔍 INDEX: Standalone route called")
-
-    html = """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Amazon Screenshot Tracker</title>
-        <style>
-            body { font-family: Arial, sans-serif; padding: 50px; text-align: center; }
-            .btn { padding: 15px 30px; background: #ff9900; color: white; text-decoration: none; border-radius: 5px; margin: 10px; }
-        </style>
-    </head>
-    <body>
-        <h1>🏆 Amazon Screenshot Tracker</h1>
-        <p>Track your Amazon product rankings and capture achievement screenshots!</p>
-        <a href="/auth/login" class="btn">Login</a>
-        <a href="/auth/register" class="btn">Sign Up</a>
-    </body>
-    </html>
-    """
-
-    print("✅ INDEX: Returning standalone HTML")
-    return html, 200
-
 class EmailNotifier:
     """Handle all email notifications for the application"""
     def __init__(self):
@@ -934,9 +907,53 @@ class DatabaseManager:
 
         print("✅ All SQLite tables created with complete schema")
 
+class User(UserMixin):
+    def __init__(self, id, email, full_name=None, is_verified=False, is_active=True):
+        self.id = id
+        self.email = email
+        self.full_name = full_name
+        self.is_verified = is_verified
+        self.is_active = is_active
+
+    @staticmethod
+    def get(user_id):
+        # Your existing get method
+        pass
+
+@login_manager.user_loader
+def load_user(user_id):
+    return User.get(user_id)
+
 @app.route('/health')
 def health():
     return "OK", 200
+
+@app.route('/')
+def index():
+    """Landing page - completely standalone"""
+    print("🔍 INDEX: Standalone route called")
+
+    html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Amazon Screenshot Tracker</title>
+        <style>
+            body { font-family: Arial, sans-serif; padding: 50px; text-align: center; }
+            .btn { padding: 15px 30px; background: #ff9900; color: white; text-decoration: none; border-radius: 5px; margin: 10px; }
+        </style>
+    </head>
+    <body>
+        <h1>🏆 Amazon Screenshot Tracker</h1>
+        <p>Track your Amazon product rankings and capture achievement screenshots!</p>
+        <a href="/auth/login" class="btn">Login</a>
+        <a href="/auth/register" class="btn">Sign Up</a>
+    </body>
+    </html>
+    """
+
+    print("✅ INDEX: Returning standalone HTML")
+    return html, 200
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
