@@ -3125,6 +3125,3 @@ if __name__ != '__main__':
     # For gunicorn
     print("🔧 Configuring app for gunicorn...")
     # Don't initialize database here
-else:
-    # For direct Python execution
-    db_manager = DatabaseManager()
