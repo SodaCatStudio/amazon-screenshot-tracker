@@ -52,6 +52,7 @@ SCRAPINGBEE_API_KEY = os.environ.get('SCRAPINGBEE_SECRET_KEY')
 SCRAPINGBEE_URL = 'https://app.scrapingbee.com/api/v1/'
 
 login_manager = LoginManager()
+login_manager.init_app(app)
 
 @app.route('/health')
 def health():
