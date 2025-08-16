@@ -38,6 +38,19 @@ from dotenv import load_dotenv
 app = Flask(__name__)
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'test-key')
 
+load_dotenv()
+IS_PRODUCTION = os.environ.get('FLASK_ENV') == 'production'
+
+# All your environment variable assignments
+SMTP_SERVER = os.environ.get('SMTP_SERVER', 'smtp.gmail.com')
+SMTP_PORT = int(os.environ.get('SMTP_PORT', '587'))
+SMTP_USERNAME = os.environ.get('SMTP_USERNAME')
+SMTP_PASSWORD = os.environ.get('SMTP_PASSWORD')
+SENDER_EMAIL = os.environ.get('SENDER_EMAIL', SMTP_USERNAME)
+SENDER_NAME = os.environ.get('SENDER_NAME', 'Amazon Screenshot Tracker')
+SCRAPINGBEE_API_KEY = os.environ.get('SCRAPINGBEE_SECRET_KEY')
+SCRAPINGBEE_URL = 'https://app.scrapingbee.com/api/v1/'
+
 @app.route('/health')
 def health():
     return "Imports OK", 200
