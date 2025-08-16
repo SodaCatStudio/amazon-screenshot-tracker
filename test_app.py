@@ -33,6 +33,63 @@ from cryptography.fernet import Fernet
 import logging
 from logging.handlers import RotatingFileHandler
 from dotenv import load_dotenv
+import psycopg2
+from psycopg2.extras import RealDictCursor
+
+def get_db():
+    """Get database connection - PostgreSQL in production, SQLite in development"""
+    database_url = os.environ.get('DATABASE_URL')
+
+    if database_url:
+        # Production: PostgreSQL
+        try:
+            conn = psycopg2.connect(database_url, cursor_factory=RealDictCursor)
+            return conn
+        except Exception as e:
+            print(f"❌ PostgreSQL connection failed: {e}")
+            raise
+    else:
+        # Development: SQLite
+        conn = sqlite3.connect('amazon_monitor.db')
+        conn.row_factory = sqlite3.Row
+        return conn
+
+def get_insert_id(cursor, conn):
+    """Get last insert ID for both databases"""
+    database_url = os.environ.get('DATABASE_URL')
+
+    if database_url:
+        # PostgreSQL: Use RETURNING
+        # This function should be called differently for PostgreSQL
+        return None  # Handle with RETURNING clause
+    else:
+        # SQLite
+        return cursor.lastrowid
+
+def execute_with_returning(cursor, query, params=None):
+    """Execute INSERT and return ID for PostgreSQL compatibility"""
+    database_url = os.environ.get('DATABASE_URL')
+
+    if database_url:
+        # PostgreSQL: Add RETURNING id
+        if query.strip().upper().startswith('INSERT') and 'RETURNING' not in query.upper():
+            query += ' RETURNING id'
+
+        if params:
+            cursor.execute(query, params)
+        else:
+            cursor.execute(query)
+
+        # Get the returned ID
+        result = cursor.fetchone()
+        return result['id'] if result else None
+    else:
+        # SQLite: Regular insert
+        if params:
+            cursor.execute(query, params)
+        else:
+            cursor.execute(query)
+        return cursor.lastrowid
 
 # Just basic Flask app
 app = Flask(__name__)
@@ -486,6 +543,369 @@ class APIKeyEncryption:
 
 # Initialize encryption
 api_encryption = APIKeyEncryption()
+
+class DatabaseManager:
+    def __init__(self):
+        self.init_db()
+
+    def get_db_type(self):
+        """Determine if we're using PostgreSQL or SQLite"""
+        return 'postgresql' if os.environ.get('DATABASE_URL') else 'sqlite'
+
+    def init_db(self):
+        conn = get_db()
+        cursor = conn.cursor()
+        db_type = self.get_db_type()
+
+        try:
+            if db_type == 'postgresql':
+                print("🐘 Initializing PostgreSQL tables...")
+                self.create_postgresql_tables(cursor)
+            else:
+                print("🗃️ Initializing SQLite tables...")
+                self.create_sqlite_tables(cursor)
+
+            conn.commit()
+            print(f"✅ {db_type.title()} database initialized successfully")
+        except Exception as e:
+            print(f"❌ Database initialization failed: {e}")
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def create_postgresql_tables(self, cursor):
+        """Create tables optimized for PostgreSQL"""
+
+        # Users table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY,
+                email VARCHAR(255) UNIQUE NOT NULL,
+                password_hash VARCHAR(255) NOT NULL,
+                full_name VARCHAR(255),
+                is_verified BOOLEAN DEFAULT FALSE,
+                is_active BOOLEAN DEFAULT TRUE,
+                verification_token VARCHAR(255),
+                verification_token_expiry TIMESTAMP,
+                reset_token VARCHAR(255),
+                reset_token_expiry TIMESTAMP,
+                failed_login_attempts INTEGER DEFAULT 0,
+                last_failed_login TIMESTAMP,
+                account_locked_until TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_login TIMESTAMP,
+                two_factor_secret VARCHAR(255),
+                two_factor_enabled BOOLEAN DEFAULT FALSE,
+                max_products INTEGER DEFAULT 10,
+                notification_preferences VARCHAR(50) DEFAULT 'instant',
+                scrapingbee_api_key TEXT
+            )
+        ''')
+
+        # Products table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS products (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                user_email VARCHAR(255) NOT NULL,
+                product_url TEXT NOT NULL,
+                product_title TEXT,
+                current_rank VARCHAR(50),
+                current_category TEXT,
+                is_bestseller BOOLEAN DEFAULT FALSE,
+                last_checked TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                active BOOLEAN DEFAULT TRUE
+            )
+        ''')
+
+        # Rankings history table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS rankings (
+                id SERIAL PRIMARY KEY,
+                product_id INTEGER REFERENCES products(id) ON DELETE CASCADE,
+                rank_number INTEGER,
+                category TEXT,
+                is_bestseller BOOLEAN,
+                screenshot_data TEXT,
+                checked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        # Screenshots table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS bestseller_screenshots (
+                id SERIAL PRIMARY KEY,
+                product_id INTEGER REFERENCES products(id) ON DELETE CASCADE,
+                screenshot_data TEXT,
+                rank_achieved VARCHAR(50),
+                category TEXT,
+                achieved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        # Target categories table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS target_categories (
+                id SERIAL PRIMARY KEY,
+                product_id INTEGER REFERENCES products(id) ON DELETE CASCADE,
+                category_name VARCHAR(255) NOT NULL,
+                target_rank INTEGER DEFAULT 1,
+                best_rank_achieved INTEGER,
+                is_achieved BOOLEAN DEFAULT FALSE,
+                date_achieved TIMESTAMP,
+                screenshot_id INTEGER REFERENCES bestseller_screenshots(id),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        # Baseline screenshots table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS baseline_screenshots (
+                id SERIAL PRIMARY KEY,
+                product_id INTEGER UNIQUE REFERENCES products(id) ON DELETE CASCADE,
+                screenshot_data TEXT,
+                initial_rank VARCHAR(50),
+                initial_category TEXT,
+                captured_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        # Login history table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS login_history (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                ip_address INET,
+                user_agent TEXT,
+                login_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                success BOOLEAN
+            )
+        ''')
+
+        # Email verifications table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS email_verifications (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                token VARCHAR(255) UNIQUE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                used BOOLEAN DEFAULT FALSE
+            )
+        ''')
+
+        # User sessions table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS user_sessions (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                session_token VARCHAR(255) UNIQUE,
+                expires_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        # Feedback table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS feedback (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                user_email VARCHAR(255),
+                rating INTEGER,
+                love TEXT,
+                improve TEXT,
+                bugs TEXT,
+                would_pay VARCHAR(50),
+                price_point VARCHAR(50),
+                submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        # Create indexes for better performance
+        self.create_postgresql_indexes(cursor)
+
+    def create_postgresql_indexes(self, cursor):
+        """Create indexes for better query performance"""
+        indexes = [
+            "CREATE INDEX IF NOT EXISTS idx_products_user_id ON products(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_products_user_email ON products(user_email)",
+            "CREATE INDEX IF NOT EXISTS idx_products_active ON products(active)",
+            "CREATE INDEX IF NOT EXISTS idx_rankings_product_id ON rankings(product_id)",
+            "CREATE INDEX IF NOT EXISTS idx_rankings_checked_at ON rankings(checked_at)",
+            "CREATE INDEX IF NOT EXISTS idx_bestseller_screenshots_product_id ON bestseller_screenshots(product_id)",
+            "CREATE INDEX IF NOT EXISTS idx_target_categories_product_id ON target_categories(product_id)",
+            "CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)",
+            "CREATE INDEX IF NOT EXISTS idx_login_history_user_id ON login_history(user_id)"
+        ]
+
+        for index_query in indexes:
+            try:
+                cursor.execute(index_query)
+            except Exception as e:
+                print(f"⚠️ Index creation warning: {e}")
+
+    def create_sqlite_tables(self, cursor):
+        """Create all SQLite tables with complete schema for development"""
+
+        # Users table - COMPLETE schema with all columns from the start
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT UNIQUE NOT NULL COLLATE NOCASE,
+                password_hash TEXT NOT NULL,
+                full_name TEXT,
+                is_verified BOOLEAN DEFAULT 0,
+                is_active BOOLEAN DEFAULT 1,
+                verification_token TEXT,
+                verification_token_expiry TIMESTAMP,
+                reset_token TEXT,
+                reset_token_expiry TIMESTAMP,
+                failed_login_attempts INTEGER DEFAULT 0,
+                last_failed_login TIMESTAMP,
+                account_locked_until TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_login TIMESTAMP,
+                two_factor_secret TEXT,
+                two_factor_enabled BOOLEAN DEFAULT 0,
+                max_products INTEGER DEFAULT 10,
+                notification_preferences TEXT DEFAULT 'instant',
+                scrapingbee_api_key TEXT
+            )
+        ''')
+
+        # Products table - COMPLETE schema
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS products (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                user_email TEXT NOT NULL,
+                product_url TEXT NOT NULL,
+                product_title TEXT,
+                current_rank TEXT,
+                current_category TEXT,
+                is_bestseller BOOLEAN DEFAULT 0,
+                last_checked TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                active BOOLEAN DEFAULT 1,
+                FOREIGN KEY (user_id) REFERENCES users (id)
+            )
+        ''')
+
+        # Rankings history table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS rankings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                product_id INTEGER,
+                rank_number INTEGER,
+                category TEXT,
+                is_bestseller BOOLEAN,
+                screenshot_data TEXT,
+                checked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (product_id) REFERENCES products (id)
+            )
+        ''')
+
+        # Screenshots table for bestseller achievements
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS bestseller_screenshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                product_id INTEGER,
+                screenshot_data TEXT,
+                rank_achieved TEXT,
+                category TEXT,
+                achieved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (product_id) REFERENCES products (id)
+            )
+        ''')
+
+        # Target categories table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS target_categories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                product_id INTEGER,
+                category_name TEXT NOT NULL,
+                target_rank INTEGER DEFAULT 1,
+                best_rank_achieved INTEGER,
+                is_achieved BOOLEAN DEFAULT 0,
+                date_achieved TIMESTAMP,
+                screenshot_id INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (product_id) REFERENCES products (id),
+                FOREIGN KEY (screenshot_id) REFERENCES bestseller_screenshots (id)
+            )
+        ''')
+
+        # Baseline screenshots table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS baseline_screenshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                product_id INTEGER UNIQUE,
+                screenshot_data TEXT,
+                initial_rank TEXT,
+                initial_category TEXT,
+                captured_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (product_id) REFERENCES products (id)
+            )
+        ''')
+
+        # Login history for security monitoring
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS login_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                ip_address TEXT,
+                user_agent TEXT,
+                login_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                success BOOLEAN,
+                FOREIGN KEY (user_id) REFERENCES users (id)
+            )
+        ''')
+
+        # Email verification tokens with expiry
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS email_verifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                token TEXT UNIQUE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                used BOOLEAN DEFAULT 0,
+                FOREIGN KEY (user_id) REFERENCES users (id)
+            )
+        ''')
+
+        # Sessions table for remember me functionality
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS user_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                session_token TEXT UNIQUE,
+                expires_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users (id)
+            )
+        ''')
+
+        # Feedback table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS feedback (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                user_email TEXT,
+                rating INTEGER,
+                love TEXT,
+                improve TEXT,
+                bugs TEXT,
+                would_pay TEXT,
+                price_point TEXT,
+                submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users (id)
+            )
+        ''')
+
+        print("✅ All SQLite tables created with complete schema")
 
 @app.route('/health')
 def health():
