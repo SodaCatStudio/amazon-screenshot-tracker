@@ -209,13 +209,22 @@ csp = {
 }
 
 # Initialize Talisman for security headers (disable in development)
-if os.environ.get('FLASK_ENV') != 'development':
-    Talisman(app, 
-             force_https=True,
-             strict_transport_security=True,
-             content_security_policy=csp,
-             session_cookie_secure=True,
-             session_cookie_http_only=True)
+if os.environ.get('FLASK_ENV') == 'production':
+    # Railway-friendly Talisman configuration
+    talisman_config = {
+        'force_https': False,  # Railway terminates HTTPS
+        'strict_transport_security': False,  # Railway handles this
+        'content_security_policy': {
+            'default-src': "'self'",
+            'img-src': "'self' data: https:",
+            'script-src': "'self' 'unsafe-inline'",
+            'style-src': "'self' 'unsafe-inline'",
+        },
+        'session_cookie_secure': True,
+        'session_cookie_http_only': True,
+    }
+
+    talisman = Talisman(app, **talisman_config)
 
 if not app.debug:
     # Create logs directory
@@ -2001,7 +2010,7 @@ class AmazonMonitor:
         return achievements
 
 # Initialize components
-#db_manager = DatabaseManager()
+db_manager = DatabaseManager()
 monitor = AmazonMonitor(SCRAPINGBEE_API_KEY)
 
 @app.route('/')
