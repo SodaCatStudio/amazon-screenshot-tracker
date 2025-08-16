@@ -91,6 +91,20 @@ def execute_with_returning(cursor, query, params=None):
             cursor.execute(query)
         return cursor.lastrowid
 
+def check_all_products():
+    print("🔄 Scheduler running...")
+    pass
+
+def run_scheduler():
+    schedule.every(60).minutes.do(check_all_products)
+    while True:
+        schedule.run_pending()
+        time.sleep(60)
+
+# Start scheduler in background
+scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
+scheduler_thread.start()
+
 # Just basic Flask app
 app = Flask(__name__)
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'test-key')
