@@ -54,6 +54,12 @@ SCRAPINGBEE_URL = 'https://app.scrapingbee.com/api/v1/'
 login_manager = LoginManager()
 login_manager.init_app(app)
 
+limiter = Limiter(
+    app=app,
+    key_func=get_remote_address,
+    default_limits=["50 per day", "10 per hour"]
+)
+
 @app.route('/health')
 def health():
     return "OK", 200
