@@ -136,6 +136,20 @@ limiter = Limiter(
 csrf = CSRFProtect()
 csrf.init_app(app)
 
+# Test Talisman security headers
+if os.environ.get('FLASK_ENV') != 'development':
+    csp = {
+        'default-src': ['\'self\''],
+        'img-src': ['\'self\'', 'data:', 'https:', 'blob:'],
+        # ... your CSP config
+    }
+    Talisman(app, 
+             force_https=True,
+             strict_transport_security=True,
+             content_security_policy=csp,
+             session_cookie_secure=True,
+             session_cookie_http_only=True)
+
 class EmailNotifier:
     """Handle all email notifications for the application"""
     def __init__(self):
