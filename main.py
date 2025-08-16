@@ -105,13 +105,13 @@ if not app.secret_key:
     raise ValueError("FLASK_SECRET_KEY must be set in environment variables!")
 
 app.config['WTF_CSRF_ENABLED'] = True
-@app.before_request
-def log_request():
-    print(f"📍 Request: {request.method} {request.path}")
-    if current_user.is_authenticated:
-        print(f"   User: {current_user.email}")
-    else:
-        print("   User: Anonymous")
+#@app.before_request
+#def log_request():
+#    print(f"📍 Request: {request.method} {request.path}")
+#    if current_user.is_authenticated:
+#        print(f"   User: {current_user.email}")
+ #   else:
+#        print("   User: Anonymous")
 
 # Create authentication blueprint for better organization
 auth = Blueprint('auth', __name__)
@@ -237,9 +237,9 @@ if not app.debug:
     app.logger.info('Amazon Bestseller Monitor startup')
 
 @app.route('/health')
-@csrf.exempt  # Exempt from CSRF
 def health_check():
-    return "OK", 200
+    """Ultra-simple health check that can't fail"""
+    return "OK"  # Just return plain text, no templates, no database, nothing
 
 @app.errorhandler(404)
 def bad_request(error):
@@ -3122,7 +3122,9 @@ if __name__ == '__main__':
         app.run(debug=True, host='0.0.0.0', port=port)
 
 if __name__ != '__main__':
-    # When running under gunicorn
+    # For gunicorn
     print("🔧 Configuring app for gunicorn...")
-    # Ensure all initialization happens here too
+    # Don't initialize database here
+else:
+    # For direct Python execution
     db_manager = DatabaseManager()
