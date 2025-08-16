@@ -51,9 +51,11 @@ SENDER_NAME = os.environ.get('SENDER_NAME', 'Amazon Screenshot Tracker')
 SCRAPINGBEE_API_KEY = os.environ.get('SCRAPINGBEE_SECRET_KEY')
 SCRAPINGBEE_URL = 'https://app.scrapingbee.com/api/v1/'
 
+login_manager = LoginManager()
+
 @app.route('/health')
 def health():
-    return "Imports OK", 200
+    return "OK", 200
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
