@@ -60,6 +60,9 @@ limiter = Limiter(
     default_limits=["50 per day", "10 per hour"]
 )
 
+csrf = CSRFProtect()
+csrf.init_app(app)
+
 @app.route('/health')
 def health():
     return "OK", 200
