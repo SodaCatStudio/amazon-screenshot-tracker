@@ -1,12 +1,11 @@
+cat > railway.json << 'EOF'
 {
   "build": {
     "builder": "nixpacks"
   },
   "deploy": {
     "startCommand": "gunicorn main:app --bind 0.0.0.0:$PORT --workers 2 --timeout 120",
-    "healthcheckPath": "/",
-    "healthcheckTimeout": 100,
-    "restartPolicyType": "on-failure",
-    "restartPolicyMaxRetries": 3
+    "healthcheckPath": "/"
   }
 }
+EOF
