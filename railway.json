@@ -1,4 +1,3 @@
-cat > railway.json << 'EOF'
 {
   "build": {
     "builder": "nixpacks"
@@ -8,4 +7,3 @@ cat > railway.json << 'EOF'
     "healthcheckPath": "/"
   }
 }
-EOF
