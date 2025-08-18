@@ -1747,6 +1747,45 @@ def persistence_test():
     except Exception as e:
         return f"Persistence test error: {str(e)}"
 
+@app.route('/debug/basic-env')
+def debug_basic_env():
+    """Check basic environment without database"""
+    try:
+        database_url = os.environ.get('DATABASE_URL')
+        flask_env = os.environ.get('FLASK_ENV')
+
+        # Test if we can import psycopg2
+        try:
+            import psycopg2
+            psycopg2_available = True
+        except ImportError:
+            psycopg2_available = False
+
+        # Test basic database connection without queries
+        connection_test = "Unknown"
+        try:
+            if database_url:
+                import psycopg2
+                conn = psycopg2.connect(database_url)
+                conn.close()
+                connection_test = "SUCCESS"
+            else:
+                connection_test = "NO DATABASE_URL"
+        except Exception as e:
+            connection_test = f"FAILED: {str(e)}"
+
+        return f"""
+        <h2>Basic Environment Check</h2>
+        <p><strong>DATABASE_URL exists:</strong> {'Yes' if database_url else 'No'}</p>
+        <p><strong>DATABASE_URL preview:</strong> {database_url[:50] + '...' if database_url else 'Not set'}</p>
+        <p><strong>FLASK_ENV:</strong> {flask_env}</p>
+        <p><strong>psycopg2 available:</strong> {psycopg2_available}</p>
+        <p><strong>Connection test:</strong> {connection_test}</p>
+        """
+
+    except Exception as e:
+        return f"Basic env check failed: {str(e)}"
+
 @app.route('/debug/db-connection')
 @login_required
 def debug_db_connection():
