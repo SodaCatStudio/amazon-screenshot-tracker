@@ -706,6 +706,10 @@ class APIKeyEncryption:
 # Initialize encryption
 api_encryption = APIKeyEncryption()
 
+def get_db_type():
+    """Determine if using PostgreSQL or SQLite"""
+    return 'postgresql' if os.environ.get('DATABASE_URL') else 'sqlite'
+
 class DatabaseManager:
     def __init__(self):
         # Only initialize if tables don't exist
@@ -732,7 +736,13 @@ class DatabaseManager:
                         AND table_name = 'users'
                     )
                 """)
-                table_exists = cursor.fetchone()[0]
+                result = cursor.fetchone()
+
+                # FIX: Handle RealDictCursor returning dict-like object
+                if isinstance(result, dict):
+                    table_exists = result['exists']
+                else:
+                    table_exists = result[0]
 
                 if not table_exists:
                     print("🔧 Tables don't exist, creating...")
@@ -752,6 +762,11 @@ class DatabaseManager:
                 if not cursor.fetchone():
                     self.create_sqlite_tables(cursor)
                     conn.commit()
+        except Exception as e:
+            print(f"❌ Error in init_db_if_needed: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
         finally:
             conn.close()
 
@@ -759,6 +774,24 @@ class DatabaseManager:
         """Add any missing columns without destroying data"""
         # Only add columns that might be missing
         self.add_column_if_not_exists(cursor, 'users', 'scrapingbee_api_key', 'TEXT')
+
+    def add_column_if_not_exists(self, cursor, table_name, column_name, column_type):
+        """Safely add column if it doesn't exist"""
+        try:
+            cursor.execute(f"""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name = %s AND column_name = %s
+            """, (table_name, column_name))
+
+            result = cursor.fetchone()
+            if not result:
+                cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
+                print(f"✅ Added column {column_name} to {table_name}")
+            else:
+                print(f"✅ Column {column_name} already exists in {table_name}")
+        except Exception as e:
+            print(f"⚠️ Error adding column {column_name}: {e}")
 
     def create_postgresql_tables(self, cursor):
         """Create tables optimized for PostgreSQL"""
