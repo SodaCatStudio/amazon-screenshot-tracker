@@ -711,6 +711,10 @@ class DatabaseManager:
         # Only initialize if tables don't exist
         self.init_db_if_needed()
 
+    def get_db_type(self):
+        """Determine if using PostgreSQL or SQLite"""
+        return 'postgresql' if os.environ.get('DATABASE_URL') else 'sqlite'
+
     def init_db_if_needed(self):
         """Only create tables if they don't exist - preserve data"""
         print(f"🔧 Checking database state...")
@@ -2422,10 +2426,6 @@ def add_product():
         conn.close()
 
     return redirect(url_for('dashboard'))
-
-def get_db_type():
-    """Determine if using PostgreSQL or SQLite"""
-    return 'postgresql' if os.environ.get('DATABASE_URL') else 'sqlite'
 
 # Add a route to view baseline screenshots
 @app.route('/baseline_screenshot/<int:product_id>')
