@@ -1748,7 +1748,39 @@ def login():
 
             # Check password first
             if not check_password_hash(password_hash, password):
-                flash('Invalid email or password', 'error')
+                # Handle failed login attempts
+                failed_attempts = (failed_attempts or 0) + 1
+
+                if get_db_type() == 'postgresql':
+                    cursor.execute('''
+                        UPDATE users 
+                        SET failed_login_attempts = %s, last_failed_login = %s
+                        WHERE id = %s
+                    ''', (failed_attempts, datetime.now(), user_id))
+                else:
+                    cursor.execute('''
+                        UPDATE users 
+                        SET failed_login_attempts = ?, last_failed_login = ?
+                        WHERE id = ?
+                    ''', (failed_attempts, datetime.now(), user_id))
+
+                if failed_attempts >= 5:
+                    locked_until = datetime.now() + timedelta(minutes=30)
+                    if get_db_type() == 'postgresql':
+                        cursor.execute('''
+                            UPDATE users SET account_locked_until = %s
+                            WHERE id = %s
+                        ''', (locked_until, user_id))
+                    else:
+                        cursor.execute('''
+                            UPDATE users SET account_locked_until = ?
+                            WHERE id = ?
+                        ''', (locked_until, user_id))
+                    flash('Too many failed attempts. Account locked for 30 minutes.', 'error')
+                else:
+                    flash('Invalid email or password', 'error')
+
+                conn.commit()
                 conn.close()
                 return render_template('auth/login.html')
 
@@ -1764,7 +1796,7 @@ def login():
                 conn.close()
                 return render_template('auth/login.html')
 
-            # Handle verification - more lenient approach
+            # Handle verification with better UX
             if not is_verified:
                 # If email system is not configured, auto-verify
                 if not email_notifier.is_configured():
@@ -1776,11 +1808,10 @@ def login():
                     conn.commit()
                     is_verified = True
                 else:
-                    # Provide helpful message with resend option
-                    flash('Your email is not verified. Please check your inbox or request a new verification email.', 'warning')
-                    flash('Click <a href="/auth/resend_verification">here</a> to resend verification email.', 'info')
+                    # Don't use HTML in flash messages, redirect with parameter instead
+                    flash('Your email is not verified. Please check your inbox or use the link below to resend.', 'warning')
                     conn.close()
-                    return render_template('auth/login.html')
+                    return redirect(url_for('auth.login', verification_needed=1))
 
             # Successful login
             user = User(user_id, user_email, full_name, is_verified, is_active)
@@ -1803,6 +1834,9 @@ def login():
             conn.commit()
             conn.close()
 
+            # Success message
+            flash(f'Welcome back{", " + full_name if full_name else ""}!', 'success')
+
             next_page = request.args.get('next')
             if next_page and next_page.startswith('/'):
                 return redirect(next_page)
@@ -1813,7 +1847,8 @@ def login():
             import traceback
             traceback.print_exc()
             flash('An error occurred during login. Please try again.', 'error')
-            conn.close()
+            if conn:
+                conn.close()
             return render_template('auth/login.html')
 
     return render_template('auth/login.html')
@@ -2251,7 +2286,7 @@ def debug_db_connection():
 @login_required
 def test_email():
     """Test email configuration"""
-    if current_user.email != 'your-admin-email@gmail.com':  # Replace with your email
+    if current_user.email != 'josh.matern@gmail.com':  # Replace with your email
         return "Unauthorized", 403
 
     try:

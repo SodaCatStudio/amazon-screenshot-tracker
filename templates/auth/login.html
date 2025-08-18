@@ -219,6 +219,30 @@
             border: 1px solid #bee5eb;
         }
 
+        .flash a {
+            color: inherit;
+            font-weight: bold;
+        }
+
+        .verification-help {
+            background-color: #e8f4f8;
+            border: 1px solid #bee5eb;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+
+        .verification-help a {
+            color: #ff9900;
+            text-decoration: none;
+            font-weight: bold;
+        }
+
+        .verification-help a:hover {
+            text-decoration: underline;
+        }
+
         @media (max-width: 480px) {
             .auth-container {
                 padding: 30px 20px;
@@ -237,11 +261,20 @@
             {% if messages %}
                 <div class="flash-messages">
                     {% for category, message in messages %}
-                        <div class="flash {{ category }}">{{ message }}</div>
+                        <div class="flash {{ category }}">{{ message|safe }}</div>
                     {% endfor %}
                 </div>
             {% endif %}
         {% endwith %}
+
+        <!-- Add verification help box if needed -->
+        {% if request.args.get('verification_needed') %}
+        <div class="verification-help">
+            <strong>📧 Email Verification Required</strong><br>
+            Haven't received your verification email?<br>
+            <a href="{{ url_for('auth.resend_verification') }}">Click here to resend verification email</a>
+        </div>
+        {% endif %}
 
         <form method="POST" action="{{ url_for('auth.login') }}" id="loginForm">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -281,11 +314,12 @@
         </form>
 
         <div class="divider">
-            <span>New to the platform?</span>
+            <span>Need help?</span>
         </div>
 
         <div class="register-link">
-            Don't have an account? <a href="{{ url_for('auth.register') }}">Sign up here</a>
+            Don't have an account? <a href="{{ url_for('auth.register') }}">Sign up here</a><br>
+            Need to verify your email? <a href="{{ url_for('auth.resend_verification') }}">Resend verification</a>
         </div>
     </div>
 
