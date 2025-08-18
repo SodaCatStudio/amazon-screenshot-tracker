@@ -728,12 +728,14 @@ class DatabaseManager:
                     SELECT COUNT(*) FROM information_schema.tables 
                     WHERE table_schema = 'public' AND table_name = 'users'
                 """)
-                users_table_exists = cursor.fetchone()[0] > 0
+                result = cursor.fetchone()
+                users_table_exists = bool(result and result[0] > 0)
                 print(f"🔧 Users table already exists: {users_table_exists}")
 
                 if users_table_exists:
                     cursor.execute('SELECT COUNT(*) FROM users')
-                    user_count = cursor.fetchone()[0]
+                    user_result = cursor.fetchone()
+                    user_count = user_result[0] if user_result else 0
                     print(f"🔧 Existing users in database: {user_count}")
 
                 print("🐘 Initializing PostgreSQL tables...")
@@ -744,8 +746,11 @@ class DatabaseManager:
 
             conn.commit()
             print(f"✅ {db_type.title()} database initialized successfully")
+
         except Exception as e:
             print(f"❌ Database initialization failed: {e}")
+            import traceback
+            traceback.print_exc()
             conn.rollback()
             raise
         finally:
