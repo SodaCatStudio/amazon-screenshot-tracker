@@ -1708,32 +1708,44 @@ def debug_products():
         return f"Debug Error: {str(e)}", 500
 
 @app.route('/debug/persistence-test')
-@login_required
+@login_required  
 def persistence_test():
-    conn = get_db()
-    cursor = conn.cursor()
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
 
-    # Create a test table that should persist
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS deployment_test (
-            id SERIAL PRIMARY KEY,
-            deployed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            deployment_count INTEGER DEFAULT 1
-        )
-    ''')
+        # Create test table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS deployment_test (
+                id SERIAL PRIMARY KEY,
+                deployed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                deployment_count INTEGER DEFAULT 1
+            )
+        ''')
 
-    # Increment counter
-    cursor.execute('SELECT COUNT(*) FROM deployment_test')
-    count = cursor.fetchone()[0]
+        # Count existing records
+        cursor.execute('SELECT COUNT(*) FROM deployment_test')
+        count = cursor.fetchone()[0]
 
-    cursor.execute('INSERT INTO deployment_test (deployment_count) VALUES (%s)', (count + 1,))
-    conn.commit()
+        # Add new record
+        cursor.execute('INSERT INTO deployment_test (deployment_count) VALUES (%s)', (count + 1,))
+        conn.commit()
 
-    cursor.execute('SELECT * FROM deployment_test ORDER BY deployed_at DESC LIMIT 5')
-    deployments = cursor.fetchall()
-    conn.close()
+        # Get all records
+        cursor.execute('SELECT * FROM deployment_test ORDER BY deployed_at DESC')
+        deployments = cursor.fetchall()
+        conn.close()
 
-    return f"<h2>Persistence Test</h2><p>Deployments recorded: {len(deployments)}</p><pre>{deployments}</pre>"
+        return f"""
+        <h2>Persistence Test</h2>
+        <p><strong>Total deployments recorded:</strong> {len(deployments)}</p>
+        <p><strong>This should increase with each deployment, not reset to 1</strong></p>
+        <h3>Deployment History:</h3>
+        <ul>{''.join([f'<li>ID: {d[0]}, Count: {d[2]}, Time: {d[1]}</li>' for d in deployments])}</ul>
+        """
+
+    except Exception as e:
+        return f"Persistence test error: {str(e)}"
 
 @app.route('/debug/db-connection')
 @login_required
