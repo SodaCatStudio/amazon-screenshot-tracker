@@ -715,12 +715,27 @@ class DatabaseManager:
         return 'postgresql' if os.environ.get('DATABASE_URL') else 'sqlite'
 
     def init_db(self):
+        print(f"🔧 DatabaseManager.init_db() called")
+        print(f"🔧 Database type: {self.get_db_type()}")
         conn = get_db()
         cursor = conn.cursor()
         db_type = self.get_db_type()
 
         try:
+            # Check if tables already exist BEFORE creating them
             if db_type == 'postgresql':
+                cursor.execute("""
+                    SELECT COUNT(*) FROM information_schema.tables 
+                    WHERE table_schema = 'public' AND table_name = 'users'
+                """)
+                users_table_exists = cursor.fetchone()[0] > 0
+                print(f"🔧 Users table already exists: {users_table_exists}")
+
+                if users_table_exists:
+                    cursor.execute('SELECT COUNT(*) FROM users')
+                    user_count = cursor.fetchone()[0]
+                    print(f"🔧 Existing users in database: {user_count}")
+
                 print("🐘 Initializing PostgreSQL tables...")
                 self.create_postgresql_tables(cursor)
             else:
