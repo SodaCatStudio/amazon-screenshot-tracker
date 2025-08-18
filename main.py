@@ -708,53 +708,53 @@ api_encryption = APIKeyEncryption()
 
 class DatabaseManager:
     def __init__(self):
-        self.init_db()
+        # Only initialize if tables don't exist
+        self.init_db_if_needed()
 
-    def get_db_type(self):
-        """Determine if we're using PostgreSQL or SQLite"""
-        return 'postgresql' if os.environ.get('DATABASE_URL') else 'sqlite'
-
-    def init_db(self):
-        print(f"🔧 DatabaseManager.init_db() called")
-        print(f"🔧 Database type: {self.get_db_type()}")
+    def init_db_if_needed(self):
+        """Only create tables if they don't exist - preserve data"""
+        print(f"🔧 Checking database state...")
         conn = get_db()
         cursor = conn.cursor()
         db_type = self.get_db_type()
 
         try:
-            # Check if tables already exist BEFORE creating them
             if db_type == 'postgresql':
+                # Check if users table exists
                 cursor.execute("""
-                    SELECT COUNT(*) FROM information_schema.tables 
-                    WHERE table_schema = 'public' AND table_name = 'users'
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.tables 
+                        WHERE table_schema = 'public' 
+                        AND table_name = 'users'
+                    )
                 """)
-                result = cursor.fetchone()
-                users_table_exists = bool(result and result[0] > 0)
-                print(f"🔧 Users table already exists: {users_table_exists}")
+                table_exists = cursor.fetchone()[0]
 
-                if users_table_exists:
-                    cursor.execute('SELECT COUNT(*) FROM users')
-                    user_result = cursor.fetchone()
-                    user_count = user_result[0] if user_result else 0
-                    print(f"🔧 Existing users in database: {user_count}")
-
-                print("🐘 Initializing PostgreSQL tables...")
-                self.create_postgresql_tables(cursor)
+                if not table_exists:
+                    print("🔧 Tables don't exist, creating...")
+                    self.create_postgresql_tables(cursor)
+                    conn.commit()
+                else:
+                    print("✅ Tables already exist, preserving data")
+                    # Just ensure all columns exist
+                    self.ensure_columns_exist(cursor)
+                    conn.commit()
             else:
-                print("🗃️ Initializing SQLite tables...")
-                self.create_sqlite_tables(cursor)
-
-            conn.commit()
-            print(f"✅ {db_type.title()} database initialized successfully")
-
-        except Exception as e:
-            print(f"❌ Database initialization failed: {e}")
-            import traceback
-            traceback.print_exc()
-            conn.rollback()
-            raise
+                # SQLite for development
+                cursor.execute("""
+                    SELECT name FROM sqlite_master 
+                    WHERE type='table' AND name='users'
+                """)
+                if not cursor.fetchone():
+                    self.create_sqlite_tables(cursor)
+                    conn.commit()
         finally:
             conn.close()
+
+    def ensure_columns_exist(self, cursor):
+        """Add any missing columns without destroying data"""
+        # Only add columns that might be missing
+        self.add_column_if_not_exists(cursor, 'users', 'scrapingbee_api_key', 'TEXT')
 
     def create_postgresql_tables(self, cursor):
         """Create tables optimized for PostgreSQL"""
@@ -1167,8 +1167,49 @@ class User(UserMixin):
 
 @login_manager.user_loader
 def load_user(user_id):
-    """Load user for Flask-Login"""
-    return User.get(user_id)
+    """Load user ensuring ID is properly set"""
+    conn = get_db()
+    cursor = conn.cursor()
+
+    try:
+        if get_db_type() == 'postgresql':
+            cursor.execute('''
+                SELECT id, email, full_name, is_verified, is_active 
+                FROM users WHERE id = %s
+            ''', (user_id,))
+        else:
+            cursor.execute('''
+                SELECT id, email, full_name, is_verified, is_active 
+                FROM users WHERE id = ?
+            ''', (user_id,))
+
+        user_data = cursor.fetchone()
+
+        if user_data:
+            # Ensure we're creating User with proper ID
+            if get_db_type() == 'postgresql':
+                # PostgreSQL returns dict-like object
+                return User(
+                    id=user_data['id'],
+                    email=user_data['email'],
+                    full_name=user_data['full_name'],
+                    is_verified=bool(user_data['is_verified']),
+                    is_active=bool(user_data['is_active'])
+                )
+            else:
+                # SQLite returns tuple
+                return User(
+                    id=user_data[0],
+                    email=user_data[1],
+                    full_name=user_data[2],
+                    is_verified=bool(user_data[3]),
+                    is_active=bool(user_data[4])
+                )
+    finally:
+        conn.close()
+
+    return None
+
 
 def validate_password(password):
     """Validate password meets security requirements"""
@@ -2277,222 +2318,114 @@ def add_product_form():
 @limiter.limit("2 per minute")
 @login_required
 def add_product():
-    """Add a new product to monitor - ALWAYS captures initial screenshot"""
-    print(f"🔍 ADD_PRODUCT: Starting for user {current_user.email} (ID: {current_user.id})")
+    """Fixed add_product to ensure proper user association"""
+    print(f"🔍 Adding product for user {current_user.email} (ID: {current_user.id})")
 
-    conn = sqlite3.connect('amazon_monitor.db')
+    conn = get_db()
     cursor = conn.cursor()
 
-    # Check if API key exists and user has one
     try:
-        cursor.execute("PRAGMA table_info(users)")
-        user_columns = [column[1] for column in cursor.fetchall()]
+        # Validate API key exists
+        cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = %s', (current_user.id,))
+        result = cursor.fetchone()
 
-        if 'scrapingbee_api_key' in user_columns:
-            cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = ?', (current_user.id,))
-            result = cursor.fetchone()
-
-            if not result or not result[0]:
-                print("❌ No API key found for user")
-                flash('Please add your ScrapingBee API key in settings before adding products.', 'error')
-                conn.close()
-                return redirect(url_for('settings'))
-            else:
-                print(f"✅ Found API key for user {current_user.email}")
-        else:
-            print("❌ API key column doesn't exist")
-            flash('Database migration needed. Please restart the application.', 'error')
+        if not result or not result[0]:
+            flash('Please add your ScrapingBee API key in settings.', 'error')
             conn.close()
-            return redirect(url_for('dashboard'))
+            return redirect(url_for('settings'))
 
-    except Exception as e:
-        print(f"❌ Error checking API key: {e}")
-        flash('Please configure your ScrapingBee API key in settings.', 'error')
-        conn.close()
-        return redirect(url_for('settings'))
+        url = request.form.get('url', '').strip()
 
-    # Get form data
-    url = request.form.get('url', '').strip()
-    target_categories = request.form.get('target_categories', '').strip()
-
-    print(f"📦 Product URL: {url}")
-    print(f"🎯 Target categories: {target_categories}")
-
-    if not url:
-        print("❌ No URL provided")
-        flash('URL is required!', 'error')
-        conn.close()
-        return redirect(url_for('add_product_form'))
-
-    # Validate URL
-    if 'amazon.' not in url.lower():
-        print("❌ Invalid Amazon URL")
-        flash('Please provide a valid Amazon product URL', 'error')
-        conn.close()
-        return redirect(url_for('add_product_form'))
-
-    # Use user's monitor instance
-    try:
-        user_monitor = AmazonMonitor.for_user(current_user.id)
-        print(f"🔧 Created monitor instance for user {current_user.id}")
-    except Exception as e:
-        print(f"❌ Error creating monitor: {e}")
-        flash('Error initializing product monitor. Please check your API key.', 'error')
-        conn.close()
-        return redirect(url_for('settings'))
-
-    try:
-        # Initial scrape to get product info WITH SCREENSHOT
-        print("🔍 Starting initial scrape with screenshot capture...")
-        scrape_result = user_monitor.scrape_amazon_page(url)
-
-        if not scrape_result.get('success'):
-            error_msg = scrape_result.get('error', 'Unknown error')
-            print(f"❌ Scrape failed: {error_msg}")
-
-            # Check for specific error types
-            if '401' in str(error_msg) or 'unauthorized' in str(error_msg).lower():
-                flash('Invalid API key. Please check your ScrapingBee settings.', 'error')
-                conn.close()
-                return redirect(url_for('settings'))
-            elif '429' in str(error_msg) or 'rate limit' in str(error_msg).lower():
-                flash('API rate limit reached. Please try again later.', 'error')
-            else:
-                flash(f'Error accessing product page: {error_msg}', 'error')
-
+        if not url or 'amazon.' not in url.lower():
+            flash('Please provide a valid Amazon product URL', 'error')
             conn.close()
             return redirect(url_for('add_product_form'))
 
-        print("✅ Scrape successful!")
-        print("🔄 Extracting product information...")
+        # Scrape product
+        user_monitor = AmazonMonitor.for_user(current_user.id)
+        scrape_result = user_monitor.scrape_amazon_page(url)
+
+        if not scrape_result.get('success'):
+            flash(f'Error accessing product: {scrape_result.get("error")}', 'error')
+            conn.close()
+            return redirect(url_for('add_product_form'))
 
         product_info = user_monitor.extract_product_info(scrape_result['html'])
-        print(f"📊 Product info extracted: {product_info}")
 
-        # Save to database with user_id
-        print(f"🔍 ADD_PRODUCT: About to save product for user_id={current_user.id}, user_email={current_user.email}")
-        cursor.execute('''
-            INSERT INTO products (user_id, user_email, product_url, product_title, current_rank, 
-                                current_category, is_bestseller, last_checked)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            current_user.id, current_user.email, url, 
-            product_info.get('title', 'Unknown Product'), 
-            product_info.get('rank'),
-            product_info.get('category'), 
-            product_info.get('is_bestseller', False), 
-            datetime.now()
-        ))
-
-        product_id = cursor.lastrowid
-        print(f"✅ Saved product with ID: {product_id}")
-
-        # Process target categories if provided
-        if target_categories:
-            categories = [cat.strip() for cat in target_categories.split(',') if cat.strip()]
-            for category in categories:
-                if ':' in category:
-                    cat_name, target_rank_str = category.split(':', 1)
-                    try:
-                        target_rank = int(target_rank_str.strip())
-                    except ValueError:
-                        target_rank = 1
-                else:
-                    cat_name = category
-                    target_rank = 1
-
-                cursor.execute('''
-                    INSERT INTO target_categories (product_id, category_name, target_rank)
-                    VALUES (?, ?, ?)
-                ''', (product_id, cat_name.strip(), target_rank))
-
-                print(f"🎯 Added target category: {cat_name} (Rank goal: #{target_rank})")
-
-        # Save initial ranking
-        cursor.execute('''
-            INSERT INTO rankings (product_id, rank_number, category, is_bestseller, checked_at)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (
-            product_id, 
-            int(product_info['rank']) if product_info.get('rank') else None,
-            product_info.get('category'), 
-            product_info.get('is_bestseller', False), 
-            datetime.now()
-        ))
-
-        # ALWAYS SAVE INITIAL SCREENSHOT (not just for bestsellers)
-        if scrape_result.get('screenshot'):
-            print("📸 Saving initial baseline screenshot...")
-
-            # Create a new table for baseline screenshots if it doesn't exist
+        # FIX: Use proper insert with RETURNING for PostgreSQL
+        if get_db_type() == 'postgresql':
             cursor.execute('''
-                CREATE TABLE IF NOT EXISTS baseline_screenshots (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    product_id INTEGER UNIQUE,
-                    screenshot_data TEXT,
-                    initial_rank TEXT,
-                    initial_category TEXT,
-                    captured_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (product_id) REFERENCES products (id)
-                )
-            ''')
-
-            # Save baseline screenshot
-            cursor.execute('''
-                INSERT OR REPLACE INTO baseline_screenshots 
-                (product_id, screenshot_data, initial_rank, initial_category, captured_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO products (user_id, user_email, product_url, product_title, 
+                                    current_rank, current_category, is_bestseller, last_checked)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
             ''', (
-                product_id, 
-                scrape_result['screenshot'], 
+                current_user.id, 
+                current_user.email, 
+                url,
+                product_info.get('title', 'Unknown Product'),
                 product_info.get('rank'),
-                product_info.get('category'), 
+                product_info.get('category'),
+                product_info.get('is_bestseller', False),
                 datetime.now()
             ))
-
-            print("✅ Baseline screenshot saved!")
-
-            # If it's ALSO a bestseller on first check, save to bestseller screenshots too
-            if product_info.get('is_bestseller'):
-                print("🏆 Product is already a bestseller! Saving to achievements...")
-                cursor.execute('''
-                    INSERT INTO bestseller_screenshots 
-                    (product_id, screenshot_data, rank_achieved, category, achieved_at)
-                    VALUES (?, ?, ?, ?, ?)
-                ''', (
-                    product_id, 
-                    scrape_result['screenshot'], 
-                    product_info.get('rank'),
-                    product_info.get('category'), 
-                    datetime.now()
-                ))
+            product_id = cursor.fetchone()[0]
         else:
-            print("⚠️ No screenshot data received from ScrapingBee")
+            # SQLite version
+            cursor.execute('''
+                INSERT INTO products (user_id, user_email, product_url, product_title, 
+                                    current_rank, current_category, is_bestseller, last_checked)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                current_user.id, 
+                current_user.email, 
+                url,
+                product_info.get('title', 'Unknown Product'),
+                product_info.get('rank'),
+                product_info.get('category'),
+                product_info.get('is_bestseller', False),
+                datetime.now()
+            ))
+            product_id = cursor.lastrowid
+
+        print(f"✅ Product saved with ID: {product_id} for user_id: {current_user.id}")
+
+        # Save screenshot if available
+        if scrape_result.get('screenshot'):
+            # Save baseline screenshot
+            if get_db_type() == 'postgresql':
+                cursor.execute('''
+                    INSERT INTO baseline_screenshots 
+                    (product_id, screenshot_data, initial_rank, initial_category, captured_at)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (product_id) DO UPDATE SET
+                    screenshot_data = EXCLUDED.screenshot_data,
+                    captured_at = EXCLUDED.captured_at
+                ''', (product_id, scrape_result['screenshot'], product_info.get('rank'),
+                      product_info.get('category'), datetime.now()))
+            else:
+                cursor.execute('''
+                    INSERT OR REPLACE INTO baseline_screenshots 
+                    (product_id, screenshot_data, initial_rank, initial_category, captured_at)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (product_id, scrape_result['screenshot'], product_info.get('rank'),
+                      product_info.get('category'), datetime.now()))
 
         conn.commit()
-        print("🔍 ADD_PRODUCT: Database committed")
-        conn.close()
-
-        # Success message with product title
-        product_title = product_info.get('title', 'Product')
-        if len(product_title) > 50:
-            product_title = product_title[:50] + '...'
-
-        success_msg = f'✅ Successfully added "{product_title}" to monitoring with initial screenshot!'
-        print(success_msg)
-        flash(success_msg, 'success')
-
-        # Redirect to dashboard
-        return redirect(url_for('dashboard'))
+        flash(f'✅ Successfully added "{product_info.get("title", "Product")[:50]}..."', 'success')
 
     except Exception as e:
+        conn.rollback()
+        print(f"❌ Error adding product: {e}")
+        flash('Error adding product. Please try again.', 'error')
+    finally:
         conn.close()
-        error_msg = f'Error adding product: {str(e)}'
-        print(f"💥 {error_msg}")
-        import traceback
-        traceback.print_exc()
-        flash(error_msg, 'error')
-        return redirect(url_for('add_product_form'))
+
+    return redirect(url_for('dashboard'))
+
+def get_db_type():
+    """Determine if using PostgreSQL or SQLite"""
+    return 'postgresql' if os.environ.get('DATABASE_URL') else 'sqlite'
 
 # Add a route to view baseline screenshots
 @app.route('/baseline_screenshot/<int:product_id>')
@@ -2653,105 +2586,85 @@ def dashboard():
     return dashboard_view()
 
 def dashboard_view():
-    """Dashboard view with API key check"""
+    """Fixed dashboard view with proper user product retrieval"""
     try:
-        print(f"🔍 Dashboard called for user: {current_user.is_authenticated}")
-
         if not current_user.is_authenticated:
-            print("❌ User not authenticated in dashboard_view")
             return redirect(url_for('auth.login'))
 
         user_email = current_user.email
         user_id = current_user.id
-        print(f"✅ Processing dashboard for user: {user_email}")
 
-        # Use context manager for database connection
         conn = get_db()
         try:
             cursor = conn.cursor()
 
-            # Check if user has API key
-            has_api_key = False
-            try:
-                cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = %s', (user_id,))
-                result = cursor.fetchone()
-                has_api_key = bool(result and result[0])
-            except Exception as api_check_error:
-                print(f"⚠️ API key check failed: {api_check_error}")
-                has_api_key = False
+            # Check for API key
+            cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = %s', (user_id,))
+            result = cursor.fetchone()
+            has_api_key = bool(result and result[0])
 
-            # Get user's products
-            if hasattr(current_user, 'id'):
-                print(f"🔍 DASHBOARD: Searching for user_id={user_id}, user_email='{user_email}'")
+            # FIX: Use proper parameterized query for PostgreSQL
+            if get_db_type() == 'postgresql':
+                # Get products - ensure we're matching correctly
                 cursor.execute('''
-                    SELECT id, product_title, current_rank, current_category, is_bestseller, 
-                           last_checked, created_at, active
+                    SELECT id, product_title, current_rank, current_category, 
+                           is_bestseller, last_checked, created_at, active
                     FROM products 
-                    WHERE user_id = %s OR user_email = %s
+                    WHERE user_id = %s
                     ORDER BY created_at DESC
-                ''', (user_id, user_email))
+                ''', (user_id,))
             else:
+                # SQLite version
                 cursor.execute('''
-                    SELECT id, product_title, current_rank, current_category, is_bestseller, 
-                           last_checked, created_at, active
+                    SELECT id, product_title, current_rank, current_category, 
+                           is_bestseller, last_checked, created_at, active
                     FROM products 
-                    WHERE user_email = %s
+                    WHERE user_id = ?
                     ORDER BY created_at DESC
-                ''', (user_email,))
-
-            cursor.execute('SELECT id, user_id, user_email, product_title FROM products WHERE user_id = %s', (user_id,))
-            by_id = cursor.fetchall()
-            print(f"🔍 DASHBOARD: Found by user_id: {len(by_id)} products")
-
-            cursor.execute('SELECT id, user_id, user_email, product_title FROM products WHERE user_email = %s', (user_email,))
-            by_email = cursor.fetchall()
-            print(f"🔍 DASHBOARD: Found by email: {len(by_email)} products")
+                ''', (user_id,))
 
             products = cursor.fetchall()
-            # Check what's actually in the database
-            cursor.execute('SELECT id, user_id, user_email, product_title FROM products ORDER BY created_at DESC LIMIT 3')
-            all_recent = cursor.fetchall()
-            print(f"🔍 DASHBOARD: Recent products in DB: {all_recent}")
 
-            # Get bestseller screenshots for user
-            if hasattr(current_user, 'id'):
+            # Debug logging
+            print(f"📊 Found {len(products)} products for user_id={user_id}")
+
+            # Get screenshots with same fix
+            if get_db_type() == 'postgresql':
                 cursor.execute('''
-                    SELECT bs.id, p.product_title, bs.rank_achieved, bs.category, bs.achieved_at
+                    SELECT bs.id, p.product_title, bs.rank_achieved, 
+                           bs.category, bs.achieved_at
                     FROM bestseller_screenshots bs
                     JOIN products p ON bs.product_id = p.id
-                    WHERE p.user_id = %s OR p.user_email = %s
+                    WHERE p.user_id = %s
                     ORDER BY bs.achieved_at DESC
-                ''', (user_id, user_email))
+                ''', (user_id,))
             else:
                 cursor.execute('''
-                    SELECT bs.id, p.product_title, bs.rank_achieved, bs.category, bs.achieved_at
+                    SELECT bs.id, p.product_title, bs.rank_achieved, 
+                           bs.category, bs.achieved_at
                     FROM bestseller_screenshots bs
                     JOIN products p ON bs.product_id = p.id
-                    WHERE p.user_email = %s
+                    WHERE p.user_id = ?
                     ORDER BY bs.achieved_at DESC
-                ''', (user_email,))
+                ''', (user_id,))
 
             screenshots = cursor.fetchall()
-            print(f"🔍 DASHBOARD: Found {len(screenshots)} screenshots for user")
 
-            return render_template('dashboard.html', 
-                 email=user_email,
-                 products=products, 
-                 screenshots=screenshots,
-                 has_api_key=has_api_key)
-
+            return render_template('dashboard.html',
+                                 email=user_email,
+                                 products=products,
+                                 screenshots=screenshots,
+                                 has_api_key=has_api_key)
         finally:
-            # Always close database connection
             conn.close()
 
     except Exception as e:
         print(f"❌ Dashboard error: {e}")
         import traceback
         traceback.print_exc()
-
-        # Return a simple error page instead of crashing
         flash('Dashboard temporarily unavailable. Please try again.', 'error')
         return render_template('landing.html')
+
 
 # Settings page route
 @app.route('/settings')
@@ -3315,9 +3228,11 @@ scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
 scheduler_thread.start()
 
 if __name__ == '__main__':
+    # Only initialize DB if not in production with existing data
+    db_manager = DatabaseManager()
     # Get port from environment (Railway sets this automatically)
     port = int(os.environ.get('PORT', 5000))
-
+    is_production = os.environ.get('RAILWAY_ENVIRONMENT') is not None
     print("🚀 Starting Amazon Bestseller Monitor...")
 
     # Check database connection
@@ -3346,10 +3261,8 @@ if __name__ == '__main__':
 
     # Start the application
     if is_production:
-        # Let gunicorn handle this in production
         app.run(debug=False, host='0.0.0.0', port=port)
     else:
-        # Development mode
         app.run(debug=True, host='0.0.0.0', port=port)
 
 if __name__ != '__main__':
