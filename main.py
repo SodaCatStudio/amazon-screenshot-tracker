@@ -245,6 +245,197 @@ if not app.debug:
     app.logger.setLevel(logging.INFO)
     app.logger.info('Amazon Bestseller Monitor startup')
 
+@app.route('/admin/test_email_config')
+@login_required
+def test_email_config():
+    """Test and diagnose email configuration"""
+    # Security check
+    ADMIN_EMAILS = ['amazonscreenshottracker@gmail.com']
+    if current_user.email not in ADMIN_EMAILS:
+        return "Unauthorized", 403
+
+    diagnostics = []
+
+    # Check environment variables
+    diagnostics.append(f"SMTP_SERVER: {SMTP_SERVER or 'NOT SET'}")
+    diagnostics.append(f"SMTP_PORT: {SMTP_PORT or 'NOT SET'}")
+    diagnostics.append(f"SMTP_USERNAME: {'SET' if SMTP_USERNAME else 'NOT SET'}")
+    diagnostics.append(f"SMTP_PASSWORD: {'SET' if SMTP_PASSWORD else 'NOT SET'}")
+    diagnostics.append(f"SENDER_EMAIL: {SENDER_EMAIL or 'NOT SET'}")
+    diagnostics.append(f"Email configured: {email_notifier.is_configured()}")
+
+    # Try to send a test email
+    if email_notifier.is_configured():
+        try:
+            import smtplib
+            import socket
+
+            # Test connection
+            diagnostics.append("\nTesting SMTP connection...")
+
+            socket.setdefaulttimeout(10)
+            server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=10)
+            server.starttls()
+            server.login(SMTP_USERNAME, SMTP_PASSWORD)
+            server.quit()
+
+            diagnostics.append("✅ SMTP connection successful!")
+
+            # Try sending test email
+            test_html = """
+            <html>
+                <body>
+                    <h2>Test Email</h2>
+                    <p>This is a test email from your Amazon Screenshot Tracker.</p>
+                    <p>If you received this, your email configuration is working!</p>
+                </body>
+            </html>
+            """
+
+            result = email_notifier.send_email(
+                current_user.email,
+                "Test Email - Amazon Screenshot Tracker",
+                test_html
+            )
+
+            if result:
+                diagnostics.append(f"✅ Test email sent to {current_user.email}")
+            else:
+                diagnostics.append(f"❌ Failed to send test email")
+
+        except Exception as e:
+            diagnostics.append(f"❌ Error: {str(e)}")
+            import traceback
+            diagnostics.append(f"Traceback: {traceback.format_exc()}")
+    else:
+        diagnostics.append("❌ Email system not configured")
+
+    return "<pre>" + "\n".join(diagnostics) + "</pre>"
+
+@app.route('/admin/manual_verify', methods=['GET', 'POST'])
+@login_required
+def manual_verify():
+    """Manual verification page for admin"""
+    ADMIN_EMAILS = ['amazonscreenshottracker@gmail.com']
+    if current_user.email not in ADMIN_EMAILS:
+        return "Unauthorized", 403
+
+    if request.method == 'POST':
+        email = request.form.get('email')
+
+        conn = get_db()
+        cursor = conn.cursor()
+
+        try:
+            if get_db_type() == 'postgresql':
+                cursor.execute('''
+                    UPDATE users SET is_verified = true 
+                    WHERE LOWER(email) = LOWER(%s)
+                ''', (email,))
+            else:
+                cursor.execute('''
+                    UPDATE users SET is_verified = 1 
+                    WHERE LOWER(email) = LOWER(?)
+                ''', (email,))
+
+            if cursor.rowcount > 0:
+                conn.commit()
+                flash(f'User {email} verified successfully!', 'success')
+            else:
+                flash(f'User {email} not found', 'error')
+
+            conn.close()
+        except Exception as e:
+            conn.close()
+            flash(f'Error: {str(e)}', 'error')
+
+    # Get list of unverified users
+    conn = get_db()
+    cursor = conn.cursor()
+
+    if get_db_type() == 'postgresql':
+        cursor.execute('''
+            SELECT email, created_at 
+            FROM users 
+            WHERE is_verified = false 
+            ORDER BY created_at DESC
+        ''')
+    else:
+        cursor.execute('''
+            SELECT email, created_at 
+            FROM users 
+            WHERE is_verified = 0 
+            ORDER BY created_at DESC
+        ''')
+
+    unverified_users = cursor.fetchall()
+    conn.close()
+
+    html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Manual User Verification</title>
+        <style>
+            body { font-family: Arial, sans-serif; padding: 20px; }
+            .container { max-width: 800px; margin: 0 auto; }
+            .user-list { background: #f5f5f5; padding: 20px; border-radius: 8px; }
+            .user-item { background: white; padding: 10px; margin: 10px 0; border-radius: 5px; }
+            .btn { background: #ff9900; color: white; padding: 8px 16px; border: none; border-radius: 5px; cursor: pointer; }
+            .btn:hover { background: #e88b00; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>Manual User Verification</h1>
+            <p>Admin tool to manually verify users when email system is not working.</p>
+
+            <h2>Verify by Email</h2>
+            <form method="POST">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <input type="email" name="email" placeholder="user@email.com" required>
+                <button type="submit" class="btn">Verify User</button>
+            </form>
+
+            <h2>Unverified Users</h2>
+            <div class="user-list">
+    """
+
+    if unverified_users:
+        for user in unverified_users:
+            if isinstance(user, dict):
+                email = user['email']
+                created = user['created_at']
+            else:
+                email = user[0]
+                created = user[1]
+
+            html += f"""
+                <div class="user-item">
+                    <strong>{email}</strong> - Created: {created}
+                    <form method="POST" style="display: inline;">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <input type="hidden" name="email" value="{email}">
+                        <button type="submit" class="btn">Verify</button>
+                    </form>
+                </div>
+            """
+    else:
+        html += "<p>No unverified users found.</p>"
+
+    html += """
+            </div>
+
+            <h2>Quick Actions</h2>
+            <p><a href="/admin/auto_verify_all" class="btn" onclick="return confirm('Verify ALL unverified users?')">Verify All Users</a></p>
+            <p><a href="/admin/test_email_config" class="btn">Test Email Configuration</a></p>
+        </div>
+    </body>
+    </html>
+    """
+
+    return render_template_string(html)
+
 @app.route('/health')
 def health_check():
     """Ultra-simple health check that can't fail"""
@@ -1494,16 +1685,13 @@ def register():
 
 @auth.route('/login', methods=['GET', 'POST'])
 def login():
-    """User login with security measures - FIXED for PostgreSQL compatibility"""
-    # If already authenticated, go to dashboard
+    """User login with improved verification handling"""
     if current_user.is_authenticated:
         return redirect(url_for('dashboard'))
 
-    # For GET requests, just show the login form
     if request.method == 'GET':
         return render_template('auth/login.html')
 
-    # Handle POST (login attempt)
     if request.method == 'POST':
         email = request.form.get('email', '').strip().lower()
         password = request.form.get('password', '')
@@ -1521,64 +1709,24 @@ def login():
             if get_db_type() == 'postgresql':
                 cursor.execute('''
                     SELECT id, password_hash, is_verified, is_active, full_name,
-                           failed_login_attempts, account_locked_until
+                           failed_login_attempts, account_locked_until, email
                     FROM users WHERE LOWER(email) = LOWER(%s)
                 ''', (email,))
             else:
                 cursor.execute('''
                     SELECT id, password_hash, is_verified, is_active, full_name,
-                           failed_login_attempts, account_locked_until
+                           failed_login_attempts, account_locked_until, email
                     FROM users WHERE LOWER(email) = LOWER(?)
                 ''', (email,))
 
             user_data = cursor.fetchone()
 
-            # Log login attempt
-            if user_data:
-                # Handle both dict and tuple responses
-                if isinstance(user_data, dict):
-                    user_id = user_data['id']
-                else:
-                    user_id = user_data[0]
-            else:
-                user_id = None
-
-            # Insert login history
-            if get_db_type() == 'postgresql':
-                cursor.execute('''
-                    INSERT INTO login_history (user_id, ip_address, user_agent, success)
-                    VALUES (%s, %s, %s, %s)
-                    RETURNING id
-                ''', (
-                    user_id,
-                    request.remote_addr,
-                    request.headers.get('User-Agent', '')[:200],
-                    False  # Will update if successful
-                ))
-                result = cursor.fetchone()
-                if result:
-                    login_history_id = result['id'] if isinstance(result, dict) else result[0]
-                else:
-                    login_history_id = None
-            else:
-                cursor.execute('''
-                    INSERT INTO login_history (user_id, ip_address, user_agent, success)
-                    VALUES (?, ?, ?, ?)
-                ''', (
-                    user_id,
-                    request.remote_addr,
-                    request.headers.get('User-Agent', '')[:200],
-                    False
-                ))
-                login_history_id = cursor.lastrowid
-
             if not user_data:
                 flash('Invalid email or password', 'error')
-                conn.commit()
                 conn.close()
                 return render_template('auth/login.html')
 
-            # Extract user data based on type (dict or tuple)
+            # Extract user data
             if isinstance(user_data, dict):
                 user_id = user_data['id']
                 password_hash = user_data['password_hash']
@@ -1587,6 +1735,7 @@ def login():
                 full_name = user_data['full_name']
                 failed_attempts = user_data['failed_login_attempts']
                 locked_until = user_data['account_locked_until']
+                user_email = user_data['email']
             else:
                 user_id = user_data[0]
                 password_hash = user_data[1]
@@ -1595,69 +1744,46 @@ def login():
                 full_name = user_data[4]
                 failed_attempts = user_data[5]
                 locked_until = user_data[6]
+                user_email = user_data[7] if len(user_data) > 7 else email
+
+            # Check password first
+            if not check_password_hash(password_hash, password):
+                flash('Invalid email or password', 'error')
+                conn.close()
+                return render_template('auth/login.html')
 
             # Check if account is locked
             if locked_until and datetime.now() < datetime.fromisoformat(locked_until):
                 flash('Account is temporarily locked due to too many failed attempts', 'error')
-                conn.commit()
                 conn.close()
                 return render_template('auth/login.html')
 
             # Check if account is active
             if not is_active:
                 flash('This account has been deactivated. Please contact support.', 'error')
-                conn.commit()
                 conn.close()
                 return render_template('auth/login.html')
 
-            # Verify password
-            if not check_password_hash(password_hash, password):
-                # Increment failed attempts
-                failed_attempts = (failed_attempts or 0) + 1
-
-                if get_db_type() == 'postgresql':
-                    cursor.execute('''
-                        UPDATE users 
-                        SET failed_login_attempts = %s, last_failed_login = %s
-                        WHERE id = %s
-                    ''', (failed_attempts, datetime.now(), user_id))
-                else:
-                    cursor.execute('''
-                        UPDATE users 
-                        SET failed_login_attempts = ?, last_failed_login = ?
-                        WHERE id = ?
-                    ''', (failed_attempts, datetime.now(), user_id))
-
-                # Lock account after 5 failed attempts
-                if failed_attempts >= 5:
-                    locked_until = datetime.now() + timedelta(minutes=30)
+            # Handle verification - more lenient approach
+            if not is_verified:
+                # If email system is not configured, auto-verify
+                if not email_notifier.is_configured():
+                    print(f"⚠️ Email not configured, auto-verifying user {email}")
                     if get_db_type() == 'postgresql':
-                        cursor.execute('''
-                            UPDATE users SET account_locked_until = %s
-                            WHERE id = %s
-                        ''', (locked_until, user_id))
+                        cursor.execute('UPDATE users SET is_verified = true WHERE id = %s', (user_id,))
                     else:
-                        cursor.execute('''
-                            UPDATE users SET account_locked_until = ?
-                            WHERE id = ?
-                        ''', (locked_until, user_id))
-                    flash('Too many failed attempts. Account locked for 30 minutes.', 'error')
+                        cursor.execute('UPDATE users SET is_verified = 1 WHERE id = ?', (user_id,))
+                    conn.commit()
+                    is_verified = True
                 else:
-                    flash('Invalid email or password', 'error')
-
-                conn.commit()
-                conn.close()
-                return render_template('auth/login.html')
-
-            # Check if email is verified (optional)
-            if not is_verified and email_notifier.is_configured():
-                flash('Please verify your email before logging in. Check your inbox for the verification link.', 'warning')
-                conn.commit()
-                conn.close()
-                return render_template('auth/login.html')
+                    # Provide helpful message with resend option
+                    flash('Your email is not verified. Please check your inbox or request a new verification email.', 'warning')
+                    flash('Click <a href="/auth/resend_verification">here</a> to resend verification email.', 'info')
+                    conn.close()
+                    return render_template('auth/login.html')
 
             # Successful login
-            user = User(user_id, email, full_name, is_verified, is_active)
+            user = User(user_id, user_email, full_name, is_verified, is_active)
             login_user(user, remember=remember)
 
             # Update successful login
@@ -1667,11 +1793,6 @@ def login():
                     SET last_login = %s, failed_login_attempts = 0, account_locked_until = NULL
                     WHERE id = %s
                 ''', (datetime.now(), user_id))
-
-                if login_history_id:
-                    cursor.execute('''
-                        UPDATE login_history SET success = true WHERE id = %s
-                    ''', (login_history_id,))
             else:
                 cursor.execute('''
                     UPDATE users 
@@ -1679,17 +1800,11 @@ def login():
                     WHERE id = ?
                 ''', (datetime.now(), user_id))
 
-                if login_history_id:
-                    cursor.execute('''
-                        UPDATE login_history SET success = 1 WHERE id = ?
-                    ''', (login_history_id,))
-
             conn.commit()
             conn.close()
 
-            # Redirect to next page or dashboard
             next_page = request.args.get('next')
-            if next_page and next_page.startswith('/'):  # Prevent open redirect
+            if next_page and next_page.startswith('/'):
                 return redirect(next_page)
             return redirect(url_for('dashboard'))
 
@@ -1701,7 +1816,6 @@ def login():
             conn.close()
             return render_template('auth/login.html')
 
-    # Should never reach here, but just in case
     return render_template('auth/login.html')
 
 # Add a simple test route first
@@ -1881,6 +1995,89 @@ def verify_email():
         conn.close()
 
     return redirect(url_for('auth.login'))
+
+@auth.route('/resend_verification', methods=['GET', 'POST'])
+def resend_verification():
+    """Resend verification email"""
+    if request.method == 'POST':
+        email = request.form.get('email', '').strip().lower()
+
+        if not email:
+            flash('Please enter your email address', 'error')
+            return render_template('auth/resend_verification.html')
+
+        conn = get_db()
+        cursor = conn.cursor()
+
+        try:
+            # Get user info
+            if get_db_type() == 'postgresql':
+                cursor.execute('''
+                    SELECT id, is_verified FROM users 
+                    WHERE LOWER(email) = LOWER(%s)
+                ''', (email,))
+            else:
+                cursor.execute('''
+                    SELECT id, is_verified FROM users 
+                    WHERE LOWER(email) = LOWER(?)
+                ''', (email,))
+
+            user_data = cursor.fetchone()
+
+            if not user_data:
+                # Don't reveal if email exists
+                flash('If an account exists with this email, a verification link will be sent.', 'info')
+                conn.close()
+                return redirect(url_for('auth.login'))
+
+            if isinstance(user_data, dict):
+                user_id = user_data['id']
+                is_verified = user_data['is_verified']
+            else:
+                user_id = user_data[0]
+                is_verified = user_data[1]
+
+            if is_verified:
+                flash('This email is already verified. You can log in.', 'info')
+                conn.close()
+                return redirect(url_for('auth.login'))
+
+            # Generate new verification token
+            verification_token = secrets.token_urlsafe(32)
+            token_expiry = datetime.now() + timedelta(hours=24)
+
+            # Update user with new token
+            if get_db_type() == 'postgresql':
+                cursor.execute('''
+                    UPDATE users 
+                    SET verification_token = %s, verification_token_expiry = %s
+                    WHERE id = %s
+                ''', (verification_token, token_expiry, user_id))
+            else:
+                cursor.execute('''
+                    UPDATE users 
+                    SET verification_token = ?, verification_token_expiry = ?
+                    WHERE id = ?
+                ''', (verification_token, token_expiry, user_id))
+
+            conn.commit()
+
+            # Send verification email
+            if email_notifier.is_configured():
+                email_notifier.send_verification_email_async(email, verification_token)
+                flash('Verification email sent! Please check your inbox.', 'success')
+            else:
+                flash('Email system not configured. Contact support for manual verification.', 'warning')
+
+            conn.close()
+            return redirect(url_for('auth.login'))
+
+        except Exception as e:
+            print(f"Error resending verification: {e}")
+            flash('Error sending verification email. Please try again.', 'error')
+            conn.close()
+
+    return render_template('auth/resend_verification.html')
 
 @app.route('/debug/products')
 @login_required
