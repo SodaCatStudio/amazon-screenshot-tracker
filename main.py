@@ -273,7 +273,7 @@ def csrf_test_post():
     return "CSRF token validated successfully!"
 
 class EmailNotifier:
-    """Handle all email notifications for the application"""
+    """Handle all email notifications for the application with timeout protection"""
     def __init__(self):
         self.smtp_server = SMTP_SERVER
         self.smtp_port = SMTP_PORT
@@ -281,13 +281,14 @@ class EmailNotifier:
         self.password = SMTP_PASSWORD
         self.sender_email = SENDER_EMAIL
         self.sender_name = SENDER_NAME
+        self.timeout = 10  # 10 second timeout for SMTP operations
 
     def is_configured(self):
         """Check if email settings are configured"""
         return all([self.smtp_server, self.username, self.password])
 
     def send_email(self, recipient, subject, html_content, attachments=None):
-        """Generic email sending method"""
+        """Generic email sending method with timeout protection"""
         if not self.is_configured():
             print("❌ Email settings not configured")
             return False
@@ -306,24 +307,48 @@ class EmailNotifier:
                 for attachment in attachments:
                     msg.attach(attachment)
 
-            # Send email
-            with smtplib.SMTP(self.smtp_server, self.smtp_port) as server:
-                server.starttls()
-                try:
+            # Send email with timeout
+            import socket
+            original_timeout = socket.getdefaulttimeout()
+            socket.setdefaulttimeout(self.timeout)
+
+            try:
+                with smtplib.SMTP(self.smtp_server, self.smtp_port, timeout=self.timeout) as server:
+                    server.starttls()
                     if not self.username or not self.password:
                         raise ValueError("SMTP username or password is not configured")
                     server.login(self.username, self.password)
-                except Exception as e:
-                    print("❌ Could not login to email server:", str(e))
-                    return False
-                server.send_message(msg)
+                    server.send_message(msg)
 
-            print(f"✅ Email sent successfully to {recipient}")
-            return True
+                print(f"✅ Email sent successfully to {recipient}")
+                return True
 
+            finally:
+                socket.setdefaulttimeout(original_timeout)
+
+        except smtplib.SMTPServerDisconnected:
+            print(f"❌ SMTP server disconnected while sending to {recipient}")
+            return False
+        except smtplib.SMTPConnectError:
+            print(f"❌ Could not connect to SMTP server")
+            return False
+        except socket.timeout:
+            print(f"❌ Email sending timed out after {self.timeout} seconds")
+            return False
         except Exception as e:
             print(f"❌ Failed to send email: {e}")
             return False
+
+    def send_verification_email_async(self, email, token):
+        """Send verification email in background thread"""
+        import threading
+
+        def _send():
+            self.send_verification_email(email, token)
+
+        thread = threading.Thread(target=_send, daemon=True)
+        thread.start()
+        return True  # Return immediately
 
     def send_verification_email(self, email, token):
         """Send email verification link"""
