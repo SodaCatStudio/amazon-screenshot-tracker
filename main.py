@@ -1530,7 +1530,11 @@ def login():
                     request.headers.get('User-Agent', '')[:200],
                     False  # Will update if successful
                 ))
-                login_history_id = cursor.fetchone()['id'] if isinstance(cursor.fetchone(), dict) else cursor.lastrowid
+                result = cursor.fetchone()
+                if result:
+                    login_history_id = result['id'] if isinstance(result, dict) else result[0]
+                else:
+                    login_history_id = None
             else:
                 cursor.execute('''
                     INSERT INTO login_history (user_id, ip_address, user_agent, success)
@@ -1639,9 +1643,10 @@ def login():
                     WHERE id = %s
                 ''', (datetime.now(), user_id))
 
-                cursor.execute('''
-                    UPDATE login_history SET success = true WHERE id = %s
-                ''', (login_history_id,))
+                if login_history_id:
+                    cursor.execute('''
+                        UPDATE login_history SET success = true WHERE id = %s
+                    ''', (login_history_id,))
             else:
                 cursor.execute('''
                     UPDATE users 
@@ -1649,9 +1654,10 @@ def login():
                     WHERE id = ?
                 ''', (datetime.now(), user_id))
 
-                cursor.execute('''
-                    UPDATE login_history SET success = 1 WHERE id = ?
-                ''', (login_history_id,))
+                if login_history_id:
+                    cursor.execute('''
+                        UPDATE login_history SET success = 1 WHERE id = ?
+                    ''', (login_history_id,))
 
             conn.commit()
             conn.close()
