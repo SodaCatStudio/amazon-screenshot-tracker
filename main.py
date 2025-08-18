@@ -1707,6 +1707,76 @@ def debug_products():
     except Exception as e:
         return f"Debug Error: {str(e)}", 500
 
+@app.route('/debug/persistence-test')
+@login_required
+def persistence_test():
+    conn = get_db()
+    cursor = conn.cursor()
+
+    # Create a test table that should persist
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS deployment_test (
+            id SERIAL PRIMARY KEY,
+            deployed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            deployment_count INTEGER DEFAULT 1
+        )
+    ''')
+
+    # Increment counter
+    cursor.execute('SELECT COUNT(*) FROM deployment_test')
+    count = cursor.fetchone()[0]
+
+    cursor.execute('INSERT INTO deployment_test (deployment_count) VALUES (%s)', (count + 1,))
+    conn.commit()
+
+    cursor.execute('SELECT * FROM deployment_test ORDER BY deployed_at DESC LIMIT 5')
+    deployments = cursor.fetchall()
+    conn.close()
+
+    return f"<h2>Persistence Test</h2><p>Deployments recorded: {len(deployments)}</p><pre>{deployments}</pre>"
+
+@app.route('/debug/db-connection')
+@login_required
+def debug_db_connection():
+    database_url = os.environ.get('DATABASE_URL', 'NOT SET')
+
+    # Check if it's really PostgreSQL
+    is_postgresql = 'postgresql' in database_url.lower()
+
+    if is_postgresql:
+        try:
+            conn = get_db()
+            cursor = conn.cursor()
+
+            # Get PostgreSQL version and database name
+            cursor.execute('SELECT version(), current_database()')
+            db_info = cursor.fetchone()
+
+            # Check if tables exist
+            cursor.execute("""
+                SELECT table_name 
+                FROM information_schema.tables 
+                WHERE table_schema = 'public'
+                ORDER BY table_name
+            """)
+            tables = cursor.fetchall()
+
+            conn.close()
+
+            return f"""
+            <h2>Database Connection Debug</h2>
+            <p><strong>Database URL:</strong> {database_url[:50]}...</p>
+            <p><strong>PostgreSQL:</strong> {is_postgresql}</p>
+            <p><strong>Version:</strong> {db_info[0][:100] if db_info else 'Unknown'}</p>
+            <p><strong>Database:</strong> {db_info[1] if db_info else 'Unknown'}</p>
+            <p><strong>Tables:</strong> {[t[0] for t in tables]}</p>
+            """
+
+        except Exception as e:
+            return f"Database error: {str(e)}"
+    else:
+        return f"Using SQLite (not PostgreSQL): {database_url}"
+
 @app.route('/test-email')
 @login_required
 def test_email():
@@ -2541,6 +2611,7 @@ def dashboard_view():
 
             # Get user's products
             if hasattr(current_user, 'id'):
+                print(f"🔍 DASHBOARD: Searching for user_id={user_id}, user_email='{user_email}'")
                 cursor.execute('''
                     SELECT id, product_title, current_rank, current_category, is_bestseller, 
                            last_checked, created_at, active
@@ -2557,10 +2628,19 @@ def dashboard_view():
                     ORDER BY created_at DESC
                 ''', (user_email,))
 
+            cursor.execute('SELECT id, user_id, user_email, product_title FROM products WHERE user_id = %s', (user_id,))
+            by_id = cursor.fetchall()
+            print(f"🔍 DASHBOARD: Found by user_id: {len(by_id)} products")
+
+            cursor.execute('SELECT id, user_id, user_email, product_title FROM products WHERE user_email = %s', (user_email,))
+            by_email = cursor.fetchall()
+            print(f"🔍 DASHBOARD: Found by email: {len(by_email)} products")
+
             products = cursor.fetchall()
-            print(f"🔍 DASHBOARD: Found {len(products)} products for user")
-            for i, product in enumerate(products[:3]):  # Log first 3 products
-                print(f"🔍 DASHBOARD: Product {i}: {product}")
+            # Check what's actually in the database
+            cursor.execute('SELECT id, user_id, user_email, product_title FROM products ORDER BY created_at DESC LIMIT 3')
+            all_recent = cursor.fetchall()
+            print(f"🔍 DASHBOARD: Recent products in DB: {all_recent}")
 
             # Get bestseller screenshots for user
             if hasattr(current_user, 'id'):
