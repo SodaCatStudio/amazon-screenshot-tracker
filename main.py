@@ -1204,7 +1204,7 @@ class User(UserMixin):
 
 @login_manager.user_loader
 def load_user(user_id):
-    """Load user ensuring ID is properly set"""
+    """Load user ensuring ID is properly set - FIXED for PostgreSQL"""
     conn = get_db()
     cursor = conn.cursor()
 
@@ -1223,9 +1223,8 @@ def load_user(user_id):
         user_data = cursor.fetchone()
 
         if user_data:
-            # Ensure we're creating User with proper ID
-            if get_db_type() == 'postgresql':
-                # PostgreSQL returns dict-like object
+            # Handle both dict and tuple responses
+            if isinstance(user_data, dict):
                 return User(
                     id=user_data['id'],
                     email=user_data['email'],
@@ -1234,7 +1233,6 @@ def load_user(user_id):
                     is_active=bool(user_data['is_active'])
                 )
             else:
-                # SQLite returns tuple
                 return User(
                     id=user_data[0],
                     email=user_data[1],
@@ -1367,7 +1365,7 @@ def create_enhanced_user_tables():
 # Authentication routes with best practices
 @auth.route('/register', methods=['GET', 'POST'])
 def register():
-    """User registration with validation"""
+    """User registration with validation - FIXED for PostgreSQL"""
     if current_user.is_authenticated:
         return redirect(url_for('dashboard'))
 
@@ -1394,12 +1392,16 @@ def register():
                 flash(error, 'error')
             return render_template('auth/register.html', email=email, full_name=full_name)
 
-        conn = sqlite3.connect('amazon_monitor.db')
+        conn = get_db()
         cursor = conn.cursor()
 
         try:
             # Check if user exists
-            cursor.execute('SELECT id FROM users WHERE LOWER(email) = LOWER(?)', (email,))
+            if get_db_type() == 'postgresql':
+                cursor.execute('SELECT id FROM users WHERE LOWER(email) = LOWER(%s)', (email,))
+            else:
+                cursor.execute('SELECT id FROM users WHERE LOWER(email) = LOWER(?)', (email,))
+
             if cursor.fetchone():
                 flash('An account with this email already exists', 'error')
                 return render_template('auth/register.html')
@@ -1409,18 +1411,33 @@ def register():
             verification_token = secrets.token_urlsafe(32)
             token_expiry = datetime.now() + timedelta(hours=24)
 
-            cursor.execute('''
-                INSERT INTO users (email, password_hash, full_name, verification_token, verification_token_expiry)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (email, password_hash, full_name, verification_token, token_expiry))
+            if get_db_type() == 'postgresql':
+                cursor.execute('''
+                    INSERT INTO users (email, password_hash, full_name, verification_token, verification_token_expiry)
+                    VALUES (%s, %s, %s, %s, %s)
+                    RETURNING id
+                ''', (email, password_hash, full_name, verification_token, token_expiry))
 
-            user_id = cursor.lastrowid
+                result = cursor.fetchone()
+                user_id = result['id'] if isinstance(result, dict) else result[0]
+            else:
+                cursor.execute('''
+                    INSERT INTO users (email, password_hash, full_name, verification_token, verification_token_expiry)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (email, password_hash, full_name, verification_token, token_expiry))
+                user_id = cursor.lastrowid
 
             # Store verification token
-            cursor.execute('''
-                INSERT INTO email_verifications (user_id, token)
-                VALUES (?, ?)
-            ''', (user_id, verification_token))
+            if get_db_type() == 'postgresql':
+                cursor.execute('''
+                    INSERT INTO email_verifications (user_id, token)
+                    VALUES (%s, %s)
+                ''', (user_id, verification_token))
+            else:
+                cursor.execute('''
+                    INSERT INTO email_verifications (user_id, token)
+                    VALUES (?, ?)
+                ''', (user_id, verification_token))
 
             conn.commit()
 
@@ -1430,7 +1447,10 @@ def register():
                 flash('Registration successful! Please check your email to verify your account.', 'success')
             else:
                 # For development without email
-                cursor.execute('UPDATE users SET is_verified = 1 WHERE id = ?', (user_id,))
+                if get_db_type() == 'postgresql':
+                    cursor.execute('UPDATE users SET is_verified = true WHERE id = %s', (user_id,))
+                else:
+                    cursor.execute('UPDATE users SET is_verified = 1 WHERE id = ?', (user_id,))
                 conn.commit()
                 flash('Registration successful! You can now log in.', 'success')
 
@@ -1439,6 +1459,8 @@ def register():
         except Exception as e:
             conn.rollback()
             print(f"Registration error: {e}")
+            import traceback
+            traceback.print_exc()
             flash('An error occurred during registration. Please try again.', 'error')
         finally:
             conn.close()
@@ -1447,7 +1469,7 @@ def register():
 
 @auth.route('/login', methods=['GET', 'POST'])
 def login():
-    """User login with security measures - FIXED to prevent redirect loops"""
+    """User login with security measures - FIXED for PostgreSQL compatibility"""
     # If already authenticated, go to dashboard
     if current_user.is_authenticated:
         return redirect(url_for('dashboard'))
@@ -1466,31 +1488,60 @@ def login():
             flash('Please enter both email and password', 'error')
             return render_template('auth/login.html')
 
-        conn = sqlite3.connect('amazon_monitor.db')
+        conn = get_db()
         cursor = conn.cursor()
 
         try:
             # Get user with security checks
-            cursor.execute('''
-                SELECT id, password_hash, is_verified, is_active, full_name,
-                       failed_login_attempts, account_locked_until
-                FROM users WHERE LOWER(email) = LOWER(?)
-            ''', (email,))
+            if get_db_type() == 'postgresql':
+                cursor.execute('''
+                    SELECT id, password_hash, is_verified, is_active, full_name,
+                           failed_login_attempts, account_locked_until
+                    FROM users WHERE LOWER(email) = LOWER(%s)
+                ''', (email,))
+            else:
+                cursor.execute('''
+                    SELECT id, password_hash, is_verified, is_active, full_name,
+                           failed_login_attempts, account_locked_until
+                    FROM users WHERE LOWER(email) = LOWER(?)
+                ''', (email,))
 
             user_data = cursor.fetchone()
 
             # Log login attempt
-            cursor.execute('''
-                INSERT INTO login_history (user_id, ip_address, user_agent, success)
-                VALUES (?, ?, ?, ?)
-            ''', (
-                user_data[0] if user_data else None,
-                request.remote_addr,
-                request.headers.get('User-Agent', '')[:200],
-                False  # Will update if successful
-            ))
+            if user_data:
+                # Handle both dict and tuple responses
+                if isinstance(user_data, dict):
+                    user_id = user_data['id']
+                else:
+                    user_id = user_data[0]
+            else:
+                user_id = None
 
-            login_history_id = cursor.lastrowid
+            # Insert login history
+            if get_db_type() == 'postgresql':
+                cursor.execute('''
+                    INSERT INTO login_history (user_id, ip_address, user_agent, success)
+                    VALUES (%s, %s, %s, %s)
+                    RETURNING id
+                ''', (
+                    user_id,
+                    request.remote_addr,
+                    request.headers.get('User-Agent', '')[:200],
+                    False  # Will update if successful
+                ))
+                login_history_id = cursor.fetchone()['id'] if isinstance(cursor.fetchone(), dict) else cursor.lastrowid
+            else:
+                cursor.execute('''
+                    INSERT INTO login_history (user_id, ip_address, user_agent, success)
+                    VALUES (?, ?, ?, ?)
+                ''', (
+                    user_id,
+                    request.remote_addr,
+                    request.headers.get('User-Agent', '')[:200],
+                    False
+                ))
+                login_history_id = cursor.lastrowid
 
             if not user_data:
                 flash('Invalid email or password', 'error')
@@ -1498,7 +1549,23 @@ def login():
                 conn.close()
                 return render_template('auth/login.html')
 
-            user_id, password_hash, is_verified, is_active, full_name, failed_attempts, locked_until = user_data
+            # Extract user data based on type (dict or tuple)
+            if isinstance(user_data, dict):
+                user_id = user_data['id']
+                password_hash = user_data['password_hash']
+                is_verified = user_data['is_verified']
+                is_active = user_data['is_active']
+                full_name = user_data['full_name']
+                failed_attempts = user_data['failed_login_attempts']
+                locked_until = user_data['account_locked_until']
+            else:
+                user_id = user_data[0]
+                password_hash = user_data[1]
+                is_verified = user_data[2]
+                is_active = user_data[3]
+                full_name = user_data[4]
+                failed_attempts = user_data[5]
+                locked_until = user_data[6]
 
             # Check if account is locked
             if locked_until and datetime.now() < datetime.fromisoformat(locked_until):
@@ -1518,19 +1585,33 @@ def login():
             if not check_password_hash(password_hash, password):
                 # Increment failed attempts
                 failed_attempts = (failed_attempts or 0) + 1
-                cursor.execute('''
-                    UPDATE users 
-                    SET failed_login_attempts = ?, last_failed_login = ?
-                    WHERE id = ?
-                ''', (failed_attempts, datetime.now(), user_id))
+
+                if get_db_type() == 'postgresql':
+                    cursor.execute('''
+                        UPDATE users 
+                        SET failed_login_attempts = %s, last_failed_login = %s
+                        WHERE id = %s
+                    ''', (failed_attempts, datetime.now(), user_id))
+                else:
+                    cursor.execute('''
+                        UPDATE users 
+                        SET failed_login_attempts = ?, last_failed_login = ?
+                        WHERE id = ?
+                    ''', (failed_attempts, datetime.now(), user_id))
 
                 # Lock account after 5 failed attempts
                 if failed_attempts >= 5:
                     locked_until = datetime.now() + timedelta(minutes=30)
-                    cursor.execute('''
-                        UPDATE users SET account_locked_until = ?
-                        WHERE id = ?
-                    ''', (locked_until, user_id))
+                    if get_db_type() == 'postgresql':
+                        cursor.execute('''
+                            UPDATE users SET account_locked_until = %s
+                            WHERE id = %s
+                        ''', (locked_until, user_id))
+                    else:
+                        cursor.execute('''
+                            UPDATE users SET account_locked_until = ?
+                            WHERE id = ?
+                        ''', (locked_until, user_id))
                     flash('Too many failed attempts. Account locked for 30 minutes.', 'error')
                 else:
                     flash('Invalid email or password', 'error')
@@ -1551,16 +1632,26 @@ def login():
             login_user(user, remember=remember)
 
             # Update successful login
-            cursor.execute('''
-                UPDATE users 
-                SET last_login = ?, failed_login_attempts = 0, account_locked_until = NULL
-                WHERE id = ?
-            ''', (datetime.now(), user_id))
+            if get_db_type() == 'postgresql':
+                cursor.execute('''
+                    UPDATE users 
+                    SET last_login = %s, failed_login_attempts = 0, account_locked_until = NULL
+                    WHERE id = %s
+                ''', (datetime.now(), user_id))
 
-            # Update login history
-            cursor.execute('''
-                UPDATE login_history SET success = 1 WHERE id = ?
-            ''', (login_history_id,))
+                cursor.execute('''
+                    UPDATE login_history SET success = true WHERE id = %s
+                ''', (login_history_id,))
+            else:
+                cursor.execute('''
+                    UPDATE users 
+                    SET last_login = ?, failed_login_attempts = 0, account_locked_until = NULL
+                    WHERE id = ?
+                ''', (datetime.now(), user_id))
+
+                cursor.execute('''
+                    UPDATE login_history SET success = 1 WHERE id = ?
+                ''', (login_history_id,))
 
             conn.commit()
             conn.close()
@@ -1573,6 +1664,8 @@ def login():
 
         except Exception as e:
             print(f"Login error: {e}")
+            import traceback
+            traceback.print_exc()
             flash('An error occurred during login. Please try again.', 'error')
             conn.close()
             return render_template('auth/login.html')
