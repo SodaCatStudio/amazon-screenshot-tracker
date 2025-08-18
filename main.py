@@ -766,6 +766,8 @@ class DatabaseManager:
             )
         ''')
 
+        self.add_column_if_not_exists(cursor, 'users', 'scrapingbee_api_key', 'TEXT')
+
         # Products table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS products (
@@ -907,6 +909,23 @@ class DatabaseManager:
                 cursor.execute(index_query)
             except Exception as e:
                 print(f"⚠️ Index creation warning: {e}")
+
+    def add_column_if_not_exists(self, cursor, table_name, column_name, column_type):
+        """Safely add column if it doesn't exist"""
+        try:
+            cursor.execute(f"""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name = %s AND column_name = %s
+            """, (table_name, column_name))
+
+            if not cursor.fetchone():
+                cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
+                print(f"✅ Added column {column_name} to {table_name}")
+            else:
+                print(f"✅ Column {column_name} already exists in {table_name}")
+        except Exception as e:
+            print(f"⚠️ Error adding column {column_name}: {e}")
 
     def create_sqlite_tables(self, cursor):
         """Create all SQLite tables with complete schema for development"""
@@ -1641,6 +1660,49 @@ def verify_email():
 
     return redirect(url_for('auth.login'))
 
+@app.route('/debug/products')
+@login_required
+def debug_products():
+    conn = get_db()
+    cursor = conn.cursor()
+
+    # Check products table
+    cursor.execute('SELECT COUNT(*) FROM products')
+    total_products = cursor.fetchone()[0]
+
+    # Check products for current user
+    cursor.execute('SELECT COUNT(*) FROM products WHERE user_id = %s OR user_email = %s', 
+                   (current_user.id, current_user.email))
+    user_products = cursor.fetchone()[0]
+
+    # Get recent products
+    cursor.execute('''
+        SELECT id, user_id, user_email, product_title, created_at 
+        FROM products 
+        ORDER BY created_at DESC 
+        LIMIT 5
+    ''')
+    recent_products = cursor.fetchall()
+
+    conn.close()
+
+    html = f"""
+    <h2>Products Debug</h2>
+    <p><strong>Total Products:</strong> {total_products}</p>
+    <p><strong>Your Products:</strong> {user_products}</p>
+    <p><strong>Your User ID:</strong> {current_user.id}</p>
+    <p><strong>Your Email:</strong> {current_user.email}</p>
+
+    <h3>Recent Products:</h3>
+    <ul>
+    """
+
+    for product in recent_products:
+        html += f"<li>ID: {product[0]}, User ID: {product[1]}, Email: {product[2]}, Title: {product[3]}</li>"
+
+    html += "</ul>"
+    return html
+
 @app.route('/test-email')
 @login_required
 def test_email():
@@ -2071,7 +2133,7 @@ def add_product_form():
 @login_required
 def add_product():
     """Add a new product to monitor - ALWAYS captures initial screenshot"""
-    print("🚀 Starting add_product route")
+    print(f"🔍 ADD_PRODUCT: Starting for user {current_user.email} (ID: {current_user.id})")
 
     conn = sqlite3.connect('amazon_monitor.db')
     cursor = conn.cursor()
@@ -2163,7 +2225,7 @@ def add_product():
         print(f"📊 Product info extracted: {product_info}")
 
         # Save to database with user_id
-        print("💾 Saving to database...")
+        print(f"🔍 ADD_PRODUCT: About to save product for user_id={current_user.id}, user_email={current_user.email}")
         cursor.execute('''
             INSERT INTO products (user_id, user_email, product_url, product_title, current_rank, 
                                 current_category, is_bestseller, last_checked)
@@ -2263,6 +2325,7 @@ def add_product():
             print("⚠️ No screenshot data received from ScrapingBee")
 
         conn.commit()
+        print("🔍 ADD_PRODUCT: Database committed")
         conn.close()
 
         # Success message with product title
