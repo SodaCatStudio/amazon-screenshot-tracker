@@ -1663,45 +1663,49 @@ def verify_email():
 @app.route('/debug/products')
 @login_required
 def debug_products():
-    conn = get_db()
-    cursor = conn.cursor()
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
 
-    # Check products table
-    cursor.execute('SELECT COUNT(*) FROM products')
-    total_products = cursor.fetchone()[0]
+        # Check products table
+        cursor.execute('SELECT COUNT(*) FROM products')
+        total_products = cursor.fetchone()[0]
 
-    # Check products for current user
-    cursor.execute('SELECT COUNT(*) FROM products WHERE user_id = %s OR user_email = %s', 
-                   (current_user.id, current_user.email))
-    user_products = cursor.fetchone()[0]
+        # Check products for current user
+        cursor.execute('SELECT COUNT(*) FROM products WHERE user_id = %s OR user_email = %s', 
+                       (current_user.id, current_user.email))
+        user_products = cursor.fetchone()[0]
 
-    # Get recent products
-    cursor.execute('''
-        SELECT id, user_id, user_email, product_title, created_at 
-        FROM products 
-        ORDER BY created_at DESC 
-        LIMIT 5
-    ''')
-    recent_products = cursor.fetchall()
+        # Get recent products
+        cursor.execute('''
+            SELECT id, user_id, user_email, product_title, created_at 
+            FROM products 
+            ORDER BY created_at DESC 
+            LIMIT 10
+        ''')
+        recent_products = cursor.fetchall()
 
-    conn.close()
+        conn.close()
 
-    html = f"""
-    <h2>Products Debug</h2>
-    <p><strong>Total Products:</strong> {total_products}</p>
-    <p><strong>Your Products:</strong> {user_products}</p>
-    <p><strong>Your User ID:</strong> {current_user.id}</p>
-    <p><strong>Your Email:</strong> {current_user.email}</p>
+        html = f"""
+        <h2>Products Debug</h2>
+        <p><strong>Total Products:</strong> {total_products}</p>
+        <p><strong>Your Products:</strong> {user_products}</p>
+        <p><strong>Your User ID:</strong> {current_user.id}</p>
+        <p><strong>Your Email:</strong> {current_user.email}</p>
 
-    <h3>Recent Products:</h3>
-    <ul>
-    """
+        <h3>Recent Products:</h3>
+        <ul>
+        """
 
-    for product in recent_products:
-        html += f"<li>ID: {product[0]}, User ID: {product[1]}, Email: {product[2]}, Title: {product[3]}</li>"
+        for product in recent_products:
+            html += f"<li>ID: {product[0]}, User ID: {product[1]}, Email: {product[2]}, Title: {product[3][:50]}...</li>"
 
-    html += "</ul>"
-    return html
+        html += "</ul>"
+        return html
+
+    except Exception as e:
+        return f"Debug Error: {str(e)}", 500
 
 @app.route('/test-email')
 @login_required
@@ -2554,6 +2558,9 @@ def dashboard_view():
                 ''', (user_email,))
 
             products = cursor.fetchall()
+            print(f"🔍 DASHBOARD: Found {len(products)} products for user")
+            for i, product in enumerate(products[:3]):  # Log first 3 products
+                print(f"🔍 DASHBOARD: Product {i}: {product}")
 
             # Get bestseller screenshots for user
             if hasattr(current_user, 'id'):
@@ -2574,6 +2581,7 @@ def dashboard_view():
                 ''', (user_email,))
 
             screenshots = cursor.fetchall()
+            print(f"🔍 DASHBOARD: Found {len(screenshots)} screenshots for user")
 
             return render_template('dashboard.html', 
                  email=user_email,
