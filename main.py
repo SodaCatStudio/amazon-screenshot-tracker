@@ -1362,65 +1362,35 @@ class DatabaseManager:
         print("✅ All SQLite tables created with complete schema")
 
 class User(UserMixin):
-    """Enhanced User model with additional security features"""
+    """Enhanced User model with proper initialization"""
     def __init__(self, id, email, full_name=None, is_verified=False, is_active=True):
-        self.id = id
+        self.id = id  # Make sure ID is set!
         self.email = email
         self.full_name = full_name
         self.is_verified = is_verified
-        self.is_active = is_active
-
+        self._is_active = is_active  # Use private variable to avoid conflict
+        
+    def get_id(self):
+        """Return the user ID as a string for Fla"""
+      return str(self.id)
+    
     @property
     def is_active(self):
-        """Override is_active property/method to provide active state"""
+        """Override is_active property"""
         return self._is_active
+    
     @is_active.setter
     def is_active(self, value):
         self._is_active = value
 
-    @staticmethod
-    def get(user_id):
-        """Get user by ID with error handling"""
-        try:
-            conn = sqlite3.connect('amazon_monitor.db')
-            cursor = conn.cursor()
-            cursor.execute('''
-                SELECT id, email, full_name, is_verified, is_active 
-                FROM users WHERE id = ?
-            ''', (user_id,))
-            user_data = cursor.fetchone()
-            conn.close()
-
-            if user_data and user_data[4]:  # Check if active
-                return User(user_data[0], user_data[1], user_data[2], 
-                          bool(user_data[3]), bool(user_data[4]))
-        except Exception as e:
-            print(f"Error loading user: {e}")
-        return None
-
-    @staticmethod
-    def get_by_email(email):
-        """Get user by email with case-insensitive search"""
-        try:
-            conn = sqlite3.connect('amazon_monitor.db')
-            cursor = conn.cursor()
-            cursor.execute('''
-                SELECT id, email, full_name, is_verified, is_active 
-                FROM users WHERE LOWER(email) = LOWER(?)
-            ''', (email,))
-            user_data = cursor.fetchone()
-            conn.close()
-
-            if user_data:
-                return User(user_data[0], user_data[1], user_data[2], 
-                          bool(user_data[3]), bool(user_data[4]))
-        except Exception as e:
-            print(f"Error finding user by email: {e}")
-        return None
+    def __repr__(self):
+        return f'<User {self.email}>'
 
 @login_manager.user_loader
 def load_user(user_id):
-    """Load user ensuring ID is properly set - FIXED for PostgreSQL"""
+    """Load user for Fla -sk-Login FIXED"""
+    print(f"🔍 LOAD_USER: Loading user with ID {user_id}")
+    
     conn = get_db()
     cursor = conn.cursor()
 
@@ -1429,19 +1399,19 @@ def load_user(user_id):
             cursor.execute('''
                 SELECT id, email, full_name, is_verified, is_active 
                 FROM users WHERE id = %s
-            ''', (user_id,))
+            ''', (int(user_id),))  # Ensure ID is integer
         else:
             cursor.execute('''
                 SELECT id, email, full_name, is_verified, is_active 
                 FROM users WHERE id = ?
-            ''', (user_id,))
+            ''', (int(user_id),))
 
         user_data = cursor.fetchone()
 
         if user_data:
             # Handle both dict and tuple responses
             if isinstance(user_data, dict):
-                return User(
+                user = User(
                     id=user_data['id'],
                     email=user_data['email'],
                     full_name=user_data['full_name'],
@@ -1449,17 +1419,51 @@ def load_user(user_id):
                     is_active=bool(user_data['is_active'])
                 )
             else:
-                return User(
+                user = User(
                     id=user_data[0],
                     email=user_data[1],
                     full_name=user_data[2],
                     is_verified=bool(user_data[3]),
                     is_active=bool(user_data[4])
                 )
+            
+            print(f"✅ LOAD_USER: Loaded user {user.email} (ID: {user.id})")
+            return user
+        else:
+            print(f"❌ LOAD_USER: No user found with ID {user_id}")
+            return None
+            
+    except Exception as e:
+        print(f"❌ LOAD_USER: Error loading user: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
     finally:
         conn.close()
 
-    return None
+# Update the login route to ensure proper user creation
+def create_user_session(user_data, email):
+    """Helper function to create user object from database data"""
+    if isinstance(user_data, dict):
+        user = User(
+            id=user_data['id'],
+            email=user_data['email'] or email,
+            full_name=user_data.get('full_name'),
+            is_verified=bool(user_data.get('is_verified', False)),
+            is_active=bool(user_data.get('is_active', True))
+        )
+    else:
+        # Assuming tuple order: id, password_hash, is_verified, is_active, full_name, ...
+        user = User(
+            id=user_data[0],
+            email=email,  # Use the email from login form
+            full_name=user_data[4] if len(user_data) > 4 else None,
+            is_verified=bool(user_data[2]) if len(user_data) > 2 else False,
+            is_active=bool(user_data[3]) if len(user_data) > 3 else True
+        )
+
+    print(f"✅ CREATE_USER_SESSION: Created user object - ID: {user.id}, Email: {user.email}")
+    return user
 
 
 def validate_password(password):
@@ -1683,6 +1687,36 @@ def register():
 
     return render_template('auth/register.html')
 
+@app.route('/login_success')
+@login_required
+def login_success():
+    """Intermediate route after successful login for debugging"""
+    return f"""
+    <html>
+    <body style="font-family: Arial, sans-serif; padding: 20px;">
+        <h2>✅ Login Successful!</h2>
+        <p><strong>User ID:</strong> {current_user.id}</p>
+        <p><strong>Email:</strong> {current_user.email}</p>
+        <p><strong>Name:</strong> {current_user.full_name or 'Not set'}</p>
+        <p><strong>Verified:</strong> {current_user.is_verified}</p>
+        <p><strong>Active:</strong> {current_user.is_active}</p>
+
+        <h3>Next Steps:</h3>
+        <ul>
+            <li><a href="/dashboard">Go to Dashboard</a></li>
+            <li><a href="/test_dashboard">Test Dashboard</a></li>
+            <li><a href="/debug_session">Debug Session</a></li>
+            <li><a href="/">Go Home (will redirect to dashboard)</a></li>
+        </ul>
+
+        <p style="color: #666; margin-top: 20px;">
+        If clicking "Go to Dashboard" redirects you to the landing page, 
+        there's an issue with the dashboard rendering.
+        </p>
+    </body>
+    </html>
+    """
+
 @auth.route('/login', methods=['GET', 'POST'])
 def login():
     """User login with improved verification handling"""
@@ -1814,8 +1848,12 @@ def login():
                     return redirect(url_for('auth.login', verification_needed=1))
 
             # Successful login
-            user = User(user_id, user_email, full_name, is_verified, is_active)
+            user = create_user_session(user_data, email)
             login_user(user, remember=remember)
+
+            print(f"✅ LOGIN: User {user.email} logged in successfully")
+            print(f"   User ID: {user.id}")
+            print(f"   Is authenticated: {current_user.is_authenticated}")
 
             # Update successful login
             if get_db_type() == 'postgresql':
@@ -1837,6 +1875,9 @@ def login():
             # Success message
             flash(f'Welcome back{", " + full_name if full_name else ""}!', 'success')
 
+            if request.args.get('debug'):
+                return redirect(url_for('login_success'))
+            
             next_page = request.args.get('next')
             if next_page and next_page.startswith('/'):
                 return redirect(next_page)
@@ -2935,44 +2976,25 @@ monitor = AmazonMonitor(SCRAPINGBEE_API_KEY)
 
 @app.route('/')
 def index():
-    """Landing page - FIXED to prevent loops and handle errors"""
-    print("🔍 INDEX: Route called")
-    try:
-        print(f"🔍 INDEX: User authenticated: {current_user.is_authenticated}")
+    """Landing page - FIXED to handle dashboard errors properly"""
+    print(f"🔍 INDEX: Route called")
+    print(f"🔍 INDEX: User authenticated: {current_user.is_authenticated}")
 
+    try:
         if current_user.is_authenticated:
-            print("🔍 INDEX: Calling dashboard_view for authenticated user")
-            try:
-                result = dashboard_view()
-                print("✅ INDEX: Dashboard returned successfully")
-                return result
-            except Exception as dashboard_error:
-                print(f"❌ INDEX: Dashboard error: {dashboard_error}")
-                import traceback
-                traceback.print_exc()
-                # Log them out and show landing instead of crashing
-                from flask_login import logout_user
-                logout_user()
-                print("🔍 INDEX: Falling back to landing.html after dashboard error")
-                return render_template('landing.html')
+            print(f"🔍 INDEX: Authenticated user: {current_user.email} (ID: {current_user.id})")
+            return redirect(url_for('dashboard'))
         else:
             print("🔍 INDEX: Showing landing page for anonymous user")
-            result = render_template('landing.html')
-            print("✅ INDEX: Landing template rendered successfully")
-            return result
+            return render_template('landing.html')
 
     except Exception as e:
-        print(f"❌ INDEX: Critical error: {e}")
+        print(f"❌ INDEX: Error: {e}")
         import traceback
         traceback.print_exc()
 
-        # Absolute fallback - simple HTML response
-        print("🔍 INDEX: Using absolute fallback HTML")
-        return """
-        <h1>🏆 Amazon Screenshot Tracker</h1>
-        <p>Service is starting up...</p>
-        <a href="/auth/login">Login</a> | <a href="/auth/register">Register</a>
-        """, 200
+        # If there's an error, show landing page instead of crashing
+        return render_template('landing.html')
 
 @app.route('/test')
 def test_route():
@@ -3250,30 +3272,54 @@ def view_achievements(product_id):
 @app.route('/dashboard')
 @login_required
 def dashboard():
-    """Dashboard that uses current_user instead of email parameter"""
-    return dashboard_view()
+    """Dashboard route with better error handling"""
+    print(f"📊 DASHBOARD: Accessed by {current_user.email} (ID: {current_user.id})")
+
+    try:
+        return dashboard_view()
+    except Exception as e:
+        print(f"❌ DASHBOARD: Error rendering dashboard: {e}")
+        import traceback
+        traceback.print_exc()
+        flash('Dashboard temporarily unavailable. Please try again.', 'error')
+        return redirect(url_for('index'))
 
 def dashboard_view():
-    """Fixed dashboard view with proper user product retrieval"""
+    """Fixed dashboard view with proper error handling"""
     try:
         if not current_user.is_authenticated:
+            print("❌ DASHBOARD_VIEW: User not authenticated")
             return redirect(url_for('auth.login'))
 
         user_email = current_user.email
         user_id = current_user.id
 
+        print(f"📊 DASHBOARD_VIEW: Loading for user {user_email} (ID: {user_id})")
+
         conn = get_db()
+        cursor = conn.cursor()
+
         try:
-            cursor = conn.cursor()
-
             # Check for API key
-            cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = %s', (user_id,))
-            result = cursor.fetchone()
-            has_api_key = bool(result and result[0])
-
-            # FIX: Use proper parameterized query for PostgreSQL
             if get_db_type() == 'postgresql':
-                # Get products - ensure we're matching correctly
+                cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = %s', (user_id,))
+            else:
+                cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = ?', (user_id,))
+
+            result = cursor.fetchone()
+
+            if result:
+                if isinstance(result, dict):
+                    has_api_key = bool(result.get('scrapingbee_api_key'))
+                else:
+                    has_api_key = bool(result[0] if result else None)
+            else:
+                has_api_key = False
+
+            print(f"📊 DASHBOARD_VIEW: User has API key: {has_api_key}")
+
+            # Get products
+            if get_db_type() == 'postgresql':
                 cursor.execute('''
                     SELECT id, product_title, current_rank, current_category, 
                            is_bestseller, last_checked, created_at, active
@@ -3282,7 +3328,6 @@ def dashboard_view():
                     ORDER BY created_at DESC
                 ''', (user_id,))
             else:
-                # SQLite version
                 cursor.execute('''
                     SELECT id, product_title, current_rank, current_category, 
                            is_bestseller, last_checked, created_at, active
@@ -3292,11 +3337,28 @@ def dashboard_view():
                 ''', (user_id,))
 
             products = cursor.fetchall()
+            print(f"📊 DASHBOARD_VIEW: Found {len(products) if products else 0} products")
 
-            # Debug logging
-            print(f"📊 Found {len(products)} products for user_id={user_id}")
+            # Convert to list of dicts if needed for template
+            products_list = []
+            if products:
+                for product in products:
+                    if isinstance(product, dict):
+                        products_list.append(product)
+                    else:
+                        # Convert tuple to dict for easier template access
+                        products_list.append({
+                            'id': product[0],
+                            'product_title': product[1],
+                            'current_rank': product[2],
+                            'current_category': product[3],
+                            'is_bestseller': product[4],
+                            'last_checked': product[5],
+                            'created_at': product[6],
+                            'active': product[7]
+                        })
 
-            # Get screenshots with same fix
+            # Get screenshots
             if get_db_type() == 'postgresql':
                 cursor.execute('''
                     SELECT bs.id, p.product_title, bs.rank_achieved, 
@@ -3317,21 +3379,103 @@ def dashboard_view():
                 ''', (user_id,))
 
             screenshots = cursor.fetchall()
+            print(f"📊 DASHBOARD_VIEW: Found {len(screenshots) if screenshots else 0} screenshots")
+
+            # Convert screenshots to list of dicts
+            screenshots_list = []
+            if screenshots:
+                for screenshot in screenshots:
+                    if isinstance(screenshot, dict):
+                        screenshots_list.append(screenshot)
+                    else:
+                        screenshots_list.append({
+                            'id': screenshot[0],
+                            'product_title': screenshot[1],
+                            'rank_achieved': screenshot[2],
+                            'category': screenshot[3],
+                            'achieved_at': screenshot[4]
+                        })
+
+            conn.close()
+
+            print(f"✅ DASHBOARD_VIEW: Rendering dashboard template")
 
             return render_template('dashboard.html',
                                  email=user_email,
-                                 products=products,
-                                 screenshots=screenshots,
+                                 products=products_list,
+                                 screenshots=screenshots_list,
                                  has_api_key=has_api_key)
-        finally:
-            conn.close()
+
+        except Exception as e:
+            print(f"❌ DASHBOARD_VIEW: Database error: {e}")
+            import traceback
+            traceback.print_exc()
+            if conn:
+                conn.close()
+            raise
 
     except Exception as e:
-        print(f"❌ Dashboard error: {e}")
+        print(f"❌ DASHBOARD_VIEW: Fatal error: {e}")
         import traceback
         traceback.print_exc()
         flash('Dashboard temporarily unavailable. Please try again.', 'error')
-        return render_template('landing.html')
+        return redirect(url_for('index'))
+
+@app.route('/test_dashboard')
+@login_required
+def test_dashboard():
+    """Test route to debug dashboard issues"""
+    try:
+        return f"""
+        <html>
+        <body>
+            <h2>Dashboard Debug Info</h2>
+            <p><strong>Authenticated:</strong> {current_user.is_authenticated}</p>
+            <p><strong>User ID:</strong> {current_user.id}</p>
+            <p><strong>User Email:</strong> {current_user.email}</p>
+            <p><strong>User Name:</strong> {current_user.full_name}</p>
+            <br>
+            <p><a href="/dashboard">Try Dashboard</a></p>
+            <p><a href="/">Go Home</a></p>
+            <p><a href="/auth/logout">Logout</a></p>
+        </body>
+        </html>
+        """
+    except Exception as e:
+        return f"Error: {str(e)}", 500
+
+
+@app.route('/debug_session')
+@login_required
+def debug_session():
+    """Debug session and authentication state"""
+    import json
+
+    session_data = {
+        'authenticated': current_user.is_authenticated,
+        'user_id': current_user.id if current_user.is_authenticated else None,
+        'user_email': current_user.email if current_user.is_authenticated else None,
+        'session_keys': list(session.keys()),
+        'session_permanent': session.permanent if hasattr(session, 'permanent') else None
+    }
+
+    return f"""
+    <html>
+    <body style="font-family: monospace; padding: 20px;">
+        <h2>Session Debug</h2>
+        <pre>{json.dumps(session_data, indent=2, default=str)}</pre>
+        <br>
+        <h3>Quick Links:</h3>
+        <ul>
+            <li><a href="/dashboard">Dashboard</a></li>
+            <li><a href="/test_dashboard">Test Dashboard</a></li>
+            <li><a href="/">Home</a></li>
+            <li><a href="/auth/logout">Logout</a></li>
+            <li><a href="/auth/login">Login</a></li>
+        </ul>
+    </body>
+    </html>
+    """
 
 
 # Settings page route
