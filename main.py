@@ -3572,82 +3572,339 @@ def debug_session():
 @app.route('/settings')
 @login_required
 def settings():
-    """User settings page"""
-    conn = sqlite3.connect('amazon_monitor.db')
+    """User settings page - FIXED for PostgreSQL"""
+    conn = get_db()
     cursor = conn.cursor()
 
-    cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = ?', (current_user.id,))
-    result = cursor.fetchone()
-    conn.close()
+    try:
+        if get_db_type() == 'postgresql':
+            cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = %s', (current_user.id,))
+        else:
+            cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = ?', (current_user.id,))
 
-    # Don't show the actual key, just indicate if it's set
-    has_api_key = bool(result and result[0])
+        result = cursor.fetchone()
+
+        # Fixed: Handle dict/tuple properly
+        if result:
+            if isinstance(result, dict):
+                api_key_value = result.get('scrapingbee_api_key')
+            else:
+                api_key_value = result[0] if result else None
+        else:
+            api_key_value = None
+
+        has_api_key = bool(api_key_value)
+
+        print(f"⚙️ Settings page - User has API key: {has_api_key}")
+
+    finally:
+        conn.close()
 
     return render_template('settings.html', user=current_user, has_api_key=has_api_key)
 
 @app.route('/update_api_key', methods=['POST'])
 @login_required
 def update_api_key():
-    """Update user's ScrapingBee API key"""
+    """Update user's ScrapingBee API key - FIXED for PostgreSQL"""
     api_key = request.form.get('api_key', '').strip()
 
     if not api_key:
         flash('API key cannot be empty', 'error')
         return redirect(url_for('settings'))
 
-    # Basic check of API key if it's too short
+    # Basic validation of API key
     if len(api_key) < 20:
         flash('API key seems too short. Please check your ScrapingBee dashboard.', 'error')
         return redirect(url_for('settings'))
 
-    # Optional: Test the API key with a simple request
-    test_monitor = AmazonMonitor(api_key)
-    print(f"🔑 Testing API key: {api_key[:10]}...")  # Only log first 10 chars for security
-    
-    # Try a simple test request to validate the key
-    try:
-        test_result = test_monitor.scrape_amazon_page('https://www.amazon.com')
+    print(f"🔑 Attempting to save API key for user {current_user.email} (ID: {current_user.id})")
+    print(f"🔑 API key length: {len(api_key)}, starts with: {api_key[:10]}...")
 
-        if test_result.get('error'):
-            # Check if it's an API key error
-            error_msg = str(test_result.get('error', ''))
-            if 'unauthorized' in error_msg.lower() or '401' in error_msg:
-                flash('Invalid API key. Please check your ScrapingBee dashboard for the correct key.', 'error')
-                return redirect(url_for('settings'))
-            elif 'rate limit' in error_msg.lower() or '429' in error_msg:
-                # Rate limit means the key is valid but over quota
-                print("⚠️ API key is valid but rate limited")
-                # Continue to save it anyway
-            else:
-                # Some other error - but key might still be valid
-                print(f"⚠️ Test request failed but saving key anyway: {error_msg}")
-
-    except Exception as e:
-        print(f"⚠️ Could not validate API key, but saving anyway: {e}")
-        # Don't block saving - the key might still be valid
-
-    # Encrypt and save the key
-    conn = sqlite3.connect('amazon_monitor.db')
+    # Get database connection
+    conn = get_db()
     cursor = conn.cursor()
 
     try:
+        # Encrypt the API key
         encrypted_key = api_encryption.encrypt(api_key)
-        cursor.execute('''
-            UPDATE users SET scrapingbee_api_key = ? WHERE id = ?
-        ''', (encrypted_key, current_user.id))
+        print(f"🔐 Encrypted key length: {len(encrypted_key)}")
 
+        # Update in database - FIXED for PostgreSQL
+        if get_db_type() == 'postgresql':
+            cursor.execute('''
+                UPDATE users 
+                SET scrapingbee_api_key = %s 
+                WHERE id = %s
+            ''', (encrypted_key, current_user.id))
+        else:
+            cursor.execute('''
+                UPDATE users 
+                SET scrapingbee_api_key = ? 
+                WHERE id = ?
+            ''', (encrypted_key, current_user.id))
+
+        # Check if update was successful
+        if cursor.rowcount == 0:
+            print(f"❌ No rows updated for user ID {current_user.id}")
+            flash('Failed to save API key. User not found.', 'error')
+            conn.rollback()
+            conn.close()
+            return redirect(url_for('settings'))
+
+        # Commit the transaction
         conn.commit()
+        print(f"✅ API key saved to database (affected rows: {cursor.rowcount})")
 
-        flash('ScrapingBee API key saved successfully!', 'success')
-        print(f"✅ API key saved for user {current_user.email}")
+        # Verify it was actually saved
+        if get_db_type() == 'postgresql':
+            cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = %s', (current_user.id,))
+        else:
+            cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = ?', (current_user.id,))
+
+        result = cursor.fetchone()
+        if result:
+            if isinstance(result, dict):
+                saved_key = result.get('scrapingbee_api_key')
+            else:
+                saved_key = result[0] if result else None
+
+            if saved_key:
+                print(f"✅ Verification: API key is in database (length: {len(saved_key)})")
+                flash('ScrapingBee API key saved successfully!', 'success')
+            else:
+                print(f"❌ Verification failed: API key not found in database after save")
+                flash('API key save verification failed. Please try again.', 'error')
+        else:
+            print(f"❌ Could not verify saved API key")
+            flash('API key saved but verification failed.', 'warning')
 
     except Exception as e:
         print(f"❌ Error saving API key: {e}")
+        import traceback
+        traceback.print_exc()
+        conn.rollback()
         flash('Error saving API key. Please try again.', 'error')
     finally:
         conn.close()
 
     return redirect(url_for('settings'))
+
+@app.route('/test_api_key_save', methods=['GET', 'POST'])
+@login_required
+def test_api_key_save():
+    """Test route to debug API key saving"""
+    if request.method == 'POST':
+        test_key = request.form.get('test_key', 'TEST_KEY_123456789012345678901234567890')
+
+        conn = get_db()
+        cursor = conn.cursor()
+
+        try:
+            # Try to save directly without encryption first
+            if get_db_type() == 'postgresql':
+                cursor.execute('''
+                    UPDATE users 
+                    SET scrapingbee_api_key = %s 
+                    WHERE id = %s
+                ''', (test_key, current_user.id))
+            else:
+                cursor.execute('''
+                    UPDATE users 
+                    SET scrapingbee_api_key = ? 
+                    WHERE id = ?
+                ''', (test_key, current_user.id))
+
+            conn.commit()
+
+            # Check if it saved
+            if get_db_type() == 'postgresql':
+                cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = %s', (current_user.id,))
+            else:
+                cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = ?', (current_user.id,))
+
+            result = cursor.fetchone()
+
+            if result:
+                if isinstance(result, dict):
+                    saved_value = result.get('scrapingbee_api_key')
+                else:
+                    saved_value = result[0] if result else None
+            else:
+                saved_value = None
+
+            conn.close()
+
+            return f"""
+            <html>
+            <body style="font-family: monospace; padding: 20px;">
+                <h2>API Key Save Test - Result</h2>
+                <p><strong>Attempted to save:</strong> {test_key}</p>
+                <p><strong>Rows affected:</strong> {cursor.rowcount}</p>
+                <p><strong>Retrieved value:</strong> {saved_value}</p>
+                <p><strong>Save successful:</strong> {saved_value == test_key}</p>
+                <br>
+                <a href="/test_api_key_save">Try Again</a> | 
+                <a href="/check_api_key">Check API Key</a> | 
+                <a href="/settings">Go to Settings</a>
+            </body>
+            </html>
+            """
+
+        except Exception as e:
+            conn.rollback()
+            conn.close()
+            return f"Error: {str(e)}", 500
+
+    # GET request - show form
+    return """
+    <html>
+    <body style="font-family: monospace; padding: 20px;">
+        <h2>Test API Key Saving</h2>
+        <p>This will test saving a value directly to the database.</p>
+        <form method="POST">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="text" name="test_key" value="TEST_KEY_123456789012345678901234567890" size="50">
+            <button type="submit">Save Test Key</button>
+        </form>
+        <br>
+        <p><a href="/check_api_key">Check Current API Key</a></p>
+    </body>
+    </html>
+    """
+
+@app.route('/clear_api_key')
+@login_required
+def clear_api_key():
+    """Clear the API key for debugging"""
+    conn = get_db()
+    cursor = conn.cursor()
+
+    try:
+        if get_db_type() == 'postgresql':
+            cursor.execute('''
+                UPDATE users 
+                SET scrapingbee_api_key = NULL 
+                WHERE id = %s
+            ''', (current_user.id,))
+        else:
+            cursor.execute('''
+                UPDATE users 
+                SET scrapingbee_api_key = NULL 
+                WHERE id = ?
+            ''', (current_user.id,))
+
+        conn.commit()
+        conn.close()
+
+        flash('API key cleared. Please add a new one.', 'info')
+        return redirect(url_for('settings'))
+
+    except Exception as e:
+        conn.rollback()
+        conn.close()
+        flash(f'Error clearing API key: {str(e)}', 'error')
+        return redirect(url_for('settings'))
+
+@app.route('/test_encryption')
+@login_required
+def test_encryption():
+    """Test the encryption/decryption system"""
+    test_key = "TEST_API_KEY_1234567890"
+
+    try:
+        # Test encryption
+        encrypted = api_encryption.encrypt(test_key)
+
+        # Test decryption
+        decrypted = api_encryption.decrypt(encrypted)
+
+        # Test database save and retrieve
+        conn = get_db()
+        cursor = conn.cursor()
+
+        # Save encrypted key
+        if get_db_type() == 'postgresql':
+            cursor.execute('''
+                UPDATE users 
+                SET scrapingbee_api_key = %s 
+                WHERE id = %s
+            ''', (encrypted, current_user.id))
+        else:
+            cursor.execute('''
+                UPDATE users 
+                SET scrapingbee_api_key = ? 
+                WHERE id = ?
+            ''', (encrypted, current_user.id))
+
+        conn.commit()
+
+        # Retrieve it back
+        if get_db_type() == 'postgresql':
+            cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = %s', (current_user.id,))
+        else:
+            cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = ?', (current_user.id,))
+
+        result = cursor.fetchone()
+
+        if result:
+            if isinstance(result, dict):
+                retrieved = result.get('scrapingbee_api_key')
+            else:
+                retrieved = result[0] if result else None
+        else:
+            retrieved = None
+
+        # Try to decrypt retrieved value
+        if retrieved:
+            try:
+                decrypted_from_db = api_encryption.decrypt(retrieved)
+            except Exception as e:
+                decrypted_from_db = f"Decryption failed: {str(e)}"
+        else:
+            decrypted_from_db = "No value retrieved from database"
+
+        conn.close()
+
+        return f"""
+        <html>
+        <body style="font-family: monospace; padding: 20px;">
+            <h2>Encryption System Test</h2>
+
+            <h3>1. Basic Encryption Test</h3>
+            <p><strong>Original:</strong> {test_key}</p>
+            <p><strong>Encrypted:</strong> {encrypted[:50]}...</p>
+            <p><strong>Encrypted Length:</strong> {len(encrypted)}</p>
+            <p><strong>Decrypted:</strong> {decrypted}</p>
+            <p><strong>Match:</strong> {decrypted == test_key}</p>
+
+            <h3>2. Database Save/Retrieve Test</h3>
+            <p><strong>Saved to DB:</strong> {encrypted[:50]}...</p>
+            <p><strong>Retrieved from DB:</strong> {retrieved[:50] + '...' if retrieved else 'None'}</p>
+            <p><strong>Retrieved Length:</strong> {len(retrieved) if retrieved else 0}</p>
+            <p><strong>Values Match:</strong> {retrieved == encrypted if retrieved else False}</p>
+
+            <h3>3. Full Cycle Test</h3>
+            <p><strong>Decrypted from DB:</strong> {decrypted_from_db}</p>
+            <p><strong>Final Match:</strong> {decrypted_from_db == test_key}</p>
+
+            <br>
+            <a href="/check_api_key">Check API Key</a> | 
+            <a href="/settings">Go to Settings</a> | 
+            <a href="/clear_api_key">Clear API Key</a>
+        </body>
+        </html>
+        """
+
+    except Exception as e:
+        import traceback
+        return f"""
+        <html>
+        <body style="font-family: monospace; padding: 20px;">
+            <h2>Encryption Test Failed</h2>
+            <pre>{traceback.format_exc()}</pre>
+        </body>
+        </html>
+        """, 500
 
 @app.route('/screenshot/<int:screenshot_id>')
 def view_screenshot(screenshot_id):
