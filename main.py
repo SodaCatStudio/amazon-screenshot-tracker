@@ -3000,14 +3000,14 @@ monitor = AmazonMonitor(SCRAPINGBEE_API_KEY)
 
 @app.route('/')
 def index():
-    """Landing page - FIXED to handle dashboard errors properly"""
+    """Landing page - FIXED to prevent redirect loops"""
     print(f"🔍 INDEX: Route called")
-    print(f"🔍 INDEX: User authenticated: {current_user.is_authenticated}")
 
     try:
         if current_user.is_authenticated:
             print(f"🔍 INDEX: Authenticated user: {current_user.email} (ID: {current_user.id})")
-            return redirect(url_for('dashboard'))
+            # Render dashboard directly instead of redirecting
+            return dashboard_view()
         else:
             print("🔍 INDEX: Showing landing page for anonymous user")
             return render_template('landing.html')
@@ -3017,8 +3017,16 @@ def index():
         import traceback
         traceback.print_exc()
 
-        # If there's an error, show landing page instead of crashing
-        return render_template('landing.html')
+        # If there's an error, show landing page instead of redirecting
+        try:
+            return render_template('landing.html')
+        except:
+            # Absolute fallback
+            return """
+            <h1>Service Temporarily Unavailable</h1>
+            <p>Please try again in a moment.</p>
+            <a href="/auth/logout">Logout</a> | <a href="/auth/login">Login</a>
+            """, 503
 
 @app.route('/test')
 def test_route():
@@ -3504,7 +3512,7 @@ def view_achievements(product_id):
 @app.route('/dashboard')
 @login_required
 def dashboard():
-    """Dashboard route with better error handling"""
+    """Dashboard route - prevent infinite redirects"""
     print(f"📊 DASHBOARD: Accessed by {current_user.email} (ID: {current_user.id})")
 
     try:
@@ -3513,15 +3521,34 @@ def dashboard():
         print(f"❌ DASHBOARD: Error rendering dashboard: {e}")
         import traceback
         traceback.print_exc()
-        flash('Dashboard temporarily unavailable. Please try again.', 'error')
-        return redirect(url_for('index'))
+
+        # Don't redirect back to dashboard or index - show error page
+        return """
+        <html>
+        <body style="font-family: Arial, sans-serif; padding: 20px;">
+            <h1>Dashboard Error</h1>
+            <p>The dashboard encountered an error. Please try one of these options:</p>
+            <ul>
+                <li><a href="/test_dashboard">Test Dashboard</a></li>
+                <li><a href="/settings">Settings</a></li>
+                <li><a href="/auth/logout">Logout</a></li>
+                <li><a href="/clear_session">Clear Session</a></li>
+            </ul>
+            <details>
+                <summary>Error Details</summary>
+                <pre>{}</pre>
+            </details>
+        </body>
+        </html>
+        """.format(str(e)), 500
 
 def dashboard_view():
-    """Fixed dashboard view with proper API key checking"""
+    """Fixed dashboard view - no redirects in here"""
     try:
         if not current_user.is_authenticated:
             print("❌ DASHBOARD_VIEW: User not authenticated")
-            return redirect(url_for('auth.login'))
+            # Don't redirect, raise an error instead
+            raise Exception("User not authenticated in dashboard_view")
 
         user_email = current_user.email
         user_id = current_user.id
@@ -3532,7 +3559,7 @@ def dashboard_view():
         cursor = conn.cursor()
 
         try:
-            # Check for API key - FIXED for PostgreSQL
+            # Check for API key
             if get_db_type() == 'postgresql':
                 cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = %s', (user_id,))
             else:
@@ -3540,7 +3567,6 @@ def dashboard_view():
 
             result = cursor.fetchone()
 
-            # Fixed: Properly handle dict/tuple and check for actual value
             if result:
                 if isinstance(result, dict):
                     api_key_value = result.get('scrapingbee_api_key')
@@ -3552,9 +3578,8 @@ def dashboard_view():
                 has_api_key = False
 
             print(f"📊 DASHBOARD_VIEW: User has API key: {has_api_key}")
-            print(f"📊 DASHBOARD_VIEW: API key value exists: {bool(api_key_value) if result else False}")
 
-            # Get products - rest of the code remains the same...
+            # Get products
             if get_db_type() == 'postgresql':
                 cursor.execute('''
                     SELECT id, product_title, current_rank, current_category, 
@@ -3575,14 +3600,13 @@ def dashboard_view():
             products = cursor.fetchall()
             print(f"📊 DASHBOARD_VIEW: Found {len(products) if products else 0} products")
 
-            # Convert to list of dicts if needed for template
+            # Convert to list of dicts
             products_list = []
             if products:
                 for product in products:
                     if isinstance(product, dict):
                         products_list.append(product)
                     else:
-                        # Convert tuple to dict for easier template access
                         products_list.append({
                             'id': product[0],
                             'product_title': product[1],
@@ -3616,7 +3640,6 @@ def dashboard_view():
 
             screenshots = cursor.fetchall()
 
-            # Convert screenshots to list of dicts
             screenshots_list = []
             if screenshots:
                 for screenshot in screenshots:
@@ -3635,11 +3658,35 @@ def dashboard_view():
 
             print(f"✅ DASHBOARD_VIEW: Rendering dashboard template")
 
-            return render_template('dashboard.html',
-                                 email=user_email,
-                                 products=products_list,
-                                 screenshots=screenshots_list,
-                                 has_api_key=has_api_key)
+            # Make sure template exists
+            try:
+                return render_template('dashboard.html',
+                                     email=user_email,
+                                     products=products_list,
+                                     screenshots=screenshots_list,
+                                     has_api_key=has_api_key)
+            except Exception as template_error:
+                print(f"❌ Template error: {template_error}")
+                # Return a basic HTML dashboard if template fails
+                return f"""
+                <html>
+                <body style="font-family: Arial, sans-serif; padding: 20px;">
+                    <h1>Dashboard (Emergency Mode)</h1>
+                    <p>Welcome, {user_email}!</p>
+                    <p>API Key: {'Yes' if has_api_key else 'No'}</p>
+                    <p>Products: {len(products_list)}</p>
+                    <p>Screenshots: {len(screenshots_list)}</p>
+                    <hr>
+                    <ul>
+                        <li><a href="/add_product_form">Add Product</a></li>
+                        <li><a href="/settings">Settings</a></li>
+                        <li><a href="/auth/logout">Logout</a></li>
+                    </ul>
+                    <hr>
+                    <p style="color: red;">Template rendering failed. Using emergency dashboard.</p>
+                </body>
+                </html>
+                """
 
         except Exception as e:
             print(f"❌ DASHBOARD_VIEW: Database error: {e}")
@@ -3653,8 +3700,8 @@ def dashboard_view():
         print(f"❌ DASHBOARD_VIEW: Fatal error: {e}")
         import traceback
         traceback.print_exc()
-        flash('Dashboard temporarily unavailable. Please try again.', 'error')
-        return redirect(url_for('index'))
+        # Don't redirect - raise the error to be handled by the caller
+        raise
 
 @app.route('/test_dashboard')
 @login_required
@@ -3678,6 +3725,68 @@ def test_dashboard():
         """
     except Exception as e:
         return f"Error: {str(e)}", 500
+
+@app.route('/clear_session')
+def clear_session():
+    """Clear session to fix redirect loops"""
+    session.clear()
+    flash('Session cleared. Please log in again.', 'info')
+    return redirect(url_for('auth.login'))
+
+@app.route('/emergency_dashboard')
+@login_required
+def emergency_dashboard():
+    """Emergency dashboard that doesn't use database or templates"""
+    return f"""
+    <html>
+    <head>
+        <title>Emergency Dashboard</title>
+        <style>
+            body {{
+                font-family: Arial, sans-serif;
+                padding: 20px;
+                max-width: 800px;
+                margin: 0 auto;
+            }}
+            .card {{
+                background: #f5f5f5;
+                padding: 20px;
+                border-radius: 8px;
+                margin: 20px 0;
+            }}
+        </style>
+    </head>
+    <body>
+        <h1>Emergency Dashboard</h1>
+
+        <div class="card">
+            <h2>User Info</h2>
+            <p><strong>Email:</strong> {current_user.email}</p>
+            <p><strong>ID:</strong> {current_user.id}</p>
+            <p><strong>Authenticated:</strong> {current_user.is_authenticated}</p>
+        </div>
+
+        <div class="card">
+            <h2>Quick Actions</h2>
+            <ul>
+                <li><a href="/test_dashboard">Test Dashboard</a></li>
+                <li><a href="/add_product_form">Add Product</a></li>
+                <li><a href="/settings">Settings</a></li>
+                <li><a href="/check_api_key">Check API Key</a></li>
+                <li><a href="/check_scrapingbee_usage">Check ScrapingBee Usage</a></li>
+                <li><a href="/auth/logout">Logout</a></li>
+                <li><a href="/clear_session">Clear Session (if stuck)</a></li>
+            </ul>
+        </div>
+
+        <div class="card">
+            <h2>Debug</h2>
+            <p>If you're seeing this, the main dashboard has an error.</p>
+            <p>Try <a href="/clear_session">clearing your session</a> and logging in again.</p>
+        </div>
+    </body>
+    </html>
+    """
 
 @app.route('/check_api_key')
 @login_required
