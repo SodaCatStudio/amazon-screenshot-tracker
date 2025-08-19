@@ -124,7 +124,9 @@ csrf = CSRFProtect()
 limiter = Limiter(
     app=app,
     key_func=get_remote_address,
-    default_limits=["50 per day", "10 per hour"]
+    default_limits=["200 per day", "50 per hour"],  # Increased from 50/day, 10/hour
+    storage_uri="memory://",  # Use in-memory storage
+    strategy="fixed-window"
 )
 
 login_manager.login_view = 'auth.login'  # type: ignore
@@ -3031,7 +3033,7 @@ def add_product_form():
     return render_template('add_product.html')
 
 @app.route('/add_product', methods=['POST'])
-@limiter.limit("2 per minute")
+@limiter.limit("10 per minute")
 @login_required
 def add_product():
     """Fixed add_product to ensure proper user association and API key check"""
@@ -3072,11 +3074,28 @@ def add_product():
             return redirect(url_for('add_product_form'))
 
         # Scrape product
-        user_monitor = AmazonMonitor.for_user(current_user.id)
-        scrape_result = user_monitor.scrape_amazon_page(url)
+        try:
+            user_monitor = AmazonMonitor.for_user(current_user.id)
+            scrape_result = user_monitor.scrape_amazon_page(url)
+        except Exception as scrape_error:
+            print(f"❌ Scraping error: {scrape_error}")
+            flash(f'Error accessing product: {str(scrape_error)}', 'error')
+            conn.close()
+            return redirect(url_for('add_product_form'))
 
         if not scrape_result.get('success'):
-            flash(f'Error accessing product: {scrape_result.get("error")}', 'error')
+            error_msg = scrape_result.get("error", "Unknown error")
+
+            # Check for specific error types
+            if "429" in str(error_msg) or "rate limit" in error_msg.lower():
+                flash('ScrapingBee rate limit reached. Please wait a moment and try again.', 'warning')
+            elif "401" in str(error_msg) or "unauthorized" in error_msg.lower():
+                flash('Invalid ScrapingBee API key. Please check your settings.', 'error')
+                conn.close()
+                return redirect(url_for('settings'))
+            else:
+                flash(f'Error accessing product: {error_msg}', 'error')
+
             conn.close()
             return redirect(url_for('add_product_form'))
 
@@ -3153,11 +3172,182 @@ def add_product():
         print(f"❌ Error adding product: {e}")
         import traceback
         traceback.print_exc()
-        flash('Error adding product. Please try again.', 'error')
+
+        # Check if it's a rate limit error
+        if "Too Many Requests" in str(e):
+            flash('Rate limit reached. Please wait a moment and try again.', 'warning')
+        else:
+            flash('Error adding product. Please try again.', 'error')
     finally:
         conn.close()
 
     return redirect(url_for('dashboard'))
+
+# Add route to reset rate limits (admin only)
+@app.route('/admin/reset_rate_limits')
+@login_required
+def reset_rate_limits():
+    """Reset rate limits for debugging"""
+    ADMIN_EMAILS = ['amazonscreenshottracker@gmail.com', 'josh.matern@gmail.com']
+    if current_user.email not in ADMIN_EMAILS:
+        return "Unauthorized", 403
+
+    try:
+        limiter.reset()
+        flash('Rate limits reset successfully', 'success')
+        return redirect(url_for('dashboard'))
+    except Exception as e:
+        return f"Error resetting rate limits: {str(e)}", 500
+
+
+# Add error handler for rate limit exceeded
+@app.errorhandler(429)
+def rate_limit_handler(e):
+    """Handle rate limit exceeded errors"""
+    flash('Rate limit exceeded. Please wait a moment and try again.', 'warning')
+    return redirect(request.referrer or url_for('dashboard'))
+
+@app.route('/check_scrapingbee_usage')
+@login_required
+def check_scrapingbee_usage():
+    """Check ScrapingBee API key validity and usage"""
+    conn = get_db()
+    cursor = conn.cursor()
+
+    try:
+        # Get user's API key
+        if get_db_type() == 'postgresql':
+            cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = %s', (current_user.id,))
+        else:
+            cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = ?', (current_user.id,))
+
+        result = cursor.fetchone()
+
+        if result:
+            if isinstance(result, dict):
+                encrypted_key = result.get('scrapingbee_api_key')
+            else:
+                encrypted_key = result[0] if result else None
+        else:
+            encrypted_key = None
+
+        conn.close()
+
+        if not encrypted_key:
+            return """
+            <html>
+            <body style="font-family: Arial, sans-serif; padding: 20px;">
+                <h2>No API Key Found</h2>
+                <p>Please add your ScrapingBee API key in settings first.</p>
+                <a href="/settings">Go to Settings</a>
+            </body>
+            </html>
+            """
+
+        # Decrypt the API key
+        try:
+            api_key = api_encryption.decrypt(encrypted_key)
+        except Exception as e:
+            return f"Error decrypting API key: {str(e)}", 500
+
+        # Test the API key with ScrapingBee's account endpoint
+        import requests
+
+        try:
+            # ScrapingBee account info endpoint
+            response = requests.get(
+                'https://app.scrapingbee.com/api/v1/usage',
+                params={'api_key': api_key},
+                timeout=10
+            )
+
+            if response.status_code == 200:
+                usage_data = response.json()
+
+                return f"""
+                <html>
+                <head>
+                    <style>
+                        body {{ font-family: Arial, sans-serif; padding: 20px; }}
+                        .success {{ color: green; }}
+                        .warning {{ color: orange; }}
+                        .error {{ color: red; }}
+                        .usage-box {{ 
+                            background: #f5f5f5; 
+                            padding: 20px; 
+                            border-radius: 8px; 
+                            margin: 20px 0;
+                        }}
+                    </style>
+                </head>
+                <body>
+                    <h2 class="success">✅ API Key is Valid!</h2>
+
+                    <div class="usage-box">
+                        <h3>ScrapingBee Usage</h3>
+                        <p><strong>API Credits Used:</strong> {usage_data.get('used_credits', 'N/A')}</p>
+                        <p><strong>Max API Credits:</strong> {usage_data.get('max_credits', 'N/A')}</p>
+                        <p><strong>Credits Remaining:</strong> {usage_data.get('max_credits', 0) - usage_data.get('used_credits', 0)}</p>
+                        <p><strong>Plan:</strong> {usage_data.get('plan', 'N/A')}</p>
+                    </div>
+
+                    <p><strong>API Key (first 20 chars):</strong> {api_key[:20]}...</p>
+
+                    <h3>Quick Actions</h3>
+                    <ul>
+                        <li><a href="/add_product_form">Add a Product</a></li>
+                        <li><a href="/dashboard">Back to Dashboard</a></li>
+                        <li><a href="/settings">Settings</a></li>
+                    </ul>
+                </body>
+                </html>
+                """
+            elif response.status_code == 401:
+                return f"""
+                <html>
+                <body style="font-family: Arial, sans-serif; padding: 20px;">
+                    <h2 class="error">❌ Invalid API Key</h2>
+                    <p>The API key is not recognized by ScrapingBee.</p>
+                    <p>Response: {response.text}</p>
+                    <p><strong>API Key (first 20 chars):</strong> {api_key[:20]}...</p>
+                    <br>
+                    <p>Please check your API key in your ScrapingBee dashboard and update it in settings.</p>
+                    <a href="/settings">Go to Settings</a>
+                </body>
+                </html>
+                """
+            elif response.status_code == 429:
+                return """
+                <html>
+                <body style="font-family: Arial, sans-serif; padding: 20px;">
+                    <h2 class="warning">⚠️ Rate Limited</h2>
+                    <p>You've exceeded your ScrapingBee API rate limit.</p>
+                    <p>Please wait a moment and try again.</p>
+                    <a href="/dashboard">Back to Dashboard</a>
+                </body>
+                </html>
+                """
+            else:
+                return f"""
+                <html>
+                <body style="font-family: Arial, sans-serif; padding: 20px;">
+                    <h2>API Check Result</h2>
+                    <p><strong>Status Code:</strong> {response.status_code}</p>
+                    <p><strong>Response:</strong> {response.text[:500]}</p>
+                    <a href="/dashboard">Back to Dashboard</a>
+                </body>
+                </html>
+                """
+
+        except requests.exceptions.Timeout:
+            return "ScrapingBee API check timed out", 504
+        except Exception as e:
+            return f"Error checking ScrapingBee API: {str(e)}", 500
+
+    except Exception as e:
+        if conn:
+            conn.close()
+        return f"Database error: {str(e)}", 500
 
 # Add a route to view baseline screenshots
 @app.route('/baseline_screenshot/<int:product_id>')
