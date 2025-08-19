@@ -1989,42 +1989,104 @@ def forgot_password():
 
 @auth.route('/verify_email')
 def verify_email():
-    """Verify email with token"""
+    """Verify email with token - FIXED"""
     token = request.args.get('token')
     if not token:
         flash('Invalid verification link!', 'error')
         return redirect(url_for('auth.login'))
 
-    conn = sqlite3.connect('amazon_monitor.db')
+    conn = get_db()
     cursor = conn.cursor()
 
     try:
+        # Debug: Let's see what's happening
+        print(f"🔍 Attempting to verify token: {token[:20]}...")
+
         # Check if token is valid and not expired
-        cursor.execute('''
-            SELECT id FROM users 
-            WHERE verification_token = ? AND 
-                  (verification_token_expiry IS NULL OR verification_token_expiry > ?)
-        ''', (token, datetime.now()))
+        if get_db_type() == 'postgresql':
+            cursor.execute('''
+                SELECT id, email FROM users 
+                WHERE verification_token = %s AND 
+                      (verification_token_expiry IS NULL OR verification_token_expiry > %s)
+            ''', (token, datetime.now()))
+        else:
+            cursor.execute('''
+                SELECT id, email FROM users 
+                WHERE verification_token = ? AND 
+                      (verification_token_expiry IS NULL OR verification_token_expiry > ?)
+            ''', (token, datetime.now()))
 
-        user = cursor.fetchone()
+        user_data = cursor.fetchone()
 
-        if user:
-            # Mark user as verified
+        if not user_data:
+            # Let's check if token exists but is expired
+            if get_db_type() == 'postgresql':
+                cursor.execute('''
+                    SELECT id, email, verification_token_expiry 
+                    FROM users WHERE verification_token = %s
+                ''', (token,))
+            else:
+                cursor.execute('''
+                    SELECT id, email, verification_token_expiry 
+                    FROM users WHERE verification_token = ?
+                ''', (token,))
+
+            expired_user = cursor.fetchone()
+
+            if expired_user:
+                if isinstance(expired_user, dict):
+                    expiry = expired_user['verification_token_expiry']
+                    email = expired_user['email']
+                else:
+                    expiry = expired_user[2]
+                    email = expired_user[1]
+
+                print(f"❌ Token expired for {email}. Expired at: {expiry}")
+                flash('Verification link has expired. Please request a new one.', 'error')
+                conn.close()
+                return redirect(url_for('auth.resend_verification'))
+            else:
+                print(f"❌ Token not found in database: {token[:20]}...")
+                flash('Invalid verification link!', 'error')
+                conn.close()
+                return redirect(url_for('auth.login'))
+
+        # Extract user data
+        if isinstance(user_data, dict):
+            user_id = user_data['id']
+            email = user_data['email']
+        else:
+            user_id = user_data[0]
+            email = user_data[1]
+
+        print(f"✅ Valid token found for user {email} (ID: {user_id})")
+
+        # Mark user as verified
+        if get_db_type() == 'postgresql':
+            cursor.execute('''
+                UPDATE users 
+                SET is_verified = true, 
+                    verification_token = NULL,
+                    verification_token_expiry = NULL 
+                WHERE id = %s
+            ''', (user_id,))
+        else:
             cursor.execute('''
                 UPDATE users 
                 SET is_verified = 1, 
                     verification_token = NULL,
                     verification_token_expiry = NULL 
-                WHERE verification_token = ?
-            ''', (token,))
+                WHERE id = ?
+            ''', (user_id,))
 
-            conn.commit()
-            flash('Email verified successfully! You can now log in.', 'success')
-        else:
-            flash('Invalid or expired verification link!', 'error')
+        conn.commit()
+        print(f"✅ User {email} verified successfully!")
+        flash('Email verified successfully! You can now log in.', 'success')
 
     except Exception as e:
-        print(f"Email verification error: {e}")
+        print(f"❌ Email verification error: {e}")
+        import traceback
+        traceback.print_exc()
         flash('An error occurred during verification.', 'error')
     finally:
         conn.close()
@@ -2033,7 +2095,7 @@ def verify_email():
 
 @auth.route('/resend_verification', methods=['GET', 'POST'])
 def resend_verification():
-    """Resend verification email"""
+    """Resend verification email - FIXED"""
     if request.method == 'POST':
         email = request.form.get('email', '').strip().lower()
 
@@ -2048,12 +2110,14 @@ def resend_verification():
             # Get user info
             if get_db_type() == 'postgresql':
                 cursor.execute('''
-                    SELECT id, is_verified FROM users 
+                    SELECT id, is_verified, verification_token 
+                    FROM users 
                     WHERE LOWER(email) = LOWER(%s)
                 ''', (email,))
             else:
                 cursor.execute('''
-                    SELECT id, is_verified FROM users 
+                    SELECT id, is_verified, verification_token 
+                    FROM users 
                     WHERE LOWER(email) = LOWER(?)
                 ''', (email,))
 
@@ -2068,9 +2132,14 @@ def resend_verification():
             if isinstance(user_data, dict):
                 user_id = user_data['id']
                 is_verified = user_data['is_verified']
+                old_token = user_data['verification_token']
             else:
                 user_id = user_data[0]
                 is_verified = user_data[1]
+                old_token = user_data[2]
+
+            print(f"🔍 Resending verification for user {email} (ID: {user_id})")
+            print(f"   Old token: {old_token[:20] if old_token else 'None'}...")
 
             if is_verified:
                 flash('This email is already verified. You can log in.', 'info')
@@ -2080,6 +2149,9 @@ def resend_verification():
             # Generate new verification token
             verification_token = secrets.token_urlsafe(32)
             token_expiry = datetime.now() + timedelta(hours=24)
+
+            print(f"📝 Generated new token: {verification_token[:20]}...")
+            print(f"   Expires at: {token_expiry}")
 
             # Update user with new token
             if get_db_type() == 'postgresql':
@@ -2095,27 +2167,42 @@ def resend_verification():
                     WHERE id = ?
                 ''', (verification_token, token_expiry, user_id))
 
+            # Commit BEFORE sending email
             conn.commit()
+            print(f"✅ Token saved to database for user {email}")
 
             # Send verification email
             if email_notifier.is_configured():
-                email_notifier.send_verification_email_async(email, verification_token)
-                flash('Verification email sent! Please check your inbox.', 'success')
+                print(f"📧 Sending verification email to {email}...")
+
+                # Send synchronously for debugging
+                success = email_notifier.send_verification_email(email, verification_token)
+
+                if success:
+                    print(f"✅ Verification email sent successfully")
+                    flash('Verification email sent! Please check your inbox.', 'success')
+                else:
+                    print(f"❌ Failed to send verification email")
+                    flash('Error sending email. Please try again later.', 'error')
             else:
                 flash('Email system not configured. Contact support for manual verification.', 'warning')
+                print("⚠️ Email system not configured")
 
             conn.close()
             return redirect(url_for('auth.login'))
 
         except Exception as e:
-            print(f"Error resending verification: {e}")
+            print(f"❌ Error resending verification: {e}")
+            import traceback
+            traceback.print_exc()
             flash('Error sending verification email. Please try again.', 'error')
-            conn.close()
+            if conn:
+                conn.rollback()
+                conn.close()
 
     return render_template('auth/resend_verification.html')
 
 @app.route('/debug/products')
-@login_required
 def debug_products():
     try:
         conn = get_db()
@@ -2162,7 +2249,6 @@ def debug_products():
         return f"Debug Error: {str(e)}", 500
 
 @app.route('/debug/persistence-test')
-@login_required  
 def persistence_test():
     try:
         conn = get_db()
@@ -2240,8 +2326,201 @@ def debug_basic_env():
     except Exception as e:
         return f"Basic env check failed: {str(e)}"
 
-@app.route('/debug/db-connection')
+@app.route('/admin/check_tokens')
 @login_required
+def check_tokens():
+    """Debug route to check verification tokens"""
+    ADMIN_EMAILS = ['amazonscreenshottracker@gmail.com']
+    if current_user.email not in ADMIN_EMAILS:
+        return "Unauthorized", 403
+
+    conn = get_db()
+    cursor = conn.cursor()
+
+    if get_db_type() == 'postgresql':
+        cursor.execute('''
+            SELECT email, is_verified, verification_token, verification_token_expiry,
+                   CASE 
+                       WHEN verification_token_expiry > %s THEN 'Valid'
+                       WHEN verification_token_expiry <= %s THEN 'Expired'
+                       ELSE 'No Expiry Set'
+                   END as status
+            FROM users 
+            WHERE is_verified = false OR is_verified IS NULL
+            ORDER BY email
+        ''', (datetime.now(), datetime.now()))
+    else:
+        cursor.execute('''
+            SELECT email, is_verified, verification_token, verification_token_expiry,
+                   CASE 
+                       WHEN verification_token_expiry > ? THEN 'Valid'
+                       WHEN verification_token_expiry <= ? THEN 'Expired'
+                       ELSE 'No Expiry Set'
+                   END as status
+            FROM users 
+            WHERE is_verified = 0 OR is_verified IS NULL
+            ORDER BY email
+        ''', (datetime.now(), datetime.now()))
+
+    users = cursor.fetchall()
+    conn.close()
+
+    html = """
+    <html>
+    <head>
+        <title>Verification Token Debug</title>
+        <style>
+            body { font-family: monospace; padding: 20px; }
+            table { border-collapse: collapse; width: 100%; }
+            th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+            th { background: #f5f5f5; }
+            .expired { color: red; }
+            .valid { color: green; }
+        </style>
+    </head>
+    <body>
+        <h2>Verification Token Status</h2>
+        <p>Current time: """ + str(datetime.now()) + """</p>
+        <table>
+            <tr>
+                <th>Email</th>
+                <th>Verified</th>
+                <th>Token (first 20 chars)</th>
+                <th>Expiry</th>
+                <th>Status</th>
+            </tr>
+    """
+
+    for user in users:
+        if isinstance(user, dict):
+            email = user['email']
+            is_verified = user['is_verified']
+            token = user['verification_token']
+            expiry = user['verification_token_expiry']
+            status = user['status']
+        else:
+            email = user[0]
+            is_verified = user[1]
+            token = user[2]
+            expiry = user[3]
+            status = user[4]
+
+        token_preview = token[:20] + '...' if token else 'None'
+        status_class = 'valid' if status == 'Valid' else 'expired' if status == 'Expired' else ''
+
+        html += f"""
+            <tr>
+                <td>{email}</td>
+                <td>{is_verified}</td>
+                <td>{token_preview}</td>
+                <td>{expiry}</td>
+                <td class="{status_class}">{status}</td>
+            </tr>
+        """
+
+    html += """
+        </table>
+        <br>
+        <a href="/admin/manual_verify">Go to Manual Verify</a>
+    </body>
+    </html>
+    """
+
+    return html
+
+@app.route('/admin/generate_verification_link/<email>')
+def generate_verification_link(email):
+    """Generate a manual verification link for testing"""
+    ADMIN_EMAILS = ['amazonscreenshottracker@gmail.com']
+    if current_user.email not in ADMIN_EMAILS:
+        return "Unauthorized", 403
+
+    conn = get_db()
+    cursor = conn.cursor()
+
+    try:
+        # Get user
+        if get_db_type() == 'postgresql':
+            cursor.execute('''
+                SELECT id, is_verified, verification_token 
+                FROM users 
+                WHERE LOWER(email) = LOWER(%s)
+            ''', (email,))
+        else:
+            cursor.execute('''
+                SELECT id, is_verified, verification_token 
+                FROM users 
+                WHERE LOWER(email) = LOWER(?)
+            ''', (email,))
+
+        user_data = cursor.fetchone()
+
+        if not user_data:
+            return f"User {email} not found", 404
+
+        if isinstance(user_data, dict):
+            user_id = user_data['id']
+            is_verified = user_data['is_verified']
+            existing_token = user_data['verification_token']
+        else:
+            user_id = user_data[0]
+            is_verified = user_data[1]
+            existing_token = user_data[2]
+
+        if is_verified:
+            return f"User {email} is already verified"
+
+        # Generate new token
+        verification_token = secrets.token_urlsafe(32)
+        token_expiry = datetime.now() + timedelta(hours=24)
+
+        # Update user
+        if get_db_type() == 'postgresql':
+            cursor.execute('''
+                UPDATE users 
+                SET verification_token = %s, verification_token_expiry = %s
+                WHERE id = %s
+            ''', (verification_token, token_expiry, user_id))
+        else:
+            cursor.execute('''
+                UPDATE users 
+                SET verification_token = ?, verification_token_expiry = ?
+                WHERE id = ?
+            ''', (verification_token, token_expiry, user_id))
+
+        conn.commit()
+        conn.close()
+
+        # Generate the link
+        base_url = request.host_url.rstrip('/')
+        verification_link = f"{base_url}/auth/verify_email?token={verification_token}"
+
+        return f"""
+        <html>
+        <body style="font-family: monospace; padding: 20px;">
+            <h2>Verification Link Generated</h2>
+            <p><strong>Email:</strong> {email}</p>
+            <p><strong>Token:</strong> {verification_token}</p>
+            <p><strong>Expires:</strong> {token_expiry}</p>
+            <p><strong>Link:</strong></p>
+            <div style="background: #f5f5f5; padding: 10px; word-break: break-all;">
+                <a href="{verification_link}">{verification_link}</a>
+            </div>
+            <br>
+            <p>Copy this link and use it to verify the account.</p>
+            <br>
+            <a href="/admin/check_tokens">Back to Token Status</a>
+        </body>
+        </html>
+        """
+
+    except Exception as e:
+        if conn:
+            conn.rollback()
+            conn.close()
+        return f"Error: {str(e)}", 500
+
+@app.route('/debug/db-connection')
 def debug_db_connection():
     database_url = os.environ.get('DATABASE_URL', 'NOT SET')
 
