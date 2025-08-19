@@ -2652,24 +2652,46 @@ class AmazonMonitor:
 
     @classmethod
     def for_user(cls, user_id):
-        """Create monitor instance with user's API key"""
-        conn = sqlite3.connect('amazon_monitor.db')
+        """Create monitor instance with user's API key - FIXED for PostgreSQL"""
+        conn = get_db()
         cursor = conn.cursor()
 
-        cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = ?', (user_id,))
-        result = cursor.fetchone()
-        conn.close()
+        try:
+            if get_db_type() == 'postgresql':
+                cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = %s', (user_id,))
+            else:
+                cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = ?', (user_id,))
 
-        if result and result[0]:
-            try:
-                decrypted_key = api_encryption.decrypt(result[0])
-            except Exception as e:
-                print(f"Error decrypting API key for user {user_id}: {e}")
-                decrypted_key = None
-            if decrypted_key:
-                return cls(decrypted_key)
-        print(f"No user-specific API key found for user {user_id}. Using system default.")
-        return cls()  # Use system default if no user key
+            result = cursor.fetchone()
+
+            # Fixed: Handle both dict and tuple results
+            if result:
+                if isinstance(result, dict):
+                    encrypted_key = result.get('scrapingbee_api_key')
+                else:
+                    encrypted_key = result[0] if result else None
+            else:
+                encrypted_key = None
+
+            conn.close()
+
+            if encrypted_key:
+                try:
+                    decrypted_key = api_encryption.decrypt(encrypted_key)
+                    print(f"✅ Using user-specific API key for user {user_id}")
+                    return cls(decrypted_key)
+                except Exception as e:
+                    print(f"❌ Error decrypting API key for user {user_id}: {e}")
+                    # Fall through to use system default
+
+            print(f"⚠️ No user-specific API key found for user {user_id}. Using system default.")
+            return cls()  # Use system default if no user key
+
+        except Exception as e:
+            print(f"❌ Error retrieving API key for user {user_id}: {e}")
+            if conn:
+                conn.close()
+            return cls()  # Use system default on error
     
     def scrape_amazon_page(self, url):
         """Use ScrapingBee to scrape Amazon page and take screenshot"""
@@ -3012,18 +3034,32 @@ def add_product_form():
 @limiter.limit("2 per minute")
 @login_required
 def add_product():
-    """Fixed add_product to ensure proper user association"""
+    """Fixed add_product to ensure proper user association and API key check"""
     print(f"🔍 Adding product for user {current_user.email} (ID: {current_user.id})")
 
     conn = get_db()
     cursor = conn.cursor()
 
     try:
-        # Validate API key exists
-        cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = %s', (current_user.id,))
-        result = cursor.fetchone()
+        # Validate API key exists - FIXED for PostgreSQL
+        if get_db_type() == 'postgresql':
+            cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = %s', (current_user.id,))
+        else:
+            cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = ?', (current_user.id,))
 
-        if not result or not result[0]:
+        result = cursor.fetchone()
+        print(f"🔍 API key check result: {result}")
+
+        # Fixed: Handle both dict and tuple results
+        if result:
+            if isinstance(result, dict):
+                api_key = result.get('scrapingbee_api_key')
+            else:
+                api_key = result[0] if result else None
+        else:
+            api_key = None
+
+        if not api_key:
             flash('Please add your ScrapingBee API key in settings.', 'error')
             conn.close()
             return redirect(url_for('settings'))
@@ -3046,7 +3082,7 @@ def add_product():
 
         product_info = user_monitor.extract_product_info(scrape_result['html'])
 
-        # FIX: Use proper insert with RETURNING for PostgreSQL
+        # Use proper insert with RETURNING for PostgreSQL
         if get_db_type() == 'postgresql':
             cursor.execute('''
                 INSERT INTO products (user_id, user_email, product_url, product_title, 
@@ -3063,7 +3099,11 @@ def add_product():
                 product_info.get('is_bestseller', False),
                 datetime.now()
             ))
-            product_id = cursor.fetchone()[0]
+            result = cursor.fetchone()
+            if isinstance(result, dict):
+                product_id = result['id']
+            else:
+                product_id = result[0] if result else None
         else:
             # SQLite version
             cursor.execute('''
@@ -3111,6 +3151,8 @@ def add_product():
     except Exception as e:
         conn.rollback()
         print(f"❌ Error adding product: {e}")
+        import traceback
+        traceback.print_exc()
         flash('Error adding product. Please try again.', 'error')
     finally:
         conn.close()
@@ -3285,7 +3327,7 @@ def dashboard():
         return redirect(url_for('index'))
 
 def dashboard_view():
-    """Fixed dashboard view with proper error handling"""
+    """Fixed dashboard view with proper API key checking"""
     try:
         if not current_user.is_authenticated:
             print("❌ DASHBOARD_VIEW: User not authenticated")
@@ -3300,7 +3342,7 @@ def dashboard_view():
         cursor = conn.cursor()
 
         try:
-            # Check for API key
+            # Check for API key - FIXED for PostgreSQL
             if get_db_type() == 'postgresql':
                 cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = %s', (user_id,))
             else:
@@ -3308,17 +3350,21 @@ def dashboard_view():
 
             result = cursor.fetchone()
 
+            # Fixed: Properly handle dict/tuple and check for actual value
             if result:
                 if isinstance(result, dict):
-                    has_api_key = bool(result.get('scrapingbee_api_key'))
+                    api_key_value = result.get('scrapingbee_api_key')
                 else:
-                    has_api_key = bool(result[0] if result else None)
+                    api_key_value = result[0] if result else None
+
+                has_api_key = bool(api_key_value)
             else:
                 has_api_key = False
 
             print(f"📊 DASHBOARD_VIEW: User has API key: {has_api_key}")
+            print(f"📊 DASHBOARD_VIEW: API key value exists: {bool(api_key_value) if result else False}")
 
-            # Get products
+            # Get products - rest of the code remains the same...
             if get_db_type() == 'postgresql':
                 cursor.execute('''
                     SELECT id, product_title, current_rank, current_category, 
@@ -3379,7 +3425,6 @@ def dashboard_view():
                 ''', (user_id,))
 
             screenshots = cursor.fetchall()
-            print(f"📊 DASHBOARD_VIEW: Found {len(screenshots) if screenshots else 0} screenshots")
 
             # Convert screenshots to list of dicts
             screenshots_list = []
@@ -3444,6 +3489,51 @@ def test_dashboard():
     except Exception as e:
         return f"Error: {str(e)}", 500
 
+@app.route('/check_api_key')
+@login_required
+def check_api_key():
+    """Debug route to check API key status"""
+    conn = get_db()
+    cursor = conn.cursor()
+
+    try:
+        if get_db_type() == 'postgresql':
+            cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = %s', (current_user.id,))
+        else:
+            cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = ?', (current_user.id,))
+
+        result = cursor.fetchone()
+
+        if result:
+            if isinstance(result, dict):
+                api_key = result.get('scrapingbee_api_key')
+            else:
+                api_key = result[0] if result else None
+        else:
+            api_key = None
+
+        conn.close()
+
+        return f"""
+        <html>
+        <body style="font-family: monospace; padding: 20px;">
+            <h2>API Key Status</h2>
+            <p><strong>User ID:</strong> {current_user.id}</p>
+            <p><strong>Email:</strong> {current_user.email}</p>
+            <p><strong>API Key Exists:</strong> {bool(api_key)}</p>
+            <p><strong>API Key Length:</strong> {len(api_key) if api_key else 0}</p>
+            <p><strong>API Key Preview:</strong> {api_key[:10] + '...' if api_key else 'None'}</p>
+            <p><strong>Result Type:</strong> {type(result).__name__}</p>
+            <p><strong>Result Value:</strong> {result}</p>
+            <br>
+            <a href="/settings">Go to Settings</a> | 
+            <a href="/dashboard">Back to Dashboard</a>
+        </body>
+        </html>
+        """
+    except Exception as e:
+        conn.close()
+        return f"Error: {str(e)}", 500
 
 @app.route('/debug_session')
 @login_required
