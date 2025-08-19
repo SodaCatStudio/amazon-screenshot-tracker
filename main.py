@@ -3000,13 +3000,13 @@ monitor = AmazonMonitor(SCRAPINGBEE_API_KEY)
 
 @app.route('/')
 def index():
-    """Landing page - FIXED to prevent redirect loops"""
+    """Landing page - properly handle authenticated users"""
     print(f"🔍 INDEX: Route called")
 
     try:
         if current_user.is_authenticated:
             print(f"🔍 INDEX: Authenticated user: {current_user.email} (ID: {current_user.id})")
-            # Render dashboard directly instead of redirecting
+            # Call dashboard_view directly instead of redirecting
             return dashboard_view()
         else:
             print("🔍 INDEX: Showing landing page for anonymous user")
@@ -3017,16 +3017,8 @@ def index():
         import traceback
         traceback.print_exc()
 
-        # If there's an error, show landing page instead of redirecting
-        try:
-            return render_template('landing.html')
-        except:
-            # Absolute fallback
-            return """
-            <h1>Service Temporarily Unavailable</h1>
-            <p>Please try again in a moment.</p>
-            <a href="/auth/logout">Logout</a> | <a href="/auth/login">Login</a>
-            """, 503
+        # If there's an error, show landing page
+        return render_template('landing.html')
 
 @app.route('/test')
 def test_route():
@@ -3512,43 +3504,16 @@ def view_achievements(product_id):
 @app.route('/dashboard')
 @login_required
 def dashboard():
-    """Dashboard route - prevent infinite redirects"""
+    """Dashboard route"""
     print(f"📊 DASHBOARD: Accessed by {current_user.email} (ID: {current_user.id})")
-
-    try:
-        return dashboard_view()
-    except Exception as e:
-        print(f"❌ DASHBOARD: Error rendering dashboard: {e}")
-        import traceback
-        traceback.print_exc()
-
-        # Don't redirect back to dashboard or index - show error page
-        return """
-        <html>
-        <body style="font-family: Arial, sans-serif; padding: 20px;">
-            <h1>Dashboard Error</h1>
-            <p>The dashboard encountered an error. Please try one of these options:</p>
-            <ul>
-                <li><a href="/test_dashboard">Test Dashboard</a></li>
-                <li><a href="/settings">Settings</a></li>
-                <li><a href="/auth/logout">Logout</a></li>
-                <li><a href="/clear_session">Clear Session</a></li>
-            </ul>
-            <details>
-                <summary>Error Details</summary>
-                <pre>{}</pre>
-            </details>
-        </body>
-        </html>
-        """.format(str(e)), 500
+    return dashboard_view()
 
 def dashboard_view():
-    """Fixed dashboard view - no redirects in here"""
+    """Dashboard view - FIXED to match template expectations"""
     try:
         if not current_user.is_authenticated:
             print("❌ DASHBOARD_VIEW: User not authenticated")
-            # Don't redirect, raise an error instead
-            raise Exception("User not authenticated in dashboard_view")
+            return redirect(url_for('auth.login'))
 
         user_email = current_user.email
         user_id = current_user.id
@@ -3597,26 +3562,28 @@ def dashboard_view():
                     ORDER BY created_at DESC
                 ''', (user_id,))
 
-            products = cursor.fetchall()
-            print(f"📊 DASHBOARD_VIEW: Found {len(products) if products else 0} products")
+            products_raw = cursor.fetchall()
+            print(f"📊 DASHBOARD_VIEW: Found {len(products_raw) if products_raw else 0} products")
 
-            # Convert to list of dicts
-            products_list = []
-            if products:
-                for product in products:
+            # Convert to list of tuples for template (expects product[0], product[1], etc.)
+            products = []
+            if products_raw:
+                for product in products_raw:
                     if isinstance(product, dict):
-                        products_list.append(product)
+                        # Convert dict to tuple in the correct order
+                        products.append((
+                            product['id'],
+                            product['product_title'],
+                            product['current_rank'],
+                            product['current_category'],
+                            product['is_bestseller'],
+                            product['last_checked'],
+                            product['created_at'],
+                            product['active']
+                        ))
                     else:
-                        products_list.append({
-                            'id': product[0],
-                            'product_title': product[1],
-                            'current_rank': product[2],
-                            'current_category': product[3],
-                            'is_bestseller': product[4],
-                            'last_checked': product[5],
-                            'created_at': product[6],
-                            'active': product[7]
-                        })
+                        # Already a tuple, just append
+                        products.append(product)
 
             # Get screenshots
             if get_db_type() == 'postgresql':
@@ -3638,55 +3605,36 @@ def dashboard_view():
                     ORDER BY bs.achieved_at DESC
                 ''', (user_id,))
 
-            screenshots = cursor.fetchall()
+            screenshots_raw = cursor.fetchall()
 
-            screenshots_list = []
-            if screenshots:
-                for screenshot in screenshots:
+            # Convert to list of tuples for template
+            screenshots = []
+            if screenshots_raw:
+                for screenshot in screenshots_raw:
                     if isinstance(screenshot, dict):
-                        screenshots_list.append(screenshot)
+                        # Convert dict to tuple
+                        screenshots.append((
+                            screenshot['id'],
+                            screenshot['product_title'],
+                            screenshot['rank_achieved'],
+                            screenshot['category'],
+                            screenshot['achieved_at']
+                        ))
                     else:
-                        screenshots_list.append({
-                            'id': screenshot[0],
-                            'product_title': screenshot[1],
-                            'rank_achieved': screenshot[2],
-                            'category': screenshot[3],
-                            'achieved_at': screenshot[4]
-                        })
+                        # Already a tuple
+                        screenshots.append(screenshot)
 
             conn.close()
 
             print(f"✅ DASHBOARD_VIEW: Rendering dashboard template")
+            print(f"   Products format: {type(products)}, Screenshots format: {type(screenshots)}")
 
-            # Make sure template exists
-            try:
-                return render_template('dashboard.html',
-                                     email=user_email,
-                                     products=products_list,
-                                     screenshots=screenshots_list,
-                                     has_api_key=has_api_key)
-            except Exception as template_error:
-                print(f"❌ Template error: {template_error}")
-                # Return a basic HTML dashboard if template fails
-                return f"""
-                <html>
-                <body style="font-family: Arial, sans-serif; padding: 20px;">
-                    <h1>Dashboard (Emergency Mode)</h1>
-                    <p>Welcome, {user_email}!</p>
-                    <p>API Key: {'Yes' if has_api_key else 'No'}</p>
-                    <p>Products: {len(products_list)}</p>
-                    <p>Screenshots: {len(screenshots_list)}</p>
-                    <hr>
-                    <ul>
-                        <li><a href="/add_product_form">Add Product</a></li>
-                        <li><a href="/settings">Settings</a></li>
-                        <li><a href="/auth/logout">Logout</a></li>
-                    </ul>
-                    <hr>
-                    <p style="color: red;">Template rendering failed. Using emergency dashboard.</p>
-                </body>
-                </html>
-                """
+            # Render the dashboard template with the correct data format
+            return render_template('dashboard.html',
+                                 email=user_email,
+                                 products=products,
+                                 screenshots=screenshots,
+                                 has_api_key=has_api_key)
 
         except Exception as e:
             print(f"❌ DASHBOARD_VIEW: Database error: {e}")
@@ -3694,14 +3642,38 @@ def dashboard_view():
             traceback.print_exc()
             if conn:
                 conn.close()
-            raise
+
+            # Return an error page instead of raising
+            return f"""
+            <html>
+            <body style="font-family: Arial, sans-serif; padding: 20px;">
+                <h1>Dashboard Error</h1>
+                <p>Unable to load dashboard data.</p>
+                <p>Error: {str(e)}</p>
+                <br>
+                <a href="/emergency_dashboard">Emergency Dashboard</a> | 
+                <a href="/auth/logout">Logout</a>
+            </body>
+            </html>
+            """, 500
 
     except Exception as e:
         print(f"❌ DASHBOARD_VIEW: Fatal error: {e}")
         import traceback
         traceback.print_exc()
-        # Don't redirect - raise the error to be handled by the caller
-        raise
+
+        # Return error page instead of redirecting
+        return f"""
+        <html>
+        <body style="font-family: Arial, sans-serif; padding: 20px;">
+            <h1>Dashboard Error</h1>
+            <p>A critical error occurred.</p>
+            <p>Error: {str(e)}</p>
+            <br>
+            <a href="/auth/logout">Logout and try again</a>
+        </body>
+        </html>
+        """, 500
 
 @app.route('/test_dashboard')
 @login_required
