@@ -2654,7 +2654,7 @@ class AmazonMonitor:
 
     @classmethod
     def for_user(cls, user_id):
-        """Create monitor instance with user's API key - FIXED for PostgreSQL"""
+        """Create monitor instance with user's API key"""
         conn = get_db()
         cursor = conn.cursor()
 
@@ -2666,7 +2666,6 @@ class AmazonMonitor:
 
             result = cursor.fetchone()
 
-            # Fixed: Handle both dict and tuple results
             if result:
                 if isinstance(result, dict):
                     encrypted_key = result.get('scrapingbee_api_key')
@@ -2684,19 +2683,18 @@ class AmazonMonitor:
                     return cls(decrypted_key)
                 except Exception as e:
                     print(f"❌ Error decrypting API key for user {user_id}: {e}")
-                    # Fall through to use system default
 
             print(f"⚠️ No user-specific API key found for user {user_id}. Using system default.")
-            return cls()  # Use system default if no user key
+            return cls()
 
         except Exception as e:
             print(f"❌ Error retrieving API key for user {user_id}: {e}")
             if conn:
                 conn.close()
-            return cls()  # Use system default on error
+            return cls()
     
     def scrape_amazon_page(self, url):
-        """Use ScrapingBee to scrape Amazon page and take screenshot"""
+        """Use ScrapingBee to scrape Amazon page and take screenshot - FIXED for screenshots"""
         if not self.api_key:
             print("❌ ScrapingBee API key not configured")
             return {'success': False, 'error': 'ScrapingBee API key not configured'}
@@ -2704,23 +2702,19 @@ class AmazonMonitor:
         try:
             print(f"🔄 Starting ScrapingBee request for: {url}")
 
-            # CORRECTED parameters with render_js for screenshots
+            # CRITICAL: These parameters are required for screenshots
             params = {
                 'api_key': self.api_key,
                 'url': url,
-                'render_js': 'true',  # REQUIRED for screenshots!
-                'screenshot': 'true',
-                'json_response': 'true',  # To get both HTML and screenshot
+                'render_js': 'true',  # MUST be true for screenshots
+                'screenshot': 'true',  # Enable screenshot capture
                 'screenshot_full_page': 'false',  # Just viewport for efficiency
-                'wait': '3000',  # Wait 3 seconds for page to fully load
+                'wait': '3000',  # Wait for page to load
                 'premium_proxy': 'true',
                 'country_code': 'us',
-                # Wait for key elements to ensure page is loaded
-                'wait_for': '#productTitle, h1#title, span.a-badge-text',
-                # block_resources automatically set to false when screenshot=true
             }
 
-            print("📤 Making request to ScrapingBee API with JavaScript rendering...")
+            print("📤 Making request to ScrapingBee with screenshot enabled...")
             response = requests.get(SCRAPINGBEE_URL, params=params, timeout=60)
 
             print(f"📥 ScrapingBee response status: {response.status_code}")
@@ -2728,11 +2722,19 @@ class AmazonMonitor:
             if response.status_code == 200:
                 print("✅ ScrapingBee request successful")
 
-                # With json_response=true, the response is JSON
+                # Parse the response
                 try:
-                    response_data = response.json()
-                    html_content = response_data.get('body', '')
-                    screenshot_data = response_data.get('screenshot', '')
+                    # ScrapingBee returns HTML in response.text
+                    html_content = response.text
+
+                    # Screenshot is in the response header
+                    screenshot_data = response.headers.get('Spb-Screenshot')
+
+                    if not screenshot_data:
+                        print("⚠️ No screenshot in header, checking for base64 in response...")
+                        # Sometimes it's embedded in the response
+                        if response.text.startswith('data:image'):
+                            screenshot_data = response.text.split(',')[1] if ',' in response.text else None
 
                     print(f"📄 HTML content length: {len(html_content)} characters")
                     print(f"📸 Screenshot data present: {'Yes' if screenshot_data else 'No'}")
@@ -2745,24 +2747,17 @@ class AmazonMonitor:
                         'screenshot': screenshot_data,
                         'success': True
                     }
-                except json.JSONDecodeError:
-                    # Fallback if JSON parsing fails
-                    print("⚠️ JSON response parsing failed, trying legacy method")
+
+                except Exception as parse_error:
+                    print(f"⚠️ Error parsing response: {parse_error}")
                     return {
                         'html': response.text,
-                        'screenshot': response.headers.get('Spb-Screenshot'),
+                        'screenshot': None,
                         'success': True
                     }
             else:
                 error_msg = f'HTTP {response.status_code}: {response.text[:500]}'
                 print(f"❌ ScrapingBee error: {error_msg}")
-
-                # Check if it's a rate limit error
-                if response.status_code == 429:
-                    print("⚠️ Rate limit reached - consider adding delay between requests")
-                elif response.status_code == 400:
-                    print("⚠️ Bad request - check API parameters")
-
                 return {'success': False, 'error': error_msg}
 
         except requests.exceptions.Timeout:
@@ -3025,6 +3020,226 @@ def test_route():
     """Simple test route to verify basic functionality"""
     print("🔍 TEST: Simple test route called")
     return "✅ Test route working! App is alive.", 200
+
+@app.route('/debug/baseline_screenshots')
+@login_required
+def debug_baseline_screenshots():
+    """Debug route to check baseline screenshots"""
+    conn = get_db()
+    cursor = conn.cursor()
+
+    try:
+        # Get all products for user
+        if get_db_type() == 'postgresql':
+            cursor.execute('''
+                SELECT p.id, p.product_title, b.id as baseline_id, 
+                       LENGTH(b.screenshot_data) as screenshot_size
+                FROM products p
+                LEFT JOIN baseline_screenshots b ON p.id = b.product_id
+                WHERE p.user_id = %s
+                ORDER BY p.created_at DESC
+            ''', (current_user.id,))
+        else:
+            cursor.execute('''
+                SELECT p.id, p.product_title, b.id as baseline_id, 
+                       LENGTH(b.screenshot_data) as screenshot_size
+                FROM products p
+                LEFT JOIN baseline_screenshots b ON p.id = b.product_id
+                WHERE p.user_id = ?
+                ORDER BY p.created_at DESC
+            ''', (current_user.id,))
+
+        products = cursor.fetchall()
+        conn.close()
+
+        html = """
+        <html>
+        <body style="font-family: monospace; padding: 20px;">
+            <h2>Baseline Screenshots Debug</h2>
+            <table border="1" cellpadding="10">
+                <tr>
+                    <th>Product ID</th>
+                    <th>Title</th>
+                    <th>Has Baseline?</th>
+                    <th>Screenshot Size</th>
+                    <th>Action</th>
+                </tr>
+        """
+
+        for product in products:
+            if isinstance(product, dict):
+                prod_id = product['id']
+                title = product['product_title']
+                baseline_id = product['baseline_id']
+                size = product['screenshot_size']
+            else:
+                prod_id = product[0]
+                title = product[1]
+                baseline_id = product[2]
+                size = product[3]
+
+            has_baseline = "✅ Yes" if baseline_id else "❌ No"
+            size_display = f"{size} bytes" if size else "N/A"
+
+            html += f"""
+                <tr>
+                    <td>{prod_id}</td>
+                    <td>{title[:50]}...</td>
+                    <td>{has_baseline}</td>
+                    <td>{size_display}</td>
+                    <td>
+                        <a href="/baseline_screenshot/{prod_id}" target="_blank">View</a> |
+                        <a href="/capture_baseline/{prod_id}">Capture Now</a>
+                    </td>
+                </tr>
+            """
+
+        html += """
+            </table>
+            <br>
+            <a href="/dashboard">Back to Dashboard</a>
+        </body>
+        </html>
+        """
+
+        return html
+
+    except Exception as e:
+        if conn:
+            conn.close()
+        return f"Error: {str(e)}", 500
+
+
+@app.route('/capture_baseline/<int:product_id>')
+@login_required
+def capture_baseline(product_id):
+    """Manually capture baseline screenshot for a product"""
+    conn = get_db()
+    cursor = conn.cursor()
+
+    try:
+        # Verify product belongs to user
+        if get_db_type() == 'postgresql':
+            cursor.execute('''
+                SELECT product_url FROM products 
+                WHERE id = %s AND user_id = %s
+            ''', (product_id, current_user.id))
+        else:
+            cursor.execute('''
+                SELECT product_url FROM products 
+                WHERE id = ? AND user_id = ?
+            ''', (product_id, current_user.id))
+
+        result = cursor.fetchone()
+        if not result:
+            conn.close()
+            return "Product not found or unauthorized", 404
+
+        if isinstance(result, dict):
+            product_url = result['product_url']
+        else:
+            product_url = result[0]
+
+        # Capture screenshot
+        user_monitor = AmazonMonitor.for_user(current_user.id)
+        scrape_result = user_monitor.scrape_amazon_page(product_url)
+
+        if not scrape_result.get('success'):
+            conn.close()
+            return f"Scraping failed: {scrape_result.get('error')}", 500
+
+        if scrape_result.get('screenshot'):
+            # Extract product info
+            product_info = user_monitor.extract_product_info(scrape_result['html'])
+
+            # Save baseline screenshot
+            if get_db_type() == 'postgresql':
+                cursor.execute('''
+                    INSERT INTO baseline_screenshots 
+                    (product_id, screenshot_data, initial_rank, initial_category, captured_at)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (product_id) DO UPDATE SET
+                    screenshot_data = EXCLUDED.screenshot_data,
+                    initial_rank = EXCLUDED.initial_rank,
+                    initial_category = EXCLUDED.initial_category,
+                    captured_at = EXCLUDED.captured_at
+                ''', (product_id, scrape_result['screenshot'], 
+                      product_info.get('rank'), product_info.get('category'), 
+                      datetime.now()))
+            else:
+                cursor.execute('''
+                    INSERT OR REPLACE INTO baseline_screenshots 
+                    (product_id, screenshot_data, initial_rank, initial_category, captured_at)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (product_id, scrape_result['screenshot'], 
+                      product_info.get('rank'), product_info.get('category'), 
+                      datetime.now()))
+
+            conn.commit()
+            conn.close()
+
+            return f"""
+            <html>
+            <body style="font-family: Arial, sans-serif; padding: 20px;">
+                <h2>✅ Baseline Screenshot Captured!</h2>
+                <p>Product ID: {product_id}</p>
+                <p>Rank: {product_info.get('rank', 'N/A')}</p>
+                <p>Category: {product_info.get('category', 'N/A')}</p>
+                <br>
+                <a href="/baseline_screenshot/{product_id}" target="_blank">View Screenshot</a> |
+                <a href="/debug/baseline_screenshots">Back to Debug</a> |
+                <a href="/dashboard">Dashboard</a>
+            </body>
+            </html>
+            """
+        else:
+            conn.close()
+            return "No screenshot captured (ScrapingBee might not be configured for screenshots)", 500
+
+    except Exception as e:
+        if conn:
+            conn.rollback()
+            conn.close()
+        return f"Error: {str(e)}", 500
+
+
+@app.route('/test_scrapingbee_screenshot')
+@login_required
+def test_scrapingbee_screenshot():
+    """Test if ScrapingBee can capture screenshots"""
+    try:
+        # Test with Amazon homepage
+        test_url = "https://www.amazon.com"
+
+        user_monitor = AmazonMonitor.for_user(current_user.id)
+        result = user_monitor.scrape_amazon_page(test_url)
+
+        html = f"""
+        <html>
+        <body style="font-family: monospace; padding: 20px;">
+            <h2>ScrapingBee Screenshot Test</h2>
+            <p><strong>Test URL:</strong> {test_url}</p>
+            <p><strong>Success:</strong> {result.get('success')}</p>
+            <p><strong>HTML Length:</strong> {len(result.get('html', ''))}</p>
+            <p><strong>Screenshot Present:</strong> {bool(result.get('screenshot'))}</p>
+            <p><strong>Screenshot Length:</strong> {len(result.get('screenshot', ''))}</p>
+
+            <h3>Error (if any):</h3>
+            <pre>{result.get('error', 'None')}</pre>
+
+            <h3>Screenshot Data Preview:</h3>
+            <pre>{result.get('screenshot', 'No screenshot data')[:100]}...</pre>
+
+            <br>
+            <a href="/dashboard">Back to Dashboard</a>
+        </body>
+        </html>
+        """
+
+        return html
+
+    except Exception as e:
+        return f"Test failed: {str(e)}", 500
 
 @app.route('/add_product_form')
 @login_required
@@ -4302,41 +4517,66 @@ def manual_check():
         return jsonify({'error': 'Failed to check products', 'details': str(e)}), 500
 
 @app.route('/toggle_monitoring/<int:product_id>')
+@login_required
 def toggle_monitoring(product_id):
-    """Toggle monitoring status for a product"""
+    """Toggle monitoring status for a product - FIXED for authenticated users"""
     try:
-        email = request.args.get('email')
-        if not email:
-            return jsonify({'error': 'Email required'}), 400
+        print(f"🔄 Toggle monitoring for product {product_id} by user {current_user.email}")
 
-        conn = sqlite3.connect('amazon_monitor.db')
+        conn = get_db()
         cursor = conn.cursor()
 
         # Verify the product belongs to the user
-        cursor.execute('''
-            SELECT active FROM products 
-            WHERE id = ? AND user_email = ?
-        ''', (product_id, email))
+        if get_db_type() == 'postgresql':
+            cursor.execute('''
+                SELECT active FROM products 
+                WHERE id = %s AND user_id = %s
+            ''', (product_id, current_user.id))
+        else:
+            cursor.execute('''
+                SELECT active FROM products 
+                WHERE id = ? AND user_id = ?
+            ''', (product_id, current_user.id))
 
         result = cursor.fetchone()
         if not result:
-            return jsonify({'error': 'Product not found'}), 404
+            conn.close()
+            return jsonify({'error': 'Product not found or unauthorized'}), 404
+
+        # Get current status
+        if isinstance(result, dict):
+            current_status = result['active']
+        else:
+            current_status = result[0]
 
         # Toggle the active status
-        new_status = 0 if result[0] else 1
-        cursor.execute('''
-            UPDATE products 
-            SET active = ? 
-            WHERE id = ? AND user_email = ?
-        ''', (new_status, product_id, email))
+        new_status = 0 if current_status else 1
+
+        if get_db_type() == 'postgresql':
+            cursor.execute('''
+                UPDATE products 
+                SET active = %s 
+                WHERE id = %s AND user_id = %s
+            ''', (bool(new_status), product_id, current_user.id))
+        else:
+            cursor.execute('''
+                UPDATE products 
+                SET active = ? 
+                WHERE id = ? AND user_id = ?
+            ''', (new_status, product_id, current_user.id))
 
         conn.commit()
         conn.close()
 
         status_text = 'resumed' if new_status else 'paused'
+        print(f"✅ Monitoring {status_text} for product {product_id}")
         return jsonify({'status': f'Monitoring {status_text} successfully'})
 
     except Exception as e:
+        print(f"❌ Error toggling monitoring: {e}")
+        if conn:
+            conn.rollback()
+            conn.close()
         return jsonify({'error': str(e)}), 500
 
 @app.route('/send_feedback', methods=['POST'])
@@ -4454,37 +4694,58 @@ def send_feedback():
     return redirect(url_for('dashboard'))
 
 @app.route('/delete_product/<int:product_id>')
+@login_required
 def delete_product(product_id):
-    """Permanently delete a product and all its data"""
+    """Permanently delete a product and all its data - FIXED for authenticated users"""
     try:
-        email = request.args.get('email')
-        if not email:
-            return jsonify({'error': 'Email required'}), 400
+        print(f"🗑️ Delete request for product {product_id} by user {current_user.email}")
 
-        conn = sqlite3.connect('amazon_monitor.db')
+        conn = get_db()
         cursor = conn.cursor()
 
-        # Verify the product belongs to the user
-        cursor.execute('''
-            SELECT id FROM products 
-            WHERE id = ? AND user_email = ?
-        ''', (product_id, email))
+        # Verify the product belongs to the current user
+        if get_db_type() == 'postgresql':
+            cursor.execute('''
+                SELECT id FROM products 
+                WHERE id = %s AND user_id = %s
+            ''', (product_id, current_user.id))
+        else:
+            cursor.execute('''
+                SELECT id FROM products 
+                WHERE id = ? AND user_id = ?
+            ''', (product_id, current_user.id))
 
         if not cursor.fetchone():
-            return jsonify({'error': 'Product not found'}), 404
+            conn.close()
+            return jsonify({'error': 'Product not found or unauthorized'}), 404
 
         # Delete related records first (foreign key constraints)
-        cursor.execute('DELETE FROM target_categories WHERE product_id = ?', (product_id,))
-        cursor.execute('DELETE FROM bestseller_screenshots WHERE product_id = ?', (product_id,))
-        cursor.execute('DELETE FROM rankings WHERE product_id = ?', (product_id,))
-        cursor.execute('DELETE FROM products WHERE id = ?', (product_id,))
+        if get_db_type() == 'postgresql':
+            cursor.execute('DELETE FROM target_categories WHERE product_id = %s', (product_id,))
+            cursor.execute('DELETE FROM bestseller_screenshots WHERE product_id = %s', (product_id,))
+            cursor.execute('DELETE FROM baseline_screenshots WHERE product_id = %s', (product_id,))
+            cursor.execute('DELETE FROM rankings WHERE product_id = %s', (product_id,))
+            cursor.execute('DELETE FROM products WHERE id = %s', (product_id,))
+        else:
+            cursor.execute('DELETE FROM target_categories WHERE product_id = ?', (product_id,))
+            cursor.execute('DELETE FROM bestseller_screenshots WHERE product_id = ?', (product_id,))
+            cursor.execute('DELETE FROM baseline_screenshots WHERE product_id = ?', (product_id,))
+            cursor.execute('DELETE FROM rankings WHERE product_id = ?', (product_id,))
+            cursor.execute('DELETE FROM products WHERE id = ?', (product_id,))
 
         conn.commit()
         conn.close()
 
+        print(f"✅ Product {product_id} deleted successfully")
         return jsonify({'status': 'Product deleted successfully'})
 
     except Exception as e:
+        print(f"❌ Error deleting product: {e}")
+        import traceback
+        traceback.print_exc()
+        if conn:
+            conn.rollback()
+            conn.close()
         return jsonify({'error': str(e)}), 500
 
 def check_all_products():
