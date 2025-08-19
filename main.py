@@ -1372,7 +1372,7 @@ class User(UserMixin):
         
     def get_id(self):
         """Return the user ID as a string for Fla"""
-      return str(self.id)
+        return str(self.id)
     
     @property
     def is_active(self):
