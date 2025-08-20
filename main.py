@@ -6029,13 +6029,21 @@ def check_all_products():
     print("✅ Scheduled product check complete")
     print(f"📊 Skipped products from {len(users_without_keys)} users without API keys")
 
-# Scheduler for automatic checking
-def run_scheduler():
-    schedule.every(60).minutes.do(check_all_products)  # Check every 60 minutes
 
-    while True:
-        schedule.run_pending()
-        time.sleep(60)
+def run_scheduler():
+    schedule.every(60).minutes.do(check_all_products)
+    last_run = None
+
+    while SCHEDULER_ENABLED:
+        current_time = datetime.now()
+
+        # Ensure at least 59 minutes between runs
+        if last_run is None or (current_time - last_run).total_seconds() >= 3540:  # 59 minutes
+            schedule.run_pending()
+            if schedule.jobs and schedule.jobs[0].should_run:
+                last_run = current_time
+
+        time.sleep(300)  # Check every 5 minutes instead of every minute
 
 # Start scheduler in background
 scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
