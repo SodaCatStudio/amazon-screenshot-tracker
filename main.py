@@ -2650,7 +2650,7 @@ def security_headers(response):
 
 class AmazonMonitor:
     def __init__(self, api_key=None):
-        self.api_key = api_key or SCRAPINGBEE_API_KEY  # Fallback to system key
+        self.api_key = api_key or SCRAPINGBEE_API_KEY
 
     @classmethod
     def for_user(cls, user_id):
@@ -2694,22 +2694,24 @@ class AmazonMonitor:
             return cls()
     
     def scrape_amazon_page(self, url):
-        """Use ScrapingBee to scrape Amazon page and take screenshot - FIXED for screenshots"""
+        """Use ScrapingBee to scrape Amazon page and take screenshot - FULLY FIXED"""
         if not self.api_key:
             print("❌ ScrapingBee API key not configured")
-            return {'success': False, 'error': 'ScrapingBee API key not configured'}
+            return {'success': False, 'error': 'ScrapingBee API key not configured', 'html': '', 'screenshot': None}
 
         try:
             print(f"🔄 Starting ScrapingBee request for: {url}")
+            print(f"🔑 Using API key: {self.api_key[:10]}...")
 
-            # CRITICAL: These parameters are required for screenshots
+            # Use json_response to get both HTML and screenshot
             params = {
                 'api_key': self.api_key,
                 'url': url,
-                'render_js': 'true',  # MUST be true for screenshots
-                'screenshot': 'true',  # Enable screenshot capture
-                'screenshot_full_page': 'false',  # Just viewport for efficiency
-                'wait': '3000',  # Wait for page to load
+                'render_js': 'true',  # Required for screenshots
+                'screenshot': 'true',  # Enable screenshot
+                'json_response': 'true',  # Get JSON response with both HTML and screenshot
+                'screenshot_full_page': 'false',
+                'wait': '3000',
                 'premium_proxy': 'true',
                 'country_code': 'us',
             }
@@ -2722,57 +2724,75 @@ class AmazonMonitor:
             if response.status_code == 200:
                 print("✅ ScrapingBee request successful")
 
-                # Parse the response
                 try:
-                    # ScrapingBee returns HTML in response.text
-                    html_content = response.text
+                    # With json_response=true, we get a JSON object
+                    response_data = response.json()
 
-                    # Screenshot is in the response header
-                    screenshot_data = response.headers.get('Spb-Screenshot')
+                    html_content = response_data.get('body', '')
+                    screenshot_data = response_data.get('screenshot', '')
 
-                    if not screenshot_data:
-                        print("⚠️ No screenshot in header, checking for base64 in response...")
-                        # Sometimes it's embedded in the response
-                        if response.text.startswith('data:image'):
-                            screenshot_data = response.text.split(',')[1] if ',' in response.text else None
-
-                    print(f"📄 HTML content length: {len(html_content)} characters")
+                    print(f"📄 HTML content length: {len(html_content) if html_content else 0} characters")
                     print(f"📸 Screenshot data present: {'Yes' if screenshot_data else 'No'}")
 
                     if screenshot_data:
                         print(f"📸 Screenshot size: {len(screenshot_data)} characters")
+                        # The screenshot is already base64 encoded
+                        if not screenshot_data.startswith('data:'):
+                            # Ensure it's just the base64 data, no data URI prefix
+                            screenshot_data = screenshot_data.replace('data:image/png;base64,', '')
 
                     return {
-                        'html': html_content,
-                        'screenshot': screenshot_data,
+                        'html': html_content or '',
+                        'screenshot': screenshot_data if screenshot_data else None,
                         'success': True
                     }
 
-                except Exception as parse_error:
-                    print(f"⚠️ Error parsing response: {parse_error}")
+                except json.JSONDecodeError as e:
+                    print(f"⚠️ JSON decode error, trying alternative method: {e}")
+                    # Fallback to non-JSON response
                     return {
                         'html': response.text,
-                        'screenshot': None,
+                        'screenshot': response.headers.get('Spb-Screenshot'),
                         'success': True
                     }
+
             else:
                 error_msg = f'HTTP {response.status_code}: {response.text[:500]}'
                 print(f"❌ ScrapingBee error: {error_msg}")
-                return {'success': False, 'error': error_msg}
+
+                # Check for specific errors
+                if response.status_code == 401:
+                    error_msg = "Invalid API key. Please check your ScrapingBee API key."
+                elif response.status_code == 429:
+                    error_msg = "Rate limit reached. Please wait and try again."
+                elif response.status_code == 402:
+                    error_msg = "Insufficient credits. Please check your ScrapingBee account."
+
+                return {'success': False, 'error': error_msg, 'html': '', 'screenshot': None}
 
         except requests.exceptions.Timeout:
             error_msg = 'ScrapingBee request timed out (60s)'
             print(f"⏰ {error_msg}")
-            return {'success': False, 'error': error_msg}
+            return {'success': False, 'error': error_msg, 'html': '', 'screenshot': None}
         except Exception as e:
             error_msg = f'ScrapingBee request failed: {str(e)}'
             print(f"💥 {error_msg}")
             import traceback
             traceback.print_exc()
-            return {'success': False, 'error': error_msg}
+            return {'success': False, 'error': error_msg, 'html': '', 'screenshot': None}
 
     def extract_product_info(self, html):
-        """Extract product ranking and bestseller info from Amazon HTML"""
+        """Extract product ranking and bestseller info from Amazon HTML - FIXED"""
+        if not html:
+            print("⚠️ No HTML content to extract from")
+            return {
+                'title': 'Product Title Loading...',
+                'rank': None,
+                'category': '',
+                'is_bestseller': False,
+                'bestseller_categories': []
+            }
+
         soup = BeautifulSoup(html, 'html.parser')
 
         product_info = {
@@ -2786,144 +2806,102 @@ class AmazonMonitor:
         try:
             print("🔍 Starting HTML parsing...")
 
-            # Method 1: Standard product title
-            title_element = soup.find('span', {'id': 'productTitle'})
-            if not title_element:
-                # Method 2: Try alternative title locations for Kindle books
-                title_element = soup.find('h1', {'id': 'title'})
-                if not title_element:
-                    # Method 3: Look for any h1 with product title
-                    title_element = soup.find('h1', class_=re.compile(r'title', re.I))
+            # Extract title - multiple methods
+            title_selectors = [
+                ('span', {'id': 'productTitle'}),
+                ('h1', {'id': 'title'}),
+                ('h1', {'class': 'a-size-large'}),
+                ('span', {'class': 'a-size-large product-title-word-break'})
+            ]
 
-            if title_element:
-                # Extract text from all child elements
-                product_info['title'] = ' '.join(title_element.stripped_strings)
-                print(f"📋 Found title: {product_info['title'][:100]}...")
-            else:
-                print("❌ No product title found - trying meta tags")
-                # Fallback: Try meta tags for title
+            for tag, attrs in title_selectors:
+                title_element = soup.find(tag, attrs)
+                if title_element:
+                    product_info['title'] = ' '.join(title_element.stripped_strings)
+                    print(f"📋 Found title: {product_info['title'][:100]}...")
+                    break
+
+            if not product_info['title']:
+                # Try meta tags
                 meta_title = soup.find('meta', {'property': 'og:title'})
-                if meta_title and isinstance(meta_title, Tag):
-                    title_content = meta_title.attrs.get('content')
-                    if title_content:
-                        product_info['title'] = title_content
-                        print(f"📋 Found title in meta: {product_info['title'][:100]}...")
+                if meta_title and meta_title.get('content'):
+                    product_info['title'] = meta_title['content']
+                    print(f"📋 Found title in meta: {product_info['title'][:100]}...")
+                else:
+                    product_info['title'] = 'Unknown Product'
+                    print("⚠️ Could not find product title")
 
-            # Look for bestseller badges - Multiple methods
+            # Look for bestseller badges
             print("🔍 Searching for bestseller indicators...")
 
-            # Method 1: Look for bestseller badge images
-            badge_imgs = soup.find_all('img', alt=lambda x: bool(x) and 'best seller' in x.lower())
-            if badge_imgs:
-                product_info['is_bestseller'] = True
-                print("🏆 Found bestseller badge image!")
-
-            # Method 2: Look for bestseller text in spans/divs with specific classes
-            bestseller_selectors = [
-                ('span', {'class': 'a-badge-text'}),
-                ('span', {'class': 'ac-badge-text'}),
-                ('div', {'class': 'badge-wrapper'}),
-                ('span', {'class': 'best-seller-badge'}),
-                ('a', {'class': 'badge-link'})
+            # Check for bestseller badges
+            badge_patterns = [
+                'best seller',
+                'best-seller', 
+                'bestseller',
+                '#1 best seller',
+                'amazon\'s choice'
             ]
 
-            for tag, attrs in bestseller_selectors:
-                elements = soup.find_all(tag, attrs)
-                for elem in elements:
-                    if elem and isinstance(elem, Tag):
-                        text = elem.get_text().strip()
-                        if re.search(r'best\s*seller|#1|amazon\'s\s*choice', text, re.I):
-                            product_info['is_bestseller'] = True
-                            print(f"🏆 Found bestseller indicator in {tag}: {text}")
-                            # Try to extract category
-                            parent = elem.parent
-                            if parent:
-                                full_text = parent.get_text()
-                                category_match = re.search(r'in\s+([^#\n]+)', full_text)
-                                if category_match:
-                                    category = category_match.group(1).strip()
-                                    product_info['bestseller_categories'].append(category)
+            for element in soup.find_all(['span', 'div', 'a'], class_=lambda x: x and 'badge' in x.lower()):
+                text = element.get_text().strip().lower()
+                for pattern in badge_patterns:
+                    if pattern in text:
+                        product_info['is_bestseller'] = True
+                        print(f"🏆 Found bestseller badge: {text}")
+                        break
 
-            # Method 3: Look for bestseller in page content with context
-            all_text_elements = soup.find_all(text=re.compile(r'Best\s*Seller|#1', re.I))
-            for text_elem in all_text_elements[:10]:  # Limit to first 10 to avoid false positives
-                if text_elem and text_elem.parent:
-                    parent_text = text_elem.parent.get_text()
-                    if len(parent_text) < 200:  # Avoid huge text blocks
-                        if re.search(r'(#1|Best\s*Seller)\s+in', parent_text, re.I):
-                            product_info['is_bestseller'] = True
-                            print(f"🏆 Found bestseller in text: {parent_text[:100]}...")
-
-            # Extract ranking information
+            # Extract ranking - search entire page
             print("🔍 Searching for ranking information...")
 
-            # Method 1: Look for Best Sellers Rank in detail sections
+            # Look for "Best Sellers Rank"
+            page_text = soup.get_text()
+
+            # Multiple patterns for rank extraction
             rank_patterns = [
-                r'Best\s*Sellers\s*Rank[:\s]*#?([\d,]+)\s+in\s+([^(\n]+)',
-                r'#([\d,]+)\s+in\s+([^(\n#]+)',
-                r'Best\s*Sellers\s*Rank[:\s]*([^#]*?)#([\d,]+)\s+in\s+([^(\n]+)'
+                r'Best Sellers Rank[:\s]*#?([\d,]+)\s+in\s+([^(\n]+)',
+                r'Amazon Best Sellers Rank[:\s]*#?([\d,]+)\s+in\s+([^(\n]+)',
+                r'#([\d,]+)\s+in\s+([^(\n#]+)'
             ]
 
-            # Search in common ranking locations
-            rank_containers = [
-                soup.find('div', {'id': 'detailBulletsWrapper_feature_div'}),
-                soup.find('div', {'id': 'productDetails_feature_div'}),
-                soup.find('div', {'id': 'detail_bullets_id'}),
-                soup.find('table', {'id': 'productDetails_detailBullets_sections1'}),
-                soup.find('div', {'class': 'content-grid-block'})
-            ]
+            for pattern in rank_patterns:
+                matches = re.findall(pattern, page_text, re.IGNORECASE)
+                if matches:
+                    for match in matches:
+                        rank_num = match[0].replace(',', '').strip()
+                        category = match[1].strip()
 
-            # Also search the entire page if needed
-            rank_containers.append(soup)
+                        if rank_num.isdigit() and len(category) > 2:
+                            product_info['rank'] = rank_num
+                            product_info['category'] = category.split('(')[0].strip()
+                            print(f"📈 Found rank: #{rank_num} in {product_info['category']}")
 
-            for container in rank_containers:
-                if container and isinstance(container, Tag):
-                    container_text = container.get_text()
-                    for pattern in rank_patterns:
-                        matches = re.findall(pattern, container_text, re.I)
-                        if matches:
-                            for match in matches:
-                                if len(match) >= 2:
-                                    if match[0].isdigit():
-                                        rank_num = match[0]
-                                        category = match[1]
-                                    else:
-                                        rank_num = match[1] if len(match) > 2 else match[0]
-                                        category = match[2] if len(match) > 2 else match[1]
-
-                                    # Clean up the data
-                                    rank_num = rank_num.replace(',', '').strip()
-                                    category = category.strip().split('(')[0].strip()
-
-                                    if rank_num.isdigit() and len(category) > 2:
-                                        product_info['rank'] = rank_num
-                                        product_info['category'] = category
-                                        print(f"📈 Found rank: #{rank_num} in {category}")
-
-                                        # Check if this is a #1 rank
-                                        if rank_num == '1':
-                                            product_info['is_bestseller'] = True
-                                            print("🏆 Product is #1 - marking as bestseller!")
-                                        break
-                        if product_info['rank']:
+                            if rank_num == '1':
+                                product_info['is_bestseller'] = True
+                                print("🏆 Product is #1 - marking as bestseller!")
                             break
+
                     if product_info['rank']:
                         break
 
-            # Debug output
+            # If no rank found, try more specific selectors
             if not product_info['rank']:
-                print("⚠️ Could not find ranking - dumping sample HTML for debugging")
-                # Look for any text containing "rank" for debugging
-                rank_texts = soup.find_all(text=re.compile(r'rank|#\d+\s+in', re.I))
-                for i, text in enumerate(rank_texts[:5]):
-                    if text is not None and isinstance(text, str) and len(text.strip()) > 10:
-                        print(f"  Sample {i+1}: {text.strip()[:100]}...")
+                rank_elements = soup.find_all(text=re.compile(r'#\d+\s+in', re.I))
+                for elem in rank_elements[:5]:
+                    if elem and elem.strip():
+                        match = re.search(r'#([\d,]+)\s+in\s+([^(\n]+)', elem)
+                        if match:
+                            product_info['rank'] = match.group(1).replace(',', '')
+                            product_info['category'] = match.group(2).strip()
+                            print(f"📈 Found rank in element: #{product_info['rank']} in {product_info['category']}")
+                            break
 
         except Exception as e:
             print(f"❌ Error extracting product info: {e}")
             import traceback
             traceback.print_exc()
 
+        print(f"📊 Final product info: Title='{product_info['title'][:50]}...', Rank={product_info['rank']}, Category={product_info['category']}")
         return product_info
 
     def extract_category_from_text(self, text):
@@ -3206,31 +3184,54 @@ def capture_baseline(product_id):
 @app.route('/test_scrapingbee_screenshot')
 @login_required
 def test_scrapingbee_screenshot():
-    """Test if ScrapingBee can capture screenshots"""
+    """Test if ScrapingBee can capture screenshots - FIXED"""
     try:
         # Test with Amazon homepage
         test_url = "https://www.amazon.com"
 
         user_monitor = AmazonMonitor.for_user(current_user.id)
+
+        # Check if API key exists
+        if not user_monitor.api_key:
+            return """
+            <html>
+            <body style="font-family: Arial, sans-serif; padding: 20px;">
+                <h2>❌ No API Key</h2>
+                <p>Please configure your ScrapingBee API key first.</p>
+                <a href="/settings">Go to Settings</a>
+            </body>
+            </html>
+            """
+
         result = user_monitor.scrape_amazon_page(test_url)
+
+        # Handle None values safely
+        html_content = result.get('html', '')
+        screenshot_data = result.get('screenshot')
 
         html = f"""
         <html>
         <body style="font-family: monospace; padding: 20px;">
             <h2>ScrapingBee Screenshot Test</h2>
             <p><strong>Test URL:</strong> {test_url}</p>
-            <p><strong>Success:</strong> {result.get('success')}</p>
-            <p><strong>HTML Length:</strong> {len(result.get('html', ''))}</p>
-            <p><strong>Screenshot Present:</strong> {bool(result.get('screenshot'))}</p>
-            <p><strong>Screenshot Length:</strong> {len(result.get('screenshot', ''))}</p>
+            <p><strong>API Key (first 10):</strong> {user_monitor.api_key[:10] if user_monitor.api_key else 'None'}...</p>
+            <p><strong>Success:</strong> {result.get('success', False)}</p>
+            <p><strong>HTML Length:</strong> {len(html_content) if html_content else 0}</p>
+            <p><strong>Screenshot Present:</strong> {bool(screenshot_data)}</p>
+            <p><strong>Screenshot Length:</strong> {len(screenshot_data) if screenshot_data else 0}</p>
 
             <h3>Error (if any):</h3>
             <pre>{result.get('error', 'None')}</pre>
 
+            <h3>HTML Preview (first 500 chars):</h3>
+            <pre>{html_content[:500] if html_content else 'No HTML content'}...</pre>
+
             <h3>Screenshot Data Preview:</h3>
-            <pre>{result.get('screenshot', 'No screenshot data')[:100]}...</pre>
+            <pre>{screenshot_data[:100] if screenshot_data else 'No screenshot data'}...</pre>
 
             <br>
+            <h3>Actions:</h3>
+            <a href="/test_product_scrape">Test Product Scrape</a> | 
             <a href="/dashboard">Back to Dashboard</a>
         </body>
         </html>
@@ -3239,7 +3240,179 @@ def test_scrapingbee_screenshot():
         return html
 
     except Exception as e:
-        return f"Test failed: {str(e)}", 500
+        import traceback
+        return f"""
+        <html>
+        <body style="font-family: monospace; padding: 20px;">
+            <h2>Test Failed</h2>
+            <pre>{traceback.format_exc()}</pre>
+            <a href="/dashboard">Back to Dashboard</a>
+        </body>
+        </html>
+        """, 500
+
+
+@app.route('/test_product_scrape')
+@login_required
+def test_product_scrape():
+    """Test scraping a specific product"""
+    # Use a known Amazon product for testing
+    test_url = "https://www.amazon.com/dp/B08N5WRWNW"  # Echo Dot example
+
+    try:
+        user_monitor = AmazonMonitor.for_user(current_user.id)
+
+        if not user_monitor.api_key:
+            return "No API key configured", 400
+
+        result = user_monitor.scrape_amazon_page(test_url)
+
+        if result.get('success'):
+            product_info = user_monitor.extract_product_info(result.get('html', ''))
+
+            return f"""
+            <html>
+            <body style="font-family: Arial, sans-serif; padding: 20px;">
+                <h2>Product Scrape Test</h2>
+                <h3>Scrape Result:</h3>
+                <ul>
+                    <li><strong>Success:</strong> {result.get('success')}</li>
+                    <li><strong>HTML Length:</strong> {len(result.get('html', ''))}</li>
+                    <li><strong>Screenshot:</strong> {bool(result.get('screenshot'))}</li>
+                </ul>
+
+                <h3>Product Info Extracted:</h3>
+                <ul>
+                    <li><strong>Title:</strong> {product_info.get('title', 'Not found')}</li>
+                    <li><strong>Rank:</strong> {product_info.get('rank', 'Not found')}</li>
+                    <li><strong>Category:</strong> {product_info.get('category', 'Not found')}</li>
+                    <li><strong>Is Bestseller:</strong> {product_info.get('is_bestseller', False)}</li>
+                </ul>
+
+                <h3>Raw HTML Sample:</h3>
+                <textarea style="width: 100%; height: 300px;">{result.get('html', '')[:2000]}</textarea>
+
+                <br><br>
+                <a href="/dashboard">Back to Dashboard</a>
+            </body>
+            </html>
+            """
+        else:
+            return f"Scrape failed: {result.get('error')}", 500
+
+    except Exception as e:
+        import traceback
+        return f"Test failed: {traceback.format_exc()}", 500
+
+@app.route('/fix_product/<int:product_id>')
+@login_required
+def fix_product(product_id):
+    """Re-scrape a product to fix missing information"""
+    conn = get_db()
+    cursor = conn.cursor()
+
+    try:
+        # Get product URL
+        if get_db_type() == 'postgresql':
+            cursor.execute('''
+                SELECT product_url FROM products 
+                WHERE id = %s AND user_id = %s
+            ''', (product_id, current_user.id))
+        else:
+            cursor.execute('''
+                SELECT product_url FROM products 
+                WHERE id = ? AND user_id = ?
+            ''', (product_id, current_user.id))
+
+        result = cursor.fetchone()
+        if not result:
+            conn.close()
+            return "Product not found", 404
+
+        product_url = result['product_url'] if isinstance(result, dict) else result[0]
+
+        # Re-scrape the product
+        user_monitor = AmazonMonitor.for_user(current_user.id)
+        scrape_result = user_monitor.scrape_amazon_page(product_url)
+
+        if scrape_result.get('success'):
+            product_info = user_monitor.extract_product_info(scrape_result.get('html', ''))
+
+            # Update product information
+            if get_db_type() == 'postgresql':
+                cursor.execute('''
+                    UPDATE products 
+                    SET product_title = %s, current_rank = %s, 
+                        current_category = %s, is_bestseller = %s, 
+                        last_checked = %s
+                    WHERE id = %s
+                ''', (
+                    product_info.get('title', 'Unknown Product'),
+                    product_info.get('rank'),
+                    product_info.get('category'),
+                    product_info.get('is_bestseller', False),
+                    datetime.now(),
+                    product_id
+                ))
+            else:
+                cursor.execute('''
+                    UPDATE products 
+                    SET product_title = ?, current_rank = ?, 
+                        current_category = ?, is_bestseller = ?, 
+                        last_checked = ?
+                    WHERE id = ?
+                ''', (
+                    product_info.get('title', 'Unknown Product'),
+                    product_info.get('rank'),
+                    product_info.get('category'),
+                    product_info.get('is_bestseller', False),
+                    datetime.now(),
+                    product_id
+                ))
+
+            # Save baseline screenshot if we got one and don't have one yet
+            if scrape_result.get('screenshot'):
+                # Check if baseline exists
+                if get_db_type() == 'postgresql':
+                    cursor.execute('SELECT id FROM baseline_screenshots WHERE product_id = %s', (product_id,))
+                else:
+                    cursor.execute('SELECT id FROM baseline_screenshots WHERE product_id = ?', (product_id,))
+
+                if not cursor.fetchone():
+                    # No baseline exists, save it
+                    if get_db_type() == 'postgresql':
+                        cursor.execute('''
+                            INSERT INTO baseline_screenshots 
+                            (product_id, screenshot_data, initial_rank, initial_category, captured_at)
+                            VALUES (%s, %s, %s, %s, %s)
+                        ''', (product_id, scrape_result['screenshot'], 
+                              product_info.get('rank'), product_info.get('category'), 
+                              datetime.now()))
+                    else:
+                        cursor.execute('''
+                            INSERT INTO baseline_screenshots 
+                            (product_id, screenshot_data, initial_rank, initial_category, captured_at)
+                            VALUES (?, ?, ?, ?, ?)
+                        ''', (product_id, scrape_result['screenshot'], 
+                              product_info.get('rank'), product_info.get('category'), 
+                              datetime.now()))
+
+            conn.commit()
+            conn.close()
+
+            flash(f'Product updated: {product_info.get("title", "Unknown")[:50]}...', 'success')
+            return redirect(url_for('dashboard'))
+        else:
+            conn.close()
+            flash(f'Failed to update product: {scrape_result.get("error")}', 'error')
+            return redirect(url_for('dashboard'))
+
+    except Exception as e:
+        if conn:
+            conn.rollback()
+            conn.close()
+        flash(f'Error updating product: {str(e)}', 'error')
+        return redirect(url_for('dashboard'))
 
 @app.route('/add_product_form')
 @login_required
@@ -3251,23 +3424,21 @@ def add_product_form():
 @limiter.limit("10 per minute")
 @login_required
 def add_product():
-    """Fixed add_product to ensure proper user association and API key check"""
+    """Fixed add_product with target categories and better error handling"""
     print(f"🔍 Adding product for user {current_user.email} (ID: {current_user.id})")
 
     conn = get_db()
     cursor = conn.cursor()
 
     try:
-        # Validate API key exists - FIXED for PostgreSQL
+        # Validate API key exists
         if get_db_type() == 'postgresql':
             cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = %s', (current_user.id,))
         else:
             cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = ?', (current_user.id,))
 
         result = cursor.fetchone()
-        print(f"🔍 API key check result: {result}")
 
-        # Fixed: Handle both dict and tuple results
         if result:
             if isinstance(result, dict):
                 api_key = result.get('scrapingbee_api_key')
@@ -3282,11 +3453,14 @@ def add_product():
             return redirect(url_for('settings'))
 
         url = request.form.get('url', '').strip()
+        target_categories_input = request.form.get('target_categories', '').strip()
 
         if not url or 'amazon.' not in url.lower():
             flash('Please provide a valid Amazon product URL', 'error')
             conn.close()
             return redirect(url_for('add_product_form'))
+
+        print(f"📦 Scraping product: {url}")
 
         # Scrape product
         try:
@@ -3301,22 +3475,26 @@ def add_product():
         if not scrape_result.get('success'):
             error_msg = scrape_result.get("error", "Unknown error")
 
-            # Check for specific error types
             if "429" in str(error_msg) or "rate limit" in error_msg.lower():
                 flash('ScrapingBee rate limit reached. Please wait a moment and try again.', 'warning')
             elif "401" in str(error_msg) or "unauthorized" in error_msg.lower():
                 flash('Invalid ScrapingBee API key. Please check your settings.', 'error')
                 conn.close()
                 return redirect(url_for('settings'))
+            elif "402" in str(error_msg):
+                flash('Insufficient ScrapingBee credits. Please check your account.', 'error')
             else:
                 flash(f'Error accessing product: {error_msg}', 'error')
 
             conn.close()
             return redirect(url_for('add_product_form'))
 
-        product_info = user_monitor.extract_product_info(scrape_result['html'])
+        # Extract product info
+        product_info = user_monitor.extract_product_info(scrape_result.get('html', ''))
 
-        # Use proper insert with RETURNING for PostgreSQL
+        print(f"📋 Product info extracted: {product_info}")
+
+        # Insert product
         if get_db_type() == 'postgresql':
             cursor.execute('''
                 INSERT INTO products (user_id, user_email, product_url, product_title, 
@@ -3334,12 +3512,8 @@ def add_product():
                 datetime.now()
             ))
             result = cursor.fetchone()
-            if isinstance(result, dict):
-                product_id = result['id']
-            else:
-                product_id = result[0] if result else None
+            product_id = result['id'] if isinstance(result, dict) else result[0]
         else:
-            # SQLite version
             cursor.execute('''
                 INSERT INTO products (user_id, user_email, product_url, product_title, 
                                     current_rank, current_category, is_bestseller, last_checked)
@@ -3356,11 +3530,42 @@ def add_product():
             ))
             product_id = cursor.lastrowid
 
-        print(f"✅ Product saved with ID: {product_id} for user_id: {current_user.id}")
+        print(f"✅ Product saved with ID: {product_id}")
 
-        # Save screenshot if available
+        # Process target categories if provided
+        if target_categories_input:
+            categories = [cat.strip() for cat in target_categories_input.split(',')]
+            for category_str in categories:
+                if ':' in category_str:
+                    category_name, target_rank = category_str.split(':', 1)
+                    try:
+                        target_rank = int(target_rank)
+                    except ValueError:
+                        target_rank = 1
+                else:
+                    category_name = category_str
+                    target_rank = 1
+
+                if category_name:
+                    if get_db_type() == 'postgresql':
+                        cursor.execute('''
+                            INSERT INTO target_categories 
+                            (product_id, category_name, target_rank, created_at)
+                            VALUES (%s, %s, %s, %s)
+                        ''', (product_id, category_name.strip(), target_rank, datetime.now()))
+                    else:
+                        cursor.execute('''
+                            INSERT INTO target_categories 
+                            (product_id, category_name, target_rank, created_at)
+                            VALUES (?, ?, ?, ?)
+                        ''', (product_id, category_name.strip(), target_rank, datetime.now()))
+
+                    print(f"🎯 Added target category: {category_name} (target rank: {target_rank})")
+
+        # Save baseline screenshot if available
         if scrape_result.get('screenshot'):
-            # Save baseline screenshot
+            print(f"📸 Saving baseline screenshot (length: {len(scrape_result['screenshot'])})")
+
             if get_db_type() == 'postgresql':
                 cursor.execute('''
                     INSERT INTO baseline_screenshots 
@@ -3379,8 +3584,15 @@ def add_product():
                 ''', (product_id, scrape_result['screenshot'], product_info.get('rank'),
                       product_info.get('category'), datetime.now()))
 
+            print("✅ Baseline screenshot saved")
+        else:
+            print("⚠️ No screenshot data to save")
+
         conn.commit()
+        conn.close()
+
         flash(f'✅ Successfully added "{product_info.get("title", "Product")[:50]}..."', 'success')
+        return redirect(url_for('dashboard'))
 
     except Exception as e:
         conn.rollback()
@@ -3388,15 +3600,13 @@ def add_product():
         import traceback
         traceback.print_exc()
 
-        # Check if it's a rate limit error
         if "Too Many Requests" in str(e):
             flash('Rate limit reached. Please wait a moment and try again.', 'warning')
         else:
             flash('Error adding product. Please try again.', 'error')
-    finally:
-        conn.close()
 
-    return redirect(url_for('dashboard'))
+        conn.close()
+        return redirect(url_for('add_product_form'))
 
 # Add route to reset rate limits (admin only)
 @app.route('/admin/reset_rate_limits')
