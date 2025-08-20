@@ -2369,6 +2369,142 @@ def debug_basic_env():
     except Exception as e:
         return f"Basic env check failed: {str(e)}"
 
+@app.route('/debug/check_screenshots/<int:product_id>')
+@login_required
+def debug_check_screenshots(product_id):
+    """Debug route to check what screenshots exist for a product"""
+    conn = get_db()
+    cursor = conn.cursor()
+
+    try:
+        # Check baseline screenshots
+        if get_db_type() == 'postgresql':
+            cursor.execute('''
+                SELECT id, LENGTH(screenshot_data) as size, captured_at
+                FROM baseline_screenshots
+                WHERE product_id = %s
+            ''', (product_id,))
+        else:
+            cursor.execute('''
+                SELECT id, LENGTH(screenshot_data) as size, captured_at
+                FROM baseline_screenshots
+                WHERE product_id = ?
+            ''', (product_id,))
+
+        baseline = cursor.fetchone()
+
+        # Check achievement screenshots
+        if get_db_type() == 'postgresql':
+            cursor.execute('''
+                SELECT COUNT(*) as count, MIN(achieved_at) as first, MAX(achieved_at) as last
+                FROM bestseller_screenshots
+                WHERE product_id = %s
+            ''', (product_id,))
+        else:
+            cursor.execute('''
+                SELECT COUNT(*) as count, MIN(achieved_at) as first, MAX(achieved_at) as last
+                FROM bestseller_screenshots
+                WHERE product_id = ?
+            ''', (product_id,))
+
+        achievements = cursor.fetchone()
+
+        # Get product info
+        if get_db_type() == 'postgresql':
+            cursor.execute('''
+                SELECT product_title, created_at
+                FROM products
+                WHERE id = %s AND user_id = %s
+            ''', (product_id, current_user.id))
+        else:
+            cursor.execute('''
+                SELECT product_title, created_at
+                FROM products
+                WHERE id = ? AND user_id = ?
+            ''', (product_id, current_user.id))
+
+        product = cursor.fetchone()
+
+        conn.close()
+
+        if not product:
+            return "Product not found or unauthorized", 404
+
+        # Extract values based on type
+        if isinstance(product, dict):
+            product_title = product['product_title']
+            product_created = product['created_at']
+        else:
+            product_title = product[0]
+            product_created = product[1]
+
+        if baseline:
+            if isinstance(baseline, dict):
+                baseline_id = baseline['id']
+                baseline_size = baseline['size']
+                baseline_captured = baseline['captured_at']
+            else:
+                baseline_id = baseline[0]
+                baseline_size = baseline[1]
+                baseline_captured = baseline[2]
+        else:
+            baseline_id = None
+            baseline_size = 0
+            baseline_captured = None
+
+        if achievements:
+            if isinstance(achievements, dict):
+                achievement_count = achievements['count']
+                first_achievement = achievements['first']
+                last_achievement = achievements['last']
+            else:
+                achievement_count = achievements[0]
+                first_achievement = achievements[1]
+                last_achievement = achievements[2]
+        else:
+            achievement_count = 0
+            first_achievement = None
+            last_achievement = None
+
+        html = f"""
+        <html>
+        <body style="font-family: Arial, sans-serif; padding: 20px;">
+            <h2>Screenshot Debug for Product #{product_id}</h2>
+            <p><strong>Product:</strong> {product_title}</p>
+            <p><strong>Added:</strong> {product_created}</p>
+
+            <h3>Baseline Screenshot:</h3>
+            <ul>
+                <li><strong>Exists:</strong> {'✅ Yes' if baseline_id else '❌ No'}</li>
+                <li><strong>ID:</strong> {baseline_id or 'N/A'}</li>
+                <li><strong>Size:</strong> {baseline_size} bytes</li>
+                <li><strong>Captured:</strong> {baseline_captured or 'N/A'}</li>
+            </ul>
+
+            <h3>Achievement Screenshots:</h3>
+            <ul>
+                <li><strong>Count:</strong> {achievement_count}</li>
+                <li><strong>First:</strong> {first_achievement or 'N/A'}</li>
+                <li><strong>Last:</strong> {last_achievement or 'N/A'}</li>
+            </ul>
+
+            <h3>Actions:</h3>
+            <a href="/baseline_screenshot/{product_id}" target="_blank">View Baseline</a> | 
+            <a href="/capture_baseline/{product_id}">Capture New Baseline</a> | 
+            <a href="/fix_baseline/{product_id}">Move Achievement to Baseline</a> | 
+            <a href="/dashboard">Dashboard</a>
+        </body>
+        </html>
+        """
+
+        return html
+
+    except Exception as e:
+        if conn:
+            conn.close()
+        import traceback
+        return f"<pre>{traceback.format_exc()}</pre>", 500
+
 @app.route('/admin/check_tokens')
 @login_required
 def check_tokens():
@@ -3414,6 +3550,97 @@ def fix_product(product_id):
         flash(f'Error updating product: {str(e)}', 'error')
         return redirect(url_for('dashboard'))
 
+@app.route('/fix_baseline/<int:product_id>')
+@login_required
+def fix_baseline(product_id):
+    """Move the first achievement screenshot to be the baseline"""
+    conn = get_db()
+    cursor = conn.cursor()
+
+    try:
+        # Verify ownership
+        if get_db_type() == 'postgresql':
+            cursor.execute('''
+                SELECT id FROM products 
+                WHERE id = %s AND user_id = %s
+            ''', (product_id, current_user.id))
+        else:
+            cursor.execute('''
+                SELECT id FROM products 
+                WHERE id = ? AND user_id = ?
+            ''', (product_id, current_user.id))
+
+        if not cursor.fetchone():
+            conn.close()
+            return "Product not found or unauthorized", 404
+
+        # Get the first achievement screenshot
+        if get_db_type() == 'postgresql':
+            cursor.execute('''
+                SELECT screenshot_data, rank_achieved, category, achieved_at
+                FROM bestseller_screenshots
+                WHERE product_id = %s
+                ORDER BY achieved_at ASC
+                LIMIT 1
+            ''', (product_id,))
+        else:
+            cursor.execute('''
+                SELECT screenshot_data, rank_achieved, category, achieved_at
+                FROM bestseller_screenshots
+                WHERE product_id = ?
+                ORDER BY achieved_at ASC
+                LIMIT 1
+            ''', (product_id,))
+
+        achievement = cursor.fetchone()
+
+        if achievement:
+            if isinstance(achievement, dict):
+                screenshot_data = achievement['screenshot_data']
+                rank = achievement['rank_achieved']
+                category = achievement['category']
+                captured_at = achievement['achieved_at']
+            else:
+                screenshot_data = achievement[0]
+                rank = achievement[1]
+                category = achievement[2]
+                captured_at = achievement[3]
+
+            # Insert as baseline
+            if get_db_type() == 'postgresql':
+                cursor.execute('''
+                    INSERT INTO baseline_screenshots 
+                    (product_id, screenshot_data, initial_rank, initial_category, captured_at)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (product_id) DO UPDATE SET
+                    screenshot_data = EXCLUDED.screenshot_data,
+                    initial_rank = EXCLUDED.initial_rank,
+                    initial_category = EXCLUDED.initial_category,
+                    captured_at = EXCLUDED.captured_at
+                ''', (product_id, screenshot_data, rank, category, captured_at))
+            else:
+                cursor.execute('''
+                    INSERT OR REPLACE INTO baseline_screenshots 
+                    (product_id, screenshot_data, initial_rank, initial_category, captured_at)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (product_id, screenshot_data, rank, category, captured_at))
+
+            conn.commit()
+            conn.close()
+
+            flash('Baseline screenshot has been set from achievement screenshot', 'success')
+            return redirect(url_for('dashboard'))
+        else:
+            conn.close()
+            return "No achievement screenshots found to use as baseline", 404
+
+    except Exception as e:
+        if conn:
+            conn.rollback()
+            conn.close()
+        flash(f'Error setting baseline: {str(e)}', 'error')
+        return redirect(url_for('dashboard'))
+
 @app.route('/add_product_form')
 @login_required
 def add_product_form():
@@ -3778,116 +4005,195 @@ def check_scrapingbee_usage():
 @app.route('/baseline_screenshot/<int:product_id>')
 @login_required
 def view_baseline_screenshot(product_id):
-    """View the initial baseline screenshot for a product"""
-    conn = sqlite3.connect('amazon_monitor.db')
+    """View the initial baseline screenshot for a product - FIXED"""
+    conn = get_db()
     cursor = conn.cursor()
 
-    # Verify the product belongs to the user
-    cursor.execute('''
-        SELECT p.product_title
-        FROM products p
-        WHERE p.id = ? AND p.user_id = ?
-    ''', (product_id, current_user.id))
+    try:
+        # Verify the product belongs to the user
+        if get_db_type() == 'postgresql':
+            cursor.execute('''
+                SELECT p.product_title
+                FROM products p
+                WHERE p.id = %s AND p.user_id = %s
+            ''', (product_id, current_user.id))
+        else:
+            cursor.execute('''
+                SELECT p.product_title
+                FROM products p
+                WHERE p.id = ? AND p.user_id = ?
+            ''', (product_id, current_user.id))
 
-    product = cursor.fetchone()
-    if not product:
+        product = cursor.fetchone()
+        if not product:
+            conn.close()
+            return "Product not found", 404
+
+        # Get the baseline screenshot
+        if get_db_type() == 'postgresql':
+            cursor.execute('''
+                SELECT screenshot_data, initial_rank, initial_category, captured_at
+                FROM baseline_screenshots
+                WHERE product_id = %s
+            ''', (product_id,))
+        else:
+            cursor.execute('''
+                SELECT screenshot_data, initial_rank, initial_category, captured_at
+                FROM baseline_screenshots
+                WHERE product_id = ?
+            ''', (product_id,))
+
+        result = cursor.fetchone()
         conn.close()
-        return "Product not found", 404
 
-    # Get the baseline screenshot
-    cursor.execute('''
-        SELECT screenshot_data, initial_rank, initial_category, captured_at
-        FROM baseline_screenshots
-        WHERE product_id = ?
-    ''', (product_id,))
-
-    result = cursor.fetchone()
-    conn.close()
-
-    if result and result[0]:
-        try:
-            screenshot_data = result[0]
-
-            # If it's a string that looks like base64, decode it
-            if isinstance(screenshot_data, str):
-                # Remove any potential data URI prefix
-                if screenshot_data.startswith('data:image'):
-                    screenshot_data = screenshot_data.split(',')[1]
-
-                screenshot_bytes = base64.b64decode(screenshot_data)
+        if result:
+            if isinstance(result, dict):
+                screenshot_data = result['screenshot_data']
+                initial_rank = result['initial_rank']
+                initial_category = result['initial_category']
+                captured_at = result['captured_at']
             else:
-                screenshot_bytes = screenshot_data
+                screenshot_data = result[0]
+                initial_rank = result[1]
+                initial_category = result[2]
+                captured_at = result[3]
 
-            return send_file(
-                io.BytesIO(screenshot_bytes),
-                mimetype='image/png',
-                as_attachment=False,
-                download_name=f'baseline_product_{product_id}.png'
-            )
-        except Exception as e:
-            print(f"❌ Error decoding baseline screenshot: {e}")
-            return f"Error loading screenshot: {str(e)}", 500
+            print(f"📸 Found baseline screenshot for product {product_id}")
+            print(f"   Data length: {len(screenshot_data) if screenshot_data else 0}")
+            print(f"   Initial rank: {initial_rank}")
+            print(f"   Captured at: {captured_at}")
 
-    # Return a placeholder image if no baseline exists
+            if screenshot_data:
+                try:
+                    # Handle the screenshot data
+                    if isinstance(screenshot_data, str):
+                        # Remove data URI prefix if present
+                        if screenshot_data.startswith('data:image'):
+                            screenshot_data = screenshot_data.split(',')[1]
+
+                        # Decode base64
+                        screenshot_bytes = base64.b64decode(screenshot_data)
+                    else:
+                        screenshot_bytes = screenshot_data
+
+                    return send_file(
+                        io.BytesIO(screenshot_bytes),
+                        mimetype='image/png',
+                        as_attachment=False,
+                        download_name=f'baseline_product_{product_id}.png'
+                    )
+                except Exception as e:
+                    print(f"❌ Error decoding baseline screenshot: {e}")
+                    return f"Error loading screenshot: {str(e)}", 500
+            else:
+                print(f"⚠️ Baseline screenshot data is empty for product {product_id}")
+
+        else:
+            print(f"⚠️ No baseline screenshot found for product {product_id}")
+
+    except Exception as e:
+        print(f"❌ Error retrieving baseline screenshot: {e}")
+        if conn:
+            conn.close()
+        return f"Error: {str(e)}", 500
+
+    # Return a placeholder message if no baseline exists
     return """
     <div style="padding: 50px; text-align: center; background: #f5f5f5;">
         <h2>📷 No baseline screenshot available</h2>
         <p>This product may have been added before baseline screenshots were implemented.</p>
+        <p><a href="/capture_baseline/""" + str(product_id) + """">Capture baseline now</a></p>
     </div>
     """, 404
 
 @app.route('/get_achievement_count/<int:product_id>')
 @login_required
 def get_achievement_count(product_id):
-    """Get count of achievement screenshots for a product"""
-    conn = sqlite3.connect('amazon_monitor.db')
+    """Get count of achievement screenshots for a product - FIXED"""
+    conn = get_db()
     cursor = conn.cursor()
 
-    # Verify product belongs to user and get achievement count
-    cursor.execute('''
-        SELECT COUNT(bs.id)
-        FROM bestseller_screenshots bs
-        JOIN products p ON bs.product_id = p.id
-        WHERE bs.product_id = ? AND p.user_id = ?
-    ''', (product_id, current_user.id))
+    try:
+        # Verify product belongs to user and get achievement count
+        if get_db_type() == 'postgresql':
+            cursor.execute('''
+                SELECT COUNT(bs.id)
+                FROM bestseller_screenshots bs
+                JOIN products p ON bs.product_id = p.id
+                WHERE bs.product_id = %s AND p.user_id = %s
+            ''', (product_id, current_user.id))
+        else:
+            cursor.execute('''
+                SELECT COUNT(bs.id)
+                FROM bestseller_screenshots bs
+                JOIN products p ON bs.product_id = p.id
+                WHERE bs.product_id = ? AND p.user_id = ?
+            ''', (product_id, current_user.id))
 
-    count = cursor.fetchone()[0]
-    if count >= 5:  # Beta limit
-        flash('Beta limit: Maximum 5 products per user', 'warning')
-        return redirect(url_for('dashboard'))
-    conn.close()
+        result = cursor.fetchone()
+        count = result[0] if result else 0
 
-    return jsonify({'count': count})
+        conn.close()
+        return jsonify({'count': count})
+
+    except Exception as e:
+        if conn:
+            conn.close()
+        return jsonify({'count': 0, 'error': str(e)})
 
 @app.route('/latest_achievement/<int:product_id>')
 @login_required
 def get_latest_achievement(product_id):
-    """Get the latest achievement screenshot ID for a product"""
-    conn = sqlite3.connect('amazon_monitor.db')
+    """Get the latest achievement screenshot ID for a product - FIXED"""
+    conn = get_db()
     cursor = conn.cursor()
 
-    # Get the most recent achievement screenshot
-    cursor.execute('''
-        SELECT bs.id, bs.rank_achieved, bs.category, bs.achieved_at
-        FROM bestseller_screenshots bs
-        JOIN products p ON bs.product_id = p.id
-        WHERE bs.product_id = ? AND p.user_id = ?
-        ORDER BY bs.achieved_at DESC
-        LIMIT 1
-    ''', (product_id, current_user.id))
+    try:
+        # Get the most recent achievement screenshot
+        if get_db_type() == 'postgresql':
+            cursor.execute('''
+                SELECT bs.id, bs.rank_achieved, bs.category, bs.achieved_at
+                FROM bestseller_screenshots bs
+                JOIN products p ON bs.product_id = p.id
+                WHERE bs.product_id = %s AND p.user_id = %s
+                ORDER BY bs.achieved_at DESC
+                LIMIT 1
+            ''', (product_id, current_user.id))
+        else:
+            cursor.execute('''
+                SELECT bs.id, bs.rank_achieved, bs.category, bs.achieved_at
+                FROM bestseller_screenshots bs
+                JOIN products p ON bs.product_id = p.id
+                WHERE bs.product_id = ? AND p.user_id = ?
+                ORDER BY bs.achieved_at DESC
+                LIMIT 1
+            ''', (product_id, current_user.id))
 
-    result = cursor.fetchone()
-    conn.close()
+        result = cursor.fetchone()
+        conn.close()
 
-    if result:
-        return jsonify({
-            'screenshot_id': result[0],
-            'rank': result[1],
-            'category': result[2],
-            'achieved_at': result[3]
-        })
+        if result:
+            if isinstance(result, dict):
+                return jsonify({
+                    'screenshot_id': result['id'],
+                    'rank': result['rank_achieved'],
+                    'category': result['category'],
+                    'achieved_at': str(result['achieved_at'])
+                })
+            else:
+                return jsonify({
+                    'screenshot_id': result[0],
+                    'rank': result[1],
+                    'category': result[2],
+                    'achieved_at': str(result[3])
+                })
 
-    return jsonify({'screenshot_id': None})
+        return jsonify({'screenshot_id': None})
+
+    except Exception as e:
+        if conn:
+            conn.close()
+        return jsonify({'screenshot_id': None, 'error': str(e)})
 
 @app.route('/achievements/<int:product_id>')
 @login_required
@@ -4263,6 +4569,191 @@ def debug_session():
     </html>
     """
 
+@app.route('/debug/all_screenshots')
+@login_required
+def debug_all_screenshots():
+    """Show all screenshots in the database for current user"""
+    conn = get_db()
+    cursor = conn.cursor()
+
+    try:
+        # Get all baseline screenshots
+        if get_db_type() == 'postgresql':
+            cursor.execute('''
+                SELECT b.id, b.product_id, p.product_title, 
+                       LENGTH(b.screenshot_data) as size, b.captured_at
+                FROM baseline_screenshots b
+                JOIN products p ON b.product_id = p.id
+                WHERE p.user_id = %s
+                ORDER BY b.captured_at DESC
+            ''', (current_user.id,))
+        else:
+            cursor.execute('''
+                SELECT b.id, b.product_id, p.product_title, 
+                       LENGTH(b.screenshot_data) as size, b.captured_at
+                FROM baseline_screenshots b
+                JOIN products p ON b.product_id = p.id
+                WHERE p.user_id = ?
+                ORDER BY b.captured_at DESC
+            ''', (current_user.id,))
+
+        baselines = cursor.fetchall()
+
+        # Get all achievement screenshots
+        if get_db_type() == 'postgresql':
+            cursor.execute('''
+                SELECT bs.id, bs.product_id, p.product_title, 
+                       LENGTH(bs.screenshot_data) as size, bs.achieved_at,
+                       bs.rank_achieved, bs.category
+                FROM bestseller_screenshots bs
+                JOIN products p ON bs.product_id = p.id
+                WHERE p.user_id = %s
+                ORDER BY bs.achieved_at DESC
+            ''', (current_user.id,))
+        else:
+            cursor.execute('''
+                SELECT bs.id, bs.product_id, p.product_title, 
+                       LENGTH(bs.screenshot_data) as size, bs.achieved_at,
+                       bs.rank_achieved, bs.category
+                FROM bestseller_screenshots bs
+                JOIN products p ON bs.product_id = p.id
+                WHERE p.user_id = ?
+                ORDER BY bs.achieved_at DESC
+            ''', (current_user.id,))
+
+        achievements = cursor.fetchall()
+
+        conn.close()
+
+        html = """
+        <html>
+        <head>
+            <style>
+                body { font-family: Arial, sans-serif; padding: 20px; }
+                table { border-collapse: collapse; width: 100%; margin: 20px 0; }
+                th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+                th { background: #f5f5f5; }
+                .success { color: green; }
+                .warning { color: orange; }
+            </style>
+        </head>
+        <body>
+            <h1>All Screenshots Debug</h1>
+
+            <h2>Baseline Screenshots</h2>
+        """
+
+        if baselines:
+            html += """
+            <table>
+                <tr>
+                    <th>ID</th>
+                    <th>Product ID</th>
+                    <th>Product</th>
+                    <th>Size</th>
+                    <th>Captured</th>
+                    <th>Actions</th>
+                </tr>
+            """
+
+            for baseline in baselines:
+                if isinstance(baseline, dict):
+                    b_id = baseline['id']
+                    p_id = baseline['product_id']
+                    title = baseline['product_title']
+                    size = baseline['size']
+                    captured = baseline['captured_at']
+                else:
+                    b_id = baseline[0]
+                    p_id = baseline[1]
+                    title = baseline[2]
+                    size = baseline[3]
+                    captured = baseline[4]
+
+                html += f"""
+                <tr>
+                    <td>{b_id}</td>
+                    <td>{p_id}</td>
+                    <td>{title[:30]}...</td>
+                    <td>{size} bytes</td>
+                    <td>{captured}</td>
+                    <td><a href="/baseline_screenshot/{p_id}" target="_blank">View</a></td>
+                </tr>
+                """
+
+            html += "</table>"
+        else:
+            html += "<p class='warning'>No baseline screenshots found</p>"
+
+        html += "<h2>Achievement Screenshots</h2>"
+
+        if achievements:
+            html += """
+            <table>
+                <tr>
+                    <th>ID</th>
+                    <th>Product ID</th>
+                    <th>Product</th>
+                    <th>Size</th>
+                    <th>Rank</th>
+                    <th>Category</th>
+                    <th>Achieved</th>
+                    <th>Actions</th>
+                </tr>
+            """
+
+            for achievement in achievements:
+                if isinstance(achievement, dict):
+                    a_id = achievement['id']
+                    p_id = achievement['product_id']
+                    title = achievement['product_title']
+                    size = achievement['size']
+                    achieved = achievement['achieved_at']
+                    rank = achievement['rank_achieved']
+                    category = achievement['category']
+                else:
+                    a_id = achievement[0]
+                    p_id = achievement[1]
+                    title = achievement[2]
+                    size = achievement[3]
+                    achieved = achievement[4]
+                    rank = achievement[5]
+                    category = achievement[6]
+
+                html += f"""
+                <tr>
+                    <td>{a_id}</td>
+                    <td>{p_id}</td>
+                    <td>{title[:30]}...</td>
+                    <td>{size} bytes</td>
+                    <td>{rank}</td>
+                    <td>{category[:30] if category else 'N/A'}...</td>
+                    <td>{achieved}</td>
+                    <td>
+                        <a href="/screenshot/{a_id}" target="_blank">View</a> |
+                        <a href="/fix_baseline/{p_id}">Use as Baseline</a>
+                    </td>
+                </tr>
+                """
+
+            html += "</table>"
+        else:
+            html += "<p class='warning'>No achievement screenshots found</p>"
+
+        html += """
+            <br>
+            <a href="/dashboard">Back to Dashboard</a>
+        </body>
+        </html>
+        """
+
+        return html
+
+    except Exception as e:
+        if conn:
+            conn.close()
+        import traceback
+        return f"<pre>{traceback.format_exc()}</pre>", 500
 
 # Settings page route
 @app.route('/settings')
