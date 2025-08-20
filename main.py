@@ -50,6 +50,8 @@ else:
 load_dotenv()
 IS_PRODUCTION = os.environ.get('FLASK_ENV') == 'production'
 
+scheduler_thread = None
+
 def get_db():
     """Get database connection - PostgreSQL in production, SQLite in development"""
     database_url = os.environ.get('DATABASE_URL')
@@ -449,8 +451,209 @@ def manual_verify():
 
 @app.route('/health')
 def health_check():
-    """Ultra-simple health check that can't fail"""
-    return "OK"  # Just return plain text, no templates, no database, nothing
+    """Health check endpoint that doesn't fail due to scheduler"""
+    try:
+        # Basic health check - just return OK
+        # Don't check scheduler status here as it could cause false failures
+        return "OK", 200
+    except Exception as e:
+        print(f"Health check error: {e}")
+        return "OK", 200  # Still return OK to prevent container restart loops
+
+@app.route('/scheduler_health')
+def scheduler_health():
+    """Separate endpoint to check scheduler health"""
+    global scheduler_thread
+
+    scheduler_enabled = os.environ.get('ENABLE_SCHEDULER', 'false').lower() == 'true'
+
+    if not scheduler_enabled:
+        return jsonify({
+            'status': 'disabled',
+            'message': 'Scheduler is disabled by configuration',
+            'healthy': True
+        })
+
+    if scheduler_thread and scheduler_thread.is_alive():
+        return jsonify({
+            'status': 'running',
+            'thread_alive': True,
+            'healthy': True
+        })
+    else:
+        return jsonify({
+            'status': 'stopped',
+            'thread_alive': False,
+            'healthy': False,
+            'message': 'Scheduler should be running but thread is dead'
+        }), 503
+
+@app.route('/scheduler_control')
+@login_required
+def scheduler_control():
+    """Control panel for the scheduler"""
+    if current_user.email != 'josh.matern@gmail.com':
+        return "Unauthorized", 403
+
+    global scheduler_thread
+    import schedule
+
+    scheduler_enabled = os.environ.get('ENABLE_SCHEDULER', 'false').lower() == 'true'
+    thread_alive = scheduler_thread and scheduler_thread.is_alive() if scheduler_thread else False
+    job_count = len(schedule.jobs) if schedule else 0
+
+    # Get next run time
+    next_run = None
+    if schedule.jobs:
+        try:
+            next_run = schedule.jobs[0].next_run
+        except:
+            pass
+
+    html = f"""
+    <html>
+    <head>
+        <style>
+            body {{ font-family: Arial, sans-serif; padding: 20px; }}
+            .status-box {{ 
+                padding: 20px; 
+                border-radius: 8px; 
+                margin: 20px 0;
+            }}
+            .enabled {{ background: #d4edda; }}
+            .disabled {{ background: #f8d7da; }}
+            .warning {{ background: #fff3cd; }}
+            .button {{
+                padding: 10px 20px;
+                margin: 10px;
+                border-radius: 5px;
+                text-decoration: none;
+                display: inline-block;
+                font-weight: bold;
+            }}
+            .start {{ background: #28a745; color: white; }}
+            .stop {{ background: #dc3545; color: white; }}
+            .info {{ background: #17a2b8; color: white; }}
+        </style>
+    </head>
+    <body>
+        <h1>⚙️ Scheduler Control Panel</h1>
+
+        <div class="status-box {'enabled' if scheduler_enabled else 'disabled'}">
+            <h2>Configuration</h2>
+            <p><strong>ENABLE_SCHEDULER:</strong> {os.environ.get('ENABLE_SCHEDULER', 'false')}</p>
+            <p><strong>Setting:</strong> {'ENABLED' if scheduler_enabled else 'DISABLED'}</p>
+        </div>
+
+        <div class="status-box {'enabled' if thread_alive else 'warning'}">
+            <h2>Runtime Status</h2>
+            <p><strong>Thread Alive:</strong> {'✅ Yes' if thread_alive else '❌ No'}</p>
+            <p><strong>Scheduled Jobs:</strong> {job_count}</p>
+            <p><strong>Next Run:</strong> {next_run or 'Not scheduled'}</p>
+        </div>
+
+        <div class="status-box warning">
+            <h2>⚠️ Important Notes</h2>
+            <ul>
+                <li>To permanently enable/disable, change ENABLE_SCHEDULER in Railway environment variables</li>
+                <li>Manual start/stop here is temporary until next deployment</li>
+                <li>Health checks will pass even if scheduler is disabled</li>
+            </ul>
+        </div>
+
+        <h2>Actions</h2>
+        <a href="/start_scheduler" class="button start">▶️ Start Scheduler</a>
+        <a href="/stop_scheduler" class="button stop">⏹️ Stop Scheduler</a>
+        <a href="/clear_scheduled_jobs" class="button info">🗑️ Clear Jobs</a>
+
+        <br><br>
+        <a href="/scheduler_status" class="button info">📊 Scheduler Status</a>
+        <a href="/credit_leak_detector" class="button info">🔍 Leak Detector</a>
+        <a href="/dashboard" class="button info">🏠 Dashboard</a>
+    </body>
+    </html>
+    """
+
+    return html
+
+@app.route('/start_scheduler')
+@login_required
+def start_scheduler():
+    """Manually start the scheduler"""
+    if current_user.email != 'josh.matern@gmail.com':
+        return "Unauthorized", 403
+
+    global scheduler_thread
+    import schedule
+
+    # Check if already running
+    if scheduler_thread and scheduler_thread.is_alive():
+        flash('Scheduler is already running', 'info')
+        return redirect(url_for('scheduler_control'))
+
+    try:
+        # Clear any existing jobs first
+        schedule.clear()
+
+        # Start new thread
+        scheduler_thread = threading.Thread(target=run_scheduler, daemon=True, name="SchedulerThread")
+        scheduler_thread.start()
+
+        # Wait a moment
+        time.sleep(1)
+
+        if scheduler_thread.is_alive():
+            flash('✅ Scheduler started successfully', 'success')
+        else:
+            flash('❌ Scheduler failed to start', 'error')
+
+    except Exception as e:
+        flash(f'Error starting scheduler: {str(e)}', 'error')
+
+    return redirect(url_for('scheduler_control'))
+
+
+@app.route('/stop_scheduler')
+@login_required
+def stop_scheduler():
+    """Stop the scheduler"""
+    if current_user.email != 'josh.matern@gmail.com':
+        return "Unauthorized", 403
+
+    import schedule
+
+    try:
+        # Clear all jobs
+        schedule.clear()
+
+        # Set environment variable to stop the thread
+        os.environ['ENABLE_SCHEDULER'] = 'false'
+
+        flash('✅ Scheduler stopped. Thread will exit on next cycle (within 5 minutes)', 'success')
+
+    except Exception as e:
+        flash(f'Error stopping scheduler: {str(e)}', 'error')
+
+    return redirect(url_for('scheduler_control'))
+
+
+@app.route('/clear_scheduled_jobs')
+@login_required
+def clear_scheduled_jobs():
+    """Clear all scheduled jobs"""
+    if current_user.email != 'josh.matern@gmail.com':
+        return "Unauthorized", 403
+
+    import schedule
+
+    try:
+        job_count = len(schedule.jobs)
+        schedule.clear()
+        flash(f'✅ Cleared {job_count} scheduled jobs', 'success')
+    except Exception as e:
+        flash(f'Error clearing jobs: {str(e)}', 'error')
+
+    return redirect(url_for('scheduler_control'))
 
 @app.errorhandler(404)
 def bad_request(error):
@@ -6040,55 +6243,110 @@ def check_all_products():
 
 
 def run_scheduler():
+    """Background scheduler for automatic checking - FIXED"""
+    import schedule
+    import time
+    from datetime import datetime
+
+    print("📅 Scheduler thread started - checking products every 60 minutes")
+
+    # Schedule the job
     schedule.every(60).minutes.do(check_all_products)
+
+    # Track last run to prevent multiple executions
     last_run = None
 
-    while SCHEDULER_ENABLED:
-        current_time = datetime.now()
+    while True:
+        try:
+            # Check if we should still be running
+            if not os.environ.get('ENABLE_SCHEDULER', 'false').lower() == 'true':
+                print("🛑 Scheduler disabled via environment variable, stopping thread")
+                schedule.clear()
+                break
 
-        # Ensure at least 59 minutes between runs
-        if last_run is None or (current_time - last_run).total_seconds() >= 3540:  # 59 minutes
-            schedule.run_pending()
-            if schedule.jobs and schedule.jobs[0].should_run:
-                last_run = current_time
+            current_time = datetime.now()
 
-        time.sleep(300)  # Check every 5 minutes instead of every minute
+            # Ensure at least 59 minutes between runs
+            if last_run is None or (current_time - last_run).total_seconds() >= 3540:  # 59 minutes
+                schedule.run_pending()
+                # Check if a job actually ran
+                if schedule.jobs and len([job for job in schedule.jobs if job.last_run and job.last_run > (last_run or datetime.min)]) > 0:
+                    last_run = current_time
+                    print(f"✅ Scheduler executed at {current_time}")
+
+            time.sleep(300)  # Check every 5 minutes instead of every minute
+
+        except Exception as e:
+            print(f"❌ Scheduler error: {e}")
+            import traceback
+            traceback.print_exc()
+            time.sleep(300)  # Wait 5 minutes before retrying
+
+    print("📅 Scheduler thread stopped")
+
+def initialize_scheduler():
+    """Initialize the scheduler if enabled"""
+    global scheduler_thread
+
+    scheduler_enabled = os.environ.get('ENABLE_SCHEDULER', 'false').lower() == 'true'
+
+    if scheduler_enabled:
+        print("⚠️ SCHEDULER ENABLED via environment variable")
+        print("📅 Starting background scheduler thread...")
+
+        try:
+            scheduler_thread = threading.Thread(target=run_scheduler, daemon=True, name="SchedulerThread")
+            scheduler_thread.start()
+
+            # Give it a moment to start
+            time.sleep(1)
+
+            if scheduler_thread.is_alive():
+                print("✅ Scheduler thread started successfully")
+            else:
+                print("❌ Scheduler thread failed to start")
+        except Exception as e:
+            print(f"❌ Error starting scheduler: {e}")
+            import traceback
+            traceback.print_exc()
+    else:
+        print("✅ SCHEDULER DISABLED - No automatic checks will occur")
+        print("   To enable: Set ENABLE_SCHEDULER=true in environment variables")
+
+        # Clear any existing scheduled jobs
+        try:
+            import schedule
+            schedule.clear()
+        except:
+            pass
 
 # Start scheduler in background
 scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
 scheduler_thread.start()
+initialize_scheduler()
 
 if __name__ == '__main__':
     # Only initialize DB if not in production with existing data
     db_manager = DatabaseManager()
-    # Get port from environment (Railway sets this automatically)
+
+    # Get port from environment
     port = int(os.environ.get('PORT', 5000))
     is_production = os.environ.get('RAILWAY_ENVIRONMENT') is not None
+
     print("🚀 Starting Amazon Bestseller Monitor...")
 
-    # Check database connection
+    # DON'T initialize scheduler here - it's already done above
+
+    # Check configuration
     if os.environ.get('DATABASE_URL'):
         print("✅ PostgreSQL database configured")
     else:
         print("⚠️ Using SQLite for development")
 
-    # Check API key
     if SCRAPINGBEE_API_KEY:
         print("✅ ScrapingBee API key loaded")
     else:
         print("❌ ScrapingBee API key not configured")
-
-    # Check email configuration
-    if email_notifier.is_configured():
-        print("✅ Email notifications configured")
-    else:
-        print("⚠️ Email notifications not configured")
-
-    # Production vs Development settings
-    is_production = os.environ.get('RAILWAY_ENVIRONMENT') is not None
-    debug_mode = not is_production
-
-    print(f"🌍 Environment: {'Production' if is_production else 'Development'}")
 
     # Start the application
     if is_production:
