@@ -38,6 +38,15 @@ import logging
 from logging.handlers import RotatingFileHandler
 from dotenv import load_dotenv
 
+SCHEDULER_ENABLED = os.environ.get('ENABLE_SCHEDULER', 'false').lower() == 'true'
+if SCHEDULER_ENABLED:
+    print("⚠️ SCHEDULER ENABLED - Will check products every 60 minutes")
+    scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
+    scheduler_thread.start()
+else:
+    print("✅ SCHEDULER DISABLED - No automatic checks will occur")
+    print("To enable: Set ENABLE_SCHEDULER=true in environment variables")
+
 load_dotenv()
 IS_PRODUCTION = os.environ.get('FLASK_ENV') == 'production'
 
@@ -2697,6 +2706,419 @@ def generate_verification_link(email):
         if conn:
             conn.rollback()
             conn.close()
+        return f"Error: {str(e)}", 500
+
+@app.route('/emergency_stop')
+@login_required
+def emergency_stop():
+    """Emergency stop all API usage"""
+    conn = get_db()
+    cursor = conn.cursor()
+
+    try:
+        # Pause ALL products for ALL users (if you're admin)
+        if current_user.email == 'josh.matern@gmail.com':
+            if get_db_type() == 'postgresql':
+                cursor.execute('UPDATE products SET active = false')
+            else:
+                cursor.execute('UPDATE products SET active = 0')
+
+            total_paused = cursor.rowcount
+
+            # Clear the user's API key to prevent any usage
+            if get_db_type() == 'postgresql':
+                cursor.execute('''
+                    UPDATE users 
+                    SET scrapingbee_api_key = NULL 
+                    WHERE id = %s
+                ''', (current_user.id,))
+            else:
+                cursor.execute('''
+                    UPDATE users 
+                    SET scrapingbee_api_key = NULL 
+                    WHERE id = ?
+                ''', (current_user.id,))
+
+            conn.commit()
+            conn.close()
+
+            # Kill the scheduler thread if it exists
+            global scheduler_thread
+            if 'scheduler_thread' in globals() and scheduler_thread.is_alive():
+                # Note: Can't actually kill thread safely in Python, but we can set a flag
+                schedule.clear()  # Clear all scheduled jobs
+
+            return f"""
+            <html>
+            <body style="font-family: Arial, sans-serif; padding: 20px; background: #f8d7da;">
+                <h1>🛑 EMERGENCY STOP ACTIVATED</h1>
+                <div style="background: white; padding: 20px; border-radius: 8px; margin: 20px 0;">
+                    <h2>Actions Taken:</h2>
+                    <ul>
+                        <li>✅ Paused {total_paused} products across all users</li>
+                        <li>✅ Removed your ScrapingBee API key</li>
+                        <li>✅ Cleared all scheduled jobs</li>
+                    </ul>
+
+                    <h2>No More API Calls Will Be Made!</h2>
+                    <p>To resume:</p>
+                    <ol>
+                        <li>Re-add your API key in settings</li>
+                        <li>Manually resume products you want to monitor</li>
+                    </ol>
+                </div>
+
+                <a href="/dashboard" style="background: #28a745; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">
+                    Go to Dashboard
+                </a>
+            </body>
+            </html>
+            """
+        else:
+            # Non-admin: just pause their products
+            if get_db_type() == 'postgresql':
+                cursor.execute('UPDATE products SET active = false WHERE user_id = %s', (current_user.id,))
+            else:
+                cursor.execute('UPDATE products SET active = 0 WHERE user_id = ?', (current_user.id,))
+
+            conn.commit()
+            conn.close()
+
+            flash('All your products have been paused', 'success')
+            return redirect(url_for('dashboard'))
+
+    except Exception as e:
+        if conn:
+            conn.rollback()
+            conn.close()
+        return f"Error: {str(e)}", 500
+
+
+@app.route('/credit_leak_detector')
+@login_required
+def credit_leak_detector():
+    """Find where credits are leaking - FIXED"""
+    conn = get_db()
+    cursor = conn.cursor()
+
+    try:
+        # Check for any orphaned active products
+        if get_db_type() == 'postgresql':
+            cursor.execute('''
+                SELECT COUNT(*) as orphaned
+                FROM products p
+                LEFT JOIN users u ON p.user_id = u.id
+                WHERE u.id IS NULL AND p.active = true
+            ''')
+        else:
+            cursor.execute('''
+                SELECT COUNT(*) as orphaned
+                FROM products p
+                LEFT JOIN users u ON p.user_id = u.id
+                WHERE u.id IS NULL AND p.active = 1
+            ''')
+
+        orphaned = cursor.fetchone()
+        # FIX: Handle dict/tuple properly
+        if orphaned:
+            if isinstance(orphaned, dict):
+                orphaned_count = orphaned.get('orphaned', 0)
+            else:
+                orphaned_count = orphaned[0] if orphaned else 0
+        else:
+            orphaned_count = 0
+
+        # Check ALL products regardless of user
+        if get_db_type() == 'postgresql':
+            cursor.execute('''
+                SELECT COUNT(*) as total,
+                       SUM(CASE WHEN active = true THEN 1 ELSE 0 END) as active_count
+                FROM products
+            ''')
+        else:
+            cursor.execute('''
+                SELECT COUNT(*) as total,
+                       SUM(CASE WHEN active = 1 THEN 1 ELSE 0 END) as active_count
+                FROM products
+            ''')
+
+        all_products = cursor.fetchone()
+        if isinstance(all_products, dict):
+            total_products = all_products.get('total', 0)
+            total_active = all_products.get('active_count', 0)
+        else:
+            total_products = all_products[0] if all_products else 0
+            total_active = all_products[1] if all_products and all_products[1] else 0
+
+        # Check rankings in last 24 hours - HOURLY BREAKDOWN
+        if get_db_type() == 'postgresql':
+            cursor.execute('''
+                SELECT 
+                    DATE_TRUNC('hour', r.checked_at) as check_hour,
+                    COUNT(*) as checks_made,
+                    COUNT(DISTINCT p.id) as unique_products
+                FROM rankings r
+                JOIN products p ON r.product_id = p.id
+                WHERE r.checked_at > %s
+                GROUP BY DATE_TRUNC('hour', r.checked_at)
+                ORDER BY check_hour DESC
+                LIMIT 24
+            ''', (datetime.now() - timedelta(hours=24),))
+        else:
+            cursor.execute('''
+                SELECT 
+                    strftime('%Y-%m-%d %H:00:00', r.checked_at) as check_hour,
+                    COUNT(*) as checks_made,
+                    COUNT(DISTINCT p.id) as unique_products
+                FROM rankings r
+                JOIN products p ON r.product_id = p.id
+                WHERE r.checked_at > ?
+                GROUP BY strftime('%Y-%m-%d %H:00:00', r.checked_at)
+                ORDER BY check_hour DESC
+                LIMIT 24
+            ''', (datetime.now() - timedelta(hours=24),))
+
+        hourly_usage = cursor.fetchall()
+
+        # Check if scheduler is running
+        global scheduler_thread
+        scheduler_running = False
+        try:
+            scheduler_running = 'scheduler_thread' in globals() and scheduler_thread.is_alive()
+        except:
+            pass
+
+        # Check scheduled jobs
+        import schedule
+        scheduled_jobs = len(schedule.jobs)
+
+        # Get most recent checks
+        if get_db_type() == 'postgresql':
+            cursor.execute('''
+                SELECT r.checked_at, p.product_title, p.user_id, p.active
+                FROM rankings r
+                JOIN products p ON r.product_id = p.id
+                ORDER BY r.checked_at DESC
+                LIMIT 10
+            ''')
+        else:
+            cursor.execute('''
+                SELECT r.checked_at, p.product_title, p.user_id, p.active
+                FROM rankings r
+                JOIN products p ON r.product_id = p.id
+                ORDER BY r.checked_at DESC
+                LIMIT 10
+            ''')
+
+        recent_checks = cursor.fetchall()
+
+        conn.close()
+
+        # Calculate if there's suspicious activity
+        suspicious_activity = False
+        suspicious_reasons = []
+
+        if total_active > 0 and total_products == 0:
+            suspicious_activity = True
+            suspicious_reasons.append("Active products exist but no products in database!")
+
+        if orphaned_count > 0:
+            suspicious_activity = True
+            suspicious_reasons.append(f"{orphaned_count} orphaned active products found!")
+
+        # Check for multiple checks per hour
+        for hour_data in hourly_usage:
+            if isinstance(hour_data, dict):
+                checks = hour_data.get('checks_made', 0)
+                products = hour_data.get('unique_products', 0)
+            else:
+                checks = hour_data[1] if len(hour_data) > 1 else 0
+                products = hour_data[2] if len(hour_data) > 2 else 0
+
+            if products > 0 and checks > products * 2:  # More than 2 checks per product per hour
+                suspicious_activity = True
+                suspicious_reasons.append(f"Multiple checks per product in same hour: {checks} checks for {products} products")
+                break
+
+        html = f"""
+        <html>
+        <head>
+            <style>
+                body {{ font-family: Arial, sans-serif; padding: 20px; }}
+                .danger {{ background: #f8d7da; padding: 15px; border-radius: 8px; margin: 20px 0; }}
+                .warning {{ background: #fff3cd; padding: 15px; border-radius: 8px; margin: 20px 0; }}
+                .success {{ background: #d4edda; padding: 15px; border-radius: 8px; margin: 20px 0; }}
+                table {{ border-collapse: collapse; width: 100%; margin: 20px 0; }}
+                th, td {{ border: 1px solid #ddd; padding: 8px; }}
+                th {{ background: #f5f5f5; }}
+                .suspicious {{ background: #ffcccc; }}
+            </style>
+        </head>
+        <body>
+            <h1>🔍 Credit Leak Detector</h1>
+        """
+
+        if suspicious_activity:
+            html += f"""
+            <div class="danger">
+                <h2>⚠️ SUSPICIOUS ACTIVITY DETECTED!</h2>
+                <ul>
+                    {''.join([f'<li>{reason}</li>' for reason in suspicious_reasons])}
+                </ul>
+            </div>
+            """
+
+        html += f"""
+            <div class="{'danger' if scheduler_running else 'success'}">
+                <h2>Scheduler Status</h2>
+                <p><strong>Thread Alive:</strong> {'🔴 YES - RUNNING!' if scheduler_running else '🟢 NO - Stopped'}</p>
+                <p><strong>Scheduled Jobs:</strong> {scheduled_jobs}</p>
+                <p><strong>ENABLE_SCHEDULER env:</strong> {os.environ.get('ENABLE_SCHEDULER', 'Not Set')}</p>
+            </div>
+
+            <div class="warning">
+                <h2>System Statistics</h2>
+                <p><strong>Total Products (all users):</strong> {total_products}</p>
+                <p><strong>Active Products (all users):</strong> {total_active}</p>
+                <p><strong>Orphaned Active Products:</strong> {orphaned_count}</p>
+            </div>
+
+            <h2>Hourly Usage (Last 24 Hours)</h2>
+            <p>If you see multiple entries per hour, the scheduler is running too frequently!</p>
+            <table>
+                <tr>
+                    <th>Hour</th>
+                    <th>API Calls</th>
+                    <th>Unique Products</th>
+                    <th>Status</th>
+                </tr>
+        """
+
+        for hour in hourly_usage:
+            if isinstance(hour, dict):
+                time = hour.get('check_hour', '')
+                checks = hour.get('checks_made', 0)
+                products = hour.get('unique_products', 0)
+            else:
+                time = hour[0] if hour else ''
+                checks = hour[1] if len(hour) > 1 else 0
+                products = hour[2] if len(hour) > 2 else 0
+
+            is_suspicious = checks > products * 2 if products > 0 else False
+            row_class = 'suspicious' if is_suspicious else ''
+            status = '⚠️ MULTIPLE CHECKS!' if is_suspicious else 'Normal'
+
+            html += f"""
+                <tr class="{row_class}">
+                    <td>{time}</td>
+                    <td><strong>{checks}</strong></td>
+                    <td>{products}</td>
+                    <td>{status}</td>
+                </tr>
+            """
+
+        html += """
+            </table>
+
+            <h2>Most Recent Checks</h2>
+            <table>
+                <tr>
+                    <th>Time</th>
+                    <th>Product</th>
+                    <th>User ID</th>
+                    <th>Was Active?</th>
+                </tr>
+        """
+
+        for check in recent_checks:
+            if isinstance(check, dict):
+                time = check.get('checked_at', '')
+                title = check.get('product_title', '')
+                user_id = check.get('user_id', '')
+                active = check.get('active', False)
+            else:
+                time = check[0] if check else ''
+                title = check[1] if len(check) > 1 else ''
+                user_id = check[2] if len(check) > 2 else ''
+                active = check[3] if len(check) > 3 else False
+
+            html += f"""
+                <tr>
+                    <td>{time}</td>
+                    <td>{title[:30]}...</td>
+                    <td>{user_id}</td>
+                    <td>{'Yes' if active else 'No'}</td>
+                </tr>
+            """
+
+        html += f"""
+            </table>
+
+            <h2>🚨 Emergency Actions</h2>
+            <a href="/kill_scheduler" 
+               onclick="return confirm('This will attempt to stop the scheduler. Continue?')"
+               style="background: #dc3545; color: white; padding: 15px 30px; text-decoration: none; border-radius: 5px; font-size: 18px;">
+                🛑 KILL SCHEDULER
+            </a>
+
+            <br><br>
+            <a href="/dashboard">Dashboard</a> | 
+            <a href="/scrapingbee_audit">Full Audit</a>
+        </body>
+        </html>
+        """
+
+        return html
+
+    except Exception as e:
+        if conn:
+            conn.close()
+        import traceback
+        return f"<pre>{traceback.format_exc()}</pre>", 500
+
+
+@app.route('/kill_scheduler')
+@login_required
+def kill_scheduler():
+    """Attempt to kill the scheduler"""
+    if current_user.email != 'josh.matern@gmail.com':
+        return "Unauthorized", 403
+
+    try:
+        import schedule
+
+        # Clear all scheduled jobs
+        schedule.clear()
+
+        # Set a flag to stop the scheduler
+        global SCHEDULER_ENABLED
+        SCHEDULER_ENABLED = False
+
+        # Try to stop the thread (won't actually kill it, but will prevent new jobs)
+        global scheduler_thread
+        if 'scheduler_thread' in globals():
+            # Can't actually stop the thread, but clearing jobs should help
+            pass
+
+        return f"""
+        <html>
+        <body style="font-family: Arial, sans-serif; padding: 20px;">
+            <h1>✅ Scheduler Killed</h1>
+            <p>All scheduled jobs have been cleared.</p>
+            <p>The scheduler thread cannot be forcibly stopped in Python, but it will no longer execute jobs.</p>
+
+            <h2>To permanently disable:</h2>
+            <ol>
+                <li>Add ENABLE_SCHEDULER=false to Railway environment variables</li>
+                <li>Redeploy the application</li>
+            </ol>
+
+            <a href="/credit_leak_detector">Back to Leak Detector</a>
+        </body>
+        </html>
+        """
+
+    except Exception as e:
         return f"Error: {str(e)}", 500
 
 @app.route('/debug/db-connection')
