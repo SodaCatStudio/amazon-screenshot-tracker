@@ -2843,12 +2843,16 @@ def credit_leak_detector():
             ''')
 
         all_products = cursor.fetchone()
-        if isinstance(all_products, dict):
-            total_products = all_products.get('total', 0)
-            total_active = all_products.get('active_count', 0)
+        if all_products:
+            if isinstance(all_products, dict):
+                total_products = all_products.get('total', 0) or 0
+                total_active = all_products.get('active_count', 0) or 0
+            else:
+                total_products = all_products[0] if all_products[0] is not None else 0
+                total_active = all_products[1] if all_products[1] is not None else 0
         else:
-            total_products = all_products[0] if all_products else 0
-            total_active = all_products[1] if all_products and all_products[1] else 0
+            total_products = 0
+            total_active = 0
 
         # Check rankings in last 24 hours - HOURLY BREAKDOWN
         if get_db_type() == 'postgresql':
@@ -2917,6 +2921,11 @@ def credit_leak_detector():
         # Calculate if there's suspicious activity
         suspicious_activity = False
         suspicious_reasons = []
+
+        # Ensure values are not None before comparison
+        total_active = total_active if total_active is not None else 0
+        total_products = total_products if total_products is not None else 0
+        orphaned_count = orphaned_count if orphaned_count is not None else 0
 
         if total_active > 0 and total_products == 0:
             suspicious_activity = True
