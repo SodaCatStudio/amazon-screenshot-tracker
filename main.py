@@ -5841,24 +5841,6 @@ def check_products():
         'error': 'Bulk checking has been replaced with automatic hourly monitoring. Products are checked automatically every 60 minutes.'
     }), 400
 
-@app.route('/check_single_product/<int:product_id>', methods=['POST'])
-@login_required
-@limiter.limit("50 per hour")  # More lenient for single products
-def check_single_product(product_id):
-    """Check a single product - optimized for individual checks"""
-    try:
-        # Just check this one product using the bulk function
-        return check_products_internal([product_id])
-
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-def check_products_internal(product_ids):
-    """Internal function to check products - used by both single and bulk checks"""
-    # This is essentially the same logic as check_products but extracted for reuse
-    # You can call this from check_single_product to avoid code duplication
-    pass  # Implementation is the same as check_products above
-
 @app.route('/send_feedback', methods=['POST'])
 @login_required
 def send_feedback():
@@ -6358,7 +6340,7 @@ def get_next_check_times():
 @app.route('/check_product/<int:product_id>')
 @login_required
 @limiter.limit("20 per hour")  # More lenient for single products
-def check_single_product(product_id):
+def manual_check_product(product_id):
     """Check a single product manually"""
     try:
         conn = get_db()
