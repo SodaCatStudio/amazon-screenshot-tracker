@@ -979,11 +979,16 @@
         }
 
         function loadTargetCategories(productId) {
-            fetch(`/get_target_categories/${productId}?email=${encodeURIComponent(userEmail)}`)
+            fetch(`/get_target_categories/${productId}`)
                 .then(response => response.json())
                 .then(categories => {
                     const container = document.getElementById(`category-list-${productId}`);
                     if (!container) return;
+
+                    if (categories.error) {
+                        container.innerHTML = '<p style="color: #666; font-size: 14px;">Error loading categories</p>';
+                        return;
+                    }
 
                     if (categories.length === 0) {
                         container.innerHTML = '<p style="color: #666; font-size: 14px;">No target categories set</p>';
@@ -1066,8 +1071,8 @@
                 body: JSON.stringify({
                     product_id: parseInt(productId),
                     category_name: categoryName,
-                    target_rank: parseInt(targetRank),
-                    email: userEmail
+                    target_rank: parseInt(targetRank)
+                    // No email parameter needed
                 })
             })
             .then(response => response.json())
@@ -1090,23 +1095,23 @@
                 return;
             }
 
-            fetch(`/toggle_monitoring/${productId}?email=${encodeURIComponent(userEmail)}`, {
+            fetch(`/toggle_monitoring/${productId}`, {
                 headers: {
                     'X-CSRFToken': csrfToken
                 }
             })
-                .then(response => response.json())
-                .then(data => {
-                    if (data.status) {
-                        alert(data.status);
-                        location.reload();
-                    } else {
-                        alert('Error: ' + (data.error || 'Unknown error'));
-                    }
-                })
-                .catch(error => {
-                    alert('Error toggling monitoring: ' + error);
-                });
+            .then(response => response.json())
+            .then(data => {
+                if (data.status) {
+                    alert(data.status);
+                    location.reload();
+                } else {
+                    alert('Error: ' + (data.error || 'Unknown error'));
+                }
+            })
+            .catch(error => {
+                alert('Error toggling monitoring: ' + error);
+            });
         }
 
         function deleteProduct(productId) {
@@ -1114,23 +1119,23 @@
                 return;
             }
 
-            fetch(`/delete_product/${productId}?email=${encodeURIComponent(userEmail)}`, {
+            fetch(`/delete_product/${productId}`, {
                 headers: {
                     'X-CSRFToken': csrfToken
                 }
             })
-                .then(response => response.json())
-                .then(data => {
-                    if (data.status) {
-                        alert('Product deleted successfully!');
-                        location.reload();
-                    } else {
-                        alert('Error: ' + (data.error || 'Unknown error'));
-                    }
-                })
-                .catch(error => {
-                    alert('Error deleting product: ' + error);
-                });
+            .then(response => response.json())
+            .then(data => {
+                if (data.status) {
+                    alert('Product deleted successfully!');
+                    location.reload();
+                } else {
+                    alert('Error: ' + (data.error || 'Unknown error'));
+                }
+            })
+            .catch(error => {
+                alert('Error deleting product: ' + error);
+            });
         }
 
         // Mobile-friendly touch handling
