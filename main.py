@@ -39,13 +39,6 @@ from logging.handlers import RotatingFileHandler
 from dotenv import load_dotenv
 
 SCHEDULER_ENABLED = os.environ.get('ENABLE_SCHEDULER', 'false').lower() == 'true'
-if SCHEDULER_ENABLED:
-    print("⚠️ SCHEDULER ENABLED - Will check products every 60 minutes")
-    scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
-    scheduler_thread.start()
-else:
-    print("✅ SCHEDULER DISABLED - No automatic checks will occur")
-    print("To enable: Set ENABLE_SCHEDULER=true in environment variables")
 
 load_dotenv()
 IS_PRODUCTION = os.environ.get('FLASK_ENV') == 'production'
