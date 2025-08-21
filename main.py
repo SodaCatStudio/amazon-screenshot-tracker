@@ -579,27 +579,25 @@ def scheduler_control():
 @app.route('/start_scheduler')
 @login_required
 def start_scheduler():
-    """Manually start the scheduler"""
+    """Manually start the scheduler - FIXED"""
     if current_user.email != 'josh.matern@gmail.com':
         return "Unauthorized", 403
 
     global scheduler_thread
-    import schedule
 
-    # Check if already running
     if scheduler_thread and scheduler_thread.is_alive():
         flash('Scheduler is already running', 'info')
         return redirect(url_for('scheduler_control'))
 
     try:
-        # Clear any existing jobs first
-        schedule.clear()
-
-        # Start new thread
-        scheduler_thread = threading.Thread(target=run_scheduler, daemon=True, name="SchedulerThread")
+        # Start new thread with CORRECT function name
+        scheduler_thread = threading.Thread(
+            target=run_scheduler,  # FIXED: Using run_scheduler
+            daemon=True, 
+            name="SchedulerThread"
+        )
         scheduler_thread.start()
 
-        # Wait a moment
         time.sleep(1)
 
         if scheduler_thread.is_alive():
@@ -6528,10 +6526,9 @@ def check_specific_product(user_id, product_id):
             conn.close()
         raise
 
-def run_intelligent_scheduler():
+def run_scheduler():
     """
-    Smart scheduler that checks each product individually based on when it was last checked.
-    Each product gets checked 60 minutes after its last check, not on a global schedule.
+    Per-product intelligent scheduler - checks each product 60 minutes after last check
     """
     import time
     from datetime import datetime, timedelta
@@ -6550,7 +6547,6 @@ def run_intelligent_scheduler():
             check_due_products()
 
             # Sleep for 1 minute before checking again
-            # This gives us minute-level precision for checks
             time.sleep(60)
 
         except Exception as e:
@@ -6860,9 +6856,10 @@ def check_due_products():
             conn.close()
 
 def initialize_scheduler():
-    """Initialize the per-product scheduler"""
+    """Initialize the per-product scheduler with proper function name"""
     global scheduler_thread
 
+    # Check if already running
     if 'scheduler_thread' in globals() and scheduler_thread and scheduler_thread.is_alive():
         print("⚠️ Scheduler already running")
         return
@@ -6872,11 +6869,10 @@ def initialize_scheduler():
     if scheduler_enabled:
         print("🚀 PER-PRODUCT AUTOMATED MONITORING ENABLED")
         print("⏰ Each product checked 60 minutes after its last check")
-        print("📊 Fair and consistent timing for all users")
 
         try:
             scheduler_thread = threading.Thread(
-                target=run_intelligent_scheduler,
+                target=run_scheduler,  
                 daemon=True,
                 name="PerProductScheduler"
             )
@@ -6891,6 +6887,8 @@ def initialize_scheduler():
 
         except Exception as e:
             print(f"❌ Error starting scheduler: {e}")
+            import traceback
+            traceback.print_exc()
     else:
         print("⚠️ AUTOMATED MONITORING DISABLED")
         print("   To enable: Set ENABLE_SCHEDULER=true")
