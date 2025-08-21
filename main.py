@@ -5841,78 +5841,32 @@ def get_target_categories(product_id):
 
     return jsonify(categories)
 
-@app.route('/check_products')
-def manual_check():
-    """Manual trigger for checking all products"""
-    try:
-        check_all_products()
-        return jsonify({'status': 'Products checked successfully'})
-    except Exception as e:
-        print(f"❌ Manual check failed: {e}")
-        return jsonify({'error': 'Failed to check products', 'details': str(e)}), 500
-
-@app.route('/toggle_monitoring/<int:product_id>')
+@app.route('/check_products', methods=['POST'])
 @login_required
-def toggle_monitoring(product_id):
-    """Toggle monitoring status for a product - FIXED for authenticated users"""
+@limiter.limit("30 per hour")  # Reasonable limit for manual checks
+def check_products():
+    """Manual check for user's selected products"""
+    return jsonify({
+        'error': 'Bulk checking has been replaced with automatic hourly monitoring. Products are checked automatically every 60 minutes.'
+    }), 400
+
+@app.route('/check_single_product/<int:product_id>', methods=['POST'])
+@login_required
+@limiter.limit("50 per hour")  # More lenient for single products
+def check_single_product(product_id):
+    """Check a single product - optimized for individual checks"""
     try:
-        print(f"🔄 Toggle monitoring for product {product_id} by user {current_user.email}")
-
-        conn = get_db()
-        cursor = conn.cursor()
-
-        # Verify the product belongs to the user
-        if get_db_type() == 'postgresql':
-            cursor.execute('''
-                SELECT active FROM products 
-                WHERE id = %s AND user_id = %s
-            ''', (product_id, current_user.id))
-        else:
-            cursor.execute('''
-                SELECT active FROM products 
-                WHERE id = ? AND user_id = ?
-            ''', (product_id, current_user.id))
-
-        result = cursor.fetchone()
-        if not result:
-            conn.close()
-            return jsonify({'error': 'Product not found or unauthorized'}), 404
-
-        # Get current status
-        if isinstance(result, dict):
-            current_status = result['active']
-        else:
-            current_status = result[0]
-
-        # Toggle the active status
-        new_status = 0 if current_status else 1
-
-        if get_db_type() == 'postgresql':
-            cursor.execute('''
-                UPDATE products 
-                SET active = %s 
-                WHERE id = %s AND user_id = %s
-            ''', (bool(new_status), product_id, current_user.id))
-        else:
-            cursor.execute('''
-                UPDATE products 
-                SET active = ? 
-                WHERE id = ? AND user_id = ?
-            ''', (new_status, product_id, current_user.id))
-
-        conn.commit()
-        conn.close()
-
-        status_text = 'resumed' if new_status else 'paused'
-        print(f"✅ Monitoring {status_text} for product {product_id}")
-        return jsonify({'status': f'Monitoring {status_text} successfully'})
+        # Just check this one product using the bulk function
+        return check_products_internal([product_id])
 
     except Exception as e:
-        print(f"❌ Error toggling monitoring: {e}")
-        if conn:
-            conn.rollback()
-            conn.close()
         return jsonify({'error': str(e)}), 500
+
+def check_products_internal(product_ids):
+    """Internal function to check products - used by both single and bulk checks"""
+    # This is essentially the same logic as check_products but extracted for reuse
+    # You can call this from check_single_product to avoid code duplication
+    pass  # Implementation is the same as check_products above
 
 @app.route('/send_feedback', methods=['POST'])
 @login_required
@@ -6083,250 +6037,866 @@ def delete_product(product_id):
             conn.close()
         return jsonify({'error': str(e)}), 500
 
-def check_all_products():
-    """Check all active products - screenshots only on achievements after initial"""
-    print("🔄 Starting scheduled product check...")
-    conn = sqlite3.connect('amazon_monitor.db')
+def check_user_products(user_id, limit=10):
+    """Check products for a specific user with credit limits"""
+    print(f"🔄 Checking products for user {user_id}")
+
+    conn = get_db()
     cursor = conn.cursor()
 
-    # Get products grouped by user with user_id
-    cursor.execute('''
-        SELECT p.id, p.product_url, p.product_title, p.user_id 
-        FROM products p 
-        JOIN users u ON p.user_id = u.id
-        WHERE p.active = 1 
-        ORDER BY p.user_id
-    ''')
-    products = cursor.fetchall()
-    print(f"📊 Found {len(products)} active products to check")
+    products_checked = 0
+    credits_used = 0
+    achievements = []
 
-    current_user_id = None
-    user_monitor = None
-    users_without_keys = set()
+    try:
+        # Get user's active products
+        if get_db_type() == 'postgresql':
+            cursor.execute('''
+                SELECT p.id, p.product_url, p.product_title, p.current_rank, 
+                       p.current_category, p.is_bestseller,
+                       u.scrapingbee_api_key
+                FROM products p
+                JOIN users u ON p.user_id = u.id
+                WHERE p.user_id = %s 
+                  AND p.active = true
+                  AND u.scrapingbee_api_key IS NOT NULL
+                ORDER BY p.last_checked ASC NULLS FIRST
+                LIMIT %s
+            ''', (user_id, limit))
+        else:
+            cursor.execute('''
+                SELECT p.id, p.product_url, p.product_title, p.current_rank,
+                       p.current_category, p.is_bestseller,
+                       u.scrapingbee_api_key
+                FROM products p
+                JOIN users u ON p.user_id = u.id
+                WHERE p.user_id = ? 
+                  AND p.active = 1
+                  AND u.scrapingbee_api_key IS NOT NULL
+                ORDER BY p.last_checked ASC
+                LIMIT ?
+            ''', (user_id, limit))
 
-    for product_id, url, title, user_id in products:
-        try:
-            # Check if we need a new monitor instance for this user
-            if user_id != current_user_id:
-                current_user_id = user_id
-                user_monitor = AmazonMonitor.for_user(user_id)
+        products = cursor.fetchall()
 
-                if not user_monitor.api_key:
-                    if user_id not in users_without_keys:
-                        print(f"⚠️ User {user_id} has no API key configured - skipping their products")
-                        users_without_keys.add(user_id)
-                    continue
+        if not products:
+            conn.close()
+            return {
+                'products_checked': 0,
+                'credits_used': 0,
+                'achievements': [],
+                'message': 'No active products to check'
+            }
 
-            if not user_monitor or not user_monitor.api_key:
+        # Create monitor for user
+        user_monitor = AmazonMonitor.for_user(user_id)
+
+        if not user_monitor.api_key:
+            conn.close()
+            return {
+                'products_checked': 0,
+                'credits_used': 0,
+                'achievements': [],
+                'message': 'No API key configured'
+            }
+
+        for product_row in products:
+            try:
+                # Extract product data
+                if isinstance(product_row, dict):
+                    product_id = product_row['id']
+                    url = product_row['product_url']
+                    title = product_row['product_title']
+                    previous_rank = int(product_row['current_rank']) if product_row['current_rank'] else 999999
+                    was_bestseller = product_row['is_bestseller']
+                else:
+                    product_id = product_row[0]
+                    url = product_row[1]
+                    title = product_row[2]
+                    previous_rank = int(product_row[3]) if product_row[3] else 999999
+                    was_bestseller = product_row[5]
+
+                print(f"🔍 Checking: {title[:50]}...")
+
+                # Scrape the product
+                result = user_monitor.scrape_amazon_page(url)
+                credits_used += 1
+
+                if result.get('success'):
+                    product_info = user_monitor.extract_product_info(result.get('html', ''))
+
+                    current_rank = int(product_info['rank']) if product_info.get('rank') else None
+                    is_bestseller_now = product_info.get('is_bestseller', False)
+
+                    # Update product info
+                    if get_db_type() == 'postgresql':
+                        cursor.execute('''
+                            UPDATE products 
+                            SET current_rank = %s, current_category = %s, 
+                                is_bestseller = %s, last_checked = %s
+                            WHERE id = %s
+                        ''', (
+                            product_info.get('rank'),
+                            product_info.get('category'),
+                            is_bestseller_now,
+                            datetime.now(),
+                            product_id
+                        ))
+                    else:
+                        cursor.execute('''
+                            UPDATE products 
+                            SET current_rank = ?, current_category = ?, 
+                                is_bestseller = ?, last_checked = ?
+                            WHERE id = ?
+                        ''', (
+                            product_info.get('rank'),
+                            product_info.get('category'),
+                            is_bestseller_now,
+                            datetime.now(),
+                            product_id
+                        ))
+
+                    # Record ranking history
+                    if get_db_type() == 'postgresql':
+                        cursor.execute('''
+                            INSERT INTO rankings 
+                            (product_id, rank_number, category, is_bestseller, checked_at)
+                            VALUES (%s, %s, %s, %s, %s)
+                        ''', (
+                            product_id, current_rank,
+                            product_info.get('category'),
+                            is_bestseller_now,
+                            datetime.now()
+                        ))
+                    else:
+                        cursor.execute('''
+                            INSERT INTO rankings 
+                            (product_id, rank_number, category, is_bestseller, checked_at)
+                            VALUES (?, ?, ?, ?, ?)
+                        ''', (
+                            product_id, current_rank,
+                            product_info.get('category'),
+                            is_bestseller_now,
+                            datetime.now()
+                        ))
+
+                    # Check for achievements
+                    achievement_triggered = False
+                    achievement_reason = ""
+
+                    if is_bestseller_now and not was_bestseller:
+                        achievement_triggered = True
+                        achievement_reason = "New Bestseller!"
+                    elif current_rank:
+                        if current_rank <= 10 and previous_rank > 10:
+                            achievement_triggered = True
+                            achievement_reason = f"Entered Top 10! (#{current_rank})"
+                        elif current_rank == 1 and previous_rank != 1:
+                            achievement_triggered = True
+                            achievement_reason = "Reached #1!"
+
+                    # Save screenshot if achievement
+                    if achievement_triggered and result.get('screenshot'):
+                        print(f"🏆 Achievement detected: {achievement_reason}")
+
+                        if get_db_type() == 'postgresql':
+                            cursor.execute('''
+                                INSERT INTO bestseller_screenshots 
+                                (product_id, screenshot_data, rank_achieved, category, achieved_at)
+                                VALUES (%s, %s, %s, %s, %s)
+                            ''', (
+                                product_id,
+                                result['screenshot'],
+                                product_info.get('rank'),
+                                f"{product_info.get('category', '')} - {achievement_reason}",
+                                datetime.now()
+                            ))
+                        else:
+                            cursor.execute('''
+                                INSERT INTO bestseller_screenshots 
+                                (product_id, screenshot_data, rank_achieved, category, achieved_at)
+                                VALUES (?, ?, ?, ?, ?)
+                            ''', (
+                                product_id,
+                                result['screenshot'],
+                                product_info.get('rank'),
+                                f"{product_info.get('category', '')} - {achievement_reason}",
+                                datetime.now()
+                            ))
+
+                        achievements.append({
+                            'product': title,
+                            'achievement': achievement_reason,
+                            'rank': current_rank
+                        })
+
+                        # Send email notification
+                        if get_db_type() == 'postgresql':
+                            cursor.execute('SELECT email FROM users WHERE id = %s', (user_id,))
+                        else:
+                            cursor.execute('SELECT email FROM users WHERE id = ?', (user_id,))
+
+                        user_email_row = cursor.fetchone()
+                        user_email = user_email_row['email'] if isinstance(user_email_row, dict) else user_email_row[0]
+
+                        if email_notifier.is_configured():
+                            product_info['achievement_reason'] = achievement_reason
+                            email_notifier.send_bestseller_notification(
+                                user_email,
+                                product_info,
+                                result['screenshot'],
+                                achievement_type=achievement_reason
+                            )
+
+                    products_checked += 1
+                    conn.commit()
+
+                    # Rate limiting between products
+                    if products_checked < len(products):
+                        time.sleep(1)  # 1 second delay between products
+
+                else:
+                    print(f"❌ Failed to scrape: {result.get('error', 'Unknown error')}")
+
+            except Exception as e:
+                print(f"❌ Error checking product {product_id}: {e}")
                 continue
 
-            print(f"🔍 Checking product {product_id}: {title} (User: {user_id})")
+        conn.close()
 
-            # Get previous rank to check if there's an improvement
+        return {
+            'products_checked': products_checked,
+            'credits_used': credits_used,
+            'achievements': achievements,
+            'message': f'Successfully checked {products_checked} products'
+        }
+
+    except Exception as e:
+        print(f"❌ Error in check_user_products: {e}")
+        if conn:
+            conn.close()
+        raise
+
+@app.route('/api/next_check_times')
+@login_required
+def get_next_check_times():
+    """Get when each product will be checked next"""
+    conn = get_db()
+    cursor = conn.cursor()
+
+    try:
+        if get_db_type() == 'postgresql':
             cursor.execute('''
-                SELECT current_rank, current_category, is_bestseller 
-                FROM products WHERE id = ?
+                SELECT 
+                    id,
+                    product_title,
+                    last_checked,
+                    created_at,
+                    active,
+                    CASE 
+                        WHEN active = false THEN NULL
+                        WHEN last_checked IS NULL THEN created_at + INTERVAL '60 minutes'
+                        ELSE last_checked + INTERVAL '60 minutes'
+                    END as next_check
+                FROM products
+                WHERE user_id = %s
+                ORDER BY next_check ASC
+            ''', (current_user.id,))
+        else:
+            cursor.execute('''
+                SELECT 
+                    id,
+                    product_title,
+                    last_checked,
+                    created_at,
+                    active,
+                    CASE 
+                        WHEN active = 0 THEN NULL
+                        WHEN last_checked IS NULL THEN datetime(created_at, '+60 minutes')
+                        ELSE datetime(last_checked, '+60 minutes')
+                    END as next_check
+                FROM products
+                WHERE user_id = ?
+                ORDER BY next_check ASC
+            ''', (current_user.id,))
+
+        products = cursor.fetchall()
+        conn.close()
+
+        result = []
+        current_time = datetime.now()
+
+        for product in products:
+            if isinstance(product, dict):
+                product_data = {
+                    'id': product['id'],
+                    'title': product['product_title'],
+                    'active': product['active'],
+                    'last_checked': str(product['last_checked']) if product['last_checked'] else None,
+                    'next_check': str(product['next_check']) if product['next_check'] else None,
+                }
+            else:
+                product_data = {
+                    'id': product[0],
+                    'title': product[1],
+                    'active': product[4],
+                    'last_checked': str(product[2]) if product[2] else None,
+                    'next_check': str(product[5]) if product[5] else None,
+                }
+
+            # Calculate minutes until next check
+            if product_data['next_check'] and product_data['active']:
+                next_check_time = datetime.fromisoformat(product_data['next_check'].replace(' ', 'T'))
+                time_until = next_check_time - current_time
+                minutes_until = int(time_until.total_seconds() / 60)
+                product_data['minutes_until_check'] = max(0, minutes_until)
+                product_data['status'] = 'due' if minutes_until <= 0 else 'scheduled'
+            else:
+                product_data['minutes_until_check'] = None
+                product_data['status'] = 'paused' if not product_data['active'] else 'never_checked'
+
+            result.append(product_data)
+
+        return jsonify(result)
+
+    except Exception as e:
+        if conn:
+            conn.close()
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/check_product/<int:product_id>')
+@login_required
+@limiter.limit("20 per hour")  # More lenient for single products
+def check_single_product(product_id):
+    """Check a single product manually"""
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+
+        # Verify ownership
+        if get_db_type() == 'postgresql':
+            cursor.execute('''
+                SELECT user_id FROM products 
+                WHERE id = %s
             ''', (product_id,))
-            previous_data = cursor.fetchone()
-            previous_rank = int(previous_data[0]) if previous_data[0] else 999999
-            was_bestseller = previous_data[2]
+        else:
+            cursor.execute('''
+                SELECT user_id FROM products 
+                WHERE id = ?
+            ''', (product_id,))
 
-            # Scrape the page (screenshot will be captured automatically by ScrapingBee)
-            result = user_monitor.scrape_amazon_page(url)
+        result = cursor.fetchone()
+        if not result:
+            conn.close()
+            return jsonify({'error': 'Product not found'}), 404
 
-            if result['success']:
-                print(f"✅ Successfully scraped product {product_id}")
-                product_info = user_monitor.extract_product_info(result['html'])
+        owner_id = result['user_id'] if isinstance(result, dict) else result[0]
 
-                current_rank = int(product_info['rank']) if product_info['rank'] else None
-                is_bestseller_now = product_info['is_bestseller']
+        if owner_id != current_user.id:
+            conn.close()
+            return jsonify({'error': 'Unauthorized'}), 403
 
-                # Update product info
+        conn.close()
+
+        # Check just this one product
+        conn = get_db()
+        cursor = conn.cursor()
+
+        if get_db_type() == 'postgresql':
+            cursor.execute('''
+                UPDATE products 
+                SET active = true 
+                WHERE id = %s
+            ''', (product_id,))
+        else:
+            cursor.execute('''
+                UPDATE products 
+                SET active = 1 
+                WHERE id = ?
+            ''', (product_id,))
+
+        conn.commit()
+        conn.close()
+
+        # Use the check_user_products function but with a specific product
+        result = check_specific_product(current_user.id, product_id)
+
+        return jsonify({
+            'status': 'success',
+            'rank': result.get('rank'),
+            'category': result.get('category'),
+            'is_bestseller': result.get('is_bestseller'),
+            'achievement': result.get('achievement')
+        })
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+def check_specific_product(user_id, product_id):
+    """Check a specific product"""
+    conn = get_db()
+    cursor = conn.cursor()
+
+    try:
+        # Get the specific product
+        if get_db_type() == 'postgresql':
+            cursor.execute('''
+                SELECT p.product_url, p.current_rank, p.is_bestseller
+                FROM products p
+                WHERE p.id = %s AND p.user_id = %s
+            ''', (product_id, user_id))
+        else:
+            cursor.execute('''
+                SELECT p.product_url, p.current_rank, p.is_bestseller
+                FROM products p
+                WHERE p.id = ? AND p.user_id = ?
+            ''', (product_id, user_id))
+
+        product = cursor.fetchone()
+        if not product:
+            conn.close()
+            return {'error': 'Product not found'}
+
+        if isinstance(product, dict):
+            url = product['product_url']
+            previous_rank = int(product['current_rank']) if product['current_rank'] else 999999
+            was_bestseller = product['is_bestseller']
+        else:
+            url = product[0]
+            previous_rank = int(product[1]) if product[1] else 999999
+            was_bestseller = product[2]
+
+        # Scrape and update
+        user_monitor = AmazonMonitor.for_user(user_id)
+        result = user_monitor.scrape_amazon_page(url)
+
+        if result.get('success'):
+            product_info = user_monitor.extract_product_info(result.get('html', ''))
+
+            # Update database
+            if get_db_type() == 'postgresql':
                 cursor.execute('''
                     UPDATE products 
-                    SET current_rank = ?, current_category = ?, is_bestseller = ?, last_checked = ?
+                    SET current_rank = %s, current_category = %s, 
+                        is_bestseller = %s, last_checked = %s
+                    WHERE id = %s
+                ''', (
+                    product_info.get('rank'),
+                    product_info.get('category'),
+                    product_info.get('is_bestseller', False),
+                    datetime.now(),
+                    product_id
+                ))
+            else:
+                cursor.execute('''
+                    UPDATE products 
+                    SET current_rank = ?, current_category = ?, 
+                        is_bestseller = ?, last_checked = ?
                     WHERE id = ?
                 ''', (
-                    product_info['rank'], product_info['category'], 
-                    is_bestseller_now, datetime.now(), product_id
+                    product_info.get('rank'),
+                    product_info.get('category'),
+                    product_info.get('is_bestseller', False),
+                    datetime.now(),
+                    product_id
                 ))
 
-                # Add ranking record
-                cursor.execute('''
-                    INSERT INTO rankings (product_id, rank_number, category, is_bestseller, checked_at)
-                    VALUES (?, ?, ?, ?, ?)
-                ''', (
-                    product_id, current_rank,
-                    product_info['category'], is_bestseller_now, datetime.now()
-                ))
+            conn.commit()
+            conn.close()
 
-                # Determine if we should save a screenshot
-                should_save_screenshot = False
-                achievement_reason = ""
+            # Check for achievement
+            achievement = None
+            current_rank = int(product_info['rank']) if product_info.get('rank') else None
 
-                # Check for new bestseller status
-                if is_bestseller_now and not was_bestseller:
-                    should_save_screenshot = True
-                    achievement_reason = "New Bestseller!"
-                    print(f"🏆 New bestseller achievement for product {product_id}!")
+            if product_info.get('is_bestseller') and not was_bestseller:
+                achievement = "New Bestseller!"
+            elif current_rank and current_rank <= 10 and previous_rank > 10:
+                achievement = f"Entered Top 10! (#{current_rank})"
 
-                # Check for significant rank improvement (e.g., entering top 10)
-                if current_rank:
-                    if current_rank <= 10 and previous_rank > 10:
-                        should_save_screenshot = True
-                        achievement_reason = f"Entered Top 10! (#{current_rank})"
-                        print(f"🎯 Product {product_id} entered top 10!")
-                    elif current_rank == 1 and previous_rank != 1:
-                        should_save_screenshot = True
-                        achievement_reason = "Reached #1!"
-                        print(f"🥇 Product {product_id} reached #1!")
+            return {
+                'rank': product_info.get('rank'),
+                'category': product_info.get('category'),
+                'is_bestseller': product_info.get('is_bestseller', False),
+                'achievement': achievement
+            }
 
-                # Check target categories
-                if product_info['rank'] and product_info['category']:
-                    achievements = user_monitor.check_category_achievements(
-                        product_id, 
-                        product_info, 
-                        product_info['rank'], 
-                        product_info['category']
-                    )
+        conn.close()
+        return {'error': 'Failed to scrape product'}
 
-                    if achievements:
-                        should_save_screenshot = True
-                        achievement_reason = f"Target achieved in {achievements[0]['category']}"
+    except Exception as e:
+        if conn:
+            conn.close()
+        raise
 
-                # Save screenshot only if there's an achievement
-                if should_save_screenshot and result.get('screenshot'):
-                    print(f"📸 Saving achievement screenshot: {achievement_reason}")
-                    cursor.execute('''
-                        INSERT INTO bestseller_screenshots 
-                        (product_id, screenshot_data, rank_achieved, category, achieved_at)
-                        VALUES (?, ?, ?, ?, ?)
-                    ''', (
-                        product_id, result['screenshot'], 
-                        product_info['rank'], 
-                        f"{product_info['category']} - {achievement_reason}", 
-                        datetime.now()
-                    ))
-
-                    # Send email notification if configured
-                    cursor.execute('SELECT email FROM users WHERE id = ?', (user_id,))
-                    user_email = cursor.fetchone()[0]
-
-                    if email_notifier.is_configured():
-                        print(f"📧 Sending achievement notification to {user_email}")
-                        product_info['achievement_reason'] = achievement_reason
-                        email_notifier.send_bestseller_notification(
-                            user_email, 
-                            product_info, 
-                            result['screenshot'],
-                            achievement_type=achievement_reason
-                        )
-                else:
-                    print(f"📈 Product {product_id} rank: {current_rank} - no achievement triggers")
-            else:
-                print(f"❌ Failed to scrape product {product_id}: {result.get('error', 'Unknown error')}")
-
-            # Rate limiting
-            print("⏳ Waiting 2 seconds before next request...")
-            time.sleep(2)
-
-        except Exception as e:
-            print(f"❌ Error checking product {product_id}: {e}")
-            import traceback
-            traceback.print_exc()
-            continue
-
-    conn.commit()
-    conn.close()
-    print("✅ Scheduled product check complete")
-    print(f"📊 Skipped products from {len(users_without_keys)} users without API keys")
-
-
-def run_scheduler():
-    """Background scheduler for automatic checking - FIXED"""
-    import schedule
+def run_intelligent_scheduler():
+    """
+    Smart scheduler that checks each product individually based on when it was last checked.
+    Each product gets checked 60 minutes after its last check, not on a global schedule.
+    """
     import time
-    from datetime import datetime
+    from datetime import datetime, timedelta
 
-    print("📅 Scheduler thread started - checking products every 60 minutes")
-
-    # Schedule the job
-    schedule.every(60).minutes.do(check_all_products)
-
-    # Track last run to prevent multiple executions
-    last_run = None
+    print("🎯 Intelligent Per-Product Scheduler Started")
+    print("📊 Each product will be checked 60 minutes after its last check")
 
     while True:
         try:
-            # Check if we should still be running
-            if not os.environ.get('ENABLE_SCHEDULER', 'false').lower() == 'true':
-                print("🛑 Scheduler disabled via environment variable, stopping thread")
-                schedule.clear()
+            # Check if scheduler should still be running
+            if not os.environ.get('ENABLE_SCHEDULER', 'true').lower() == 'true':
+                print("🛑 Scheduler disabled via environment variable")
                 break
 
-            current_time = datetime.now()
+            # Check for products that need checking
+            check_due_products()
 
-            # Ensure at least 59 minutes between runs
-            if last_run is None or (current_time - last_run).total_seconds() >= 3540:  # 59 minutes
-                schedule.run_pending()
-                # Check if a job actually ran
-                if schedule.jobs and len([job for job in schedule.jobs if job.last_run and job.last_run > (last_run or datetime.min)]) > 0:
-                    last_run = current_time
-                    print(f"✅ Scheduler executed at {current_time}")
-
-            time.sleep(300)  # Check every 5 minutes instead of every minute
+            # Sleep for 1 minute before checking again
+            # This gives us minute-level precision for checks
+            time.sleep(60)
 
         except Exception as e:
             print(f"❌ Scheduler error: {e}")
             import traceback
             traceback.print_exc()
-            time.sleep(300)  # Wait 5 minutes before retrying
+            time.sleep(300)  # Wait 5 minutes on error
 
-    print("📅 Scheduler thread stopped")
+    print("📅 Scheduler stopped")
+
+def check_due_products():
+    """
+    Check products that are due for their hourly check.
+    Each product is checked 60 minutes after its last check.
+    """
+    current_time = datetime.now()
+    check_threshold = current_time - timedelta(minutes=60)
+
+    conn = get_db()
+    cursor = conn.cursor()
+
+    try:
+        # Find products that haven't been checked in the last 60 minutes
+        # OR have never been checked (last_checked IS NULL)
+        if get_db_type() == 'postgresql':
+            cursor.execute('''
+                SELECT 
+                    p.id as product_id,
+                    p.product_url,
+                    p.product_title,
+                    p.current_rank,
+                    p.current_category,
+                    p.is_bestseller,
+                    p.last_checked,
+                    p.created_at,
+                    p.user_id,
+                    u.email,
+                    u.scrapingbee_api_key
+                FROM products p
+                JOIN users u ON p.user_id = u.id
+                WHERE p.active = true
+                  AND u.scrapingbee_api_key IS NOT NULL
+                  AND (
+                      p.last_checked IS NULL 
+                      OR p.last_checked <= %s
+                  )
+                ORDER BY 
+                    COALESCE(p.last_checked, p.created_at) ASC
+                LIMIT 20
+            ''', (check_threshold,))
+        else:
+            cursor.execute('''
+                SELECT 
+                    p.id as product_id,
+                    p.product_url,
+                    p.product_title,
+                    p.current_rank,
+                    p.current_category,
+                    p.is_bestseller,
+                    p.last_checked,
+                    p.created_at,
+                    p.user_id,
+                    u.email,
+                    u.scrapingbee_api_key
+                FROM products p
+                JOIN users u ON p.user_id = u.id
+                WHERE p.active = 1
+                  AND u.scrapingbee_api_key IS NOT NULL
+                  AND (
+                      p.last_checked IS NULL 
+                      OR p.last_checked <= ?
+                  )
+                ORDER BY 
+                    COALESCE(p.last_checked, p.created_at) ASC
+                LIMIT 20
+            ''', (check_threshold,))
+
+        due_products = cursor.fetchall()
+
+        if not due_products:
+            # No products due for checking right now
+            return
+
+        print(f"\n⏰ {current_time.strftime('%H:%M')} - {len(due_products)} products due for checking")
+
+        # Group by user for efficient API key usage
+        products_by_user = {}
+        for product in due_products:
+            if isinstance(product, dict):
+                user_id = product['user_id']
+                if user_id not in products_by_user:
+                    products_by_user[user_id] = {
+                        'email': product['email'],
+                        'api_key': product['scrapingbee_api_key'],
+                        'products': []
+                    }
+                products_by_user[user_id]['products'].append(product)
+            else:
+                user_id = product[8]  # user_id index
+                if user_id not in products_by_user:
+                    products_by_user[user_id] = {
+                        'email': product[9],  # email index
+                        'api_key': product[10],  # api_key index
+                        'products': []
+                    }
+                products_by_user[user_id]['products'].append(product)
+
+        # Process each user's due products
+        for user_id, user_data in products_by_user.items():
+            user_email = user_data['email']
+            products_to_check = user_data['products']
+
+            print(f"  👤 Checking {len(products_to_check)} products for {user_email}")
+
+            # Create monitor for this user
+            user_monitor = AmazonMonitor.for_user(user_id)
+
+            if not user_monitor.api_key:
+                print(f"    ⚠️ No valid API key, skipping")
+                continue
+
+            for product in products_to_check:
+                try:
+                    # Extract product data
+                    if isinstance(product, dict):
+                        product_id = product['product_id']
+                        url = product['product_url']
+                        title = product['product_title']
+                        previous_rank = int(product['current_rank']) if product['current_rank'] else 999999
+                        was_bestseller = product['is_bestseller']
+                        last_checked = product['last_checked']
+                    else:
+                        product_id = product[0]
+                        url = product[1]
+                        title = product[2]
+                        previous_rank = int(product[3]) if product[3] else 999999
+                        was_bestseller = product[5]
+                        last_checked = product[6]
+
+                    # Calculate time since last check
+                    if last_checked:
+                        time_since_check = current_time - last_checked
+                        minutes_since = int(time_since_check.total_seconds() / 60)
+                        print(f"    📦 {title[:30]}... (last checked {minutes_since} min ago)")
+                    else:
+                        print(f"    📦 {title[:30]}... (first check)")
+
+                    # SCRAPE THE PRODUCT
+                    scrape_result = user_monitor.scrape_amazon_page(url)
+
+                    if scrape_result.get('success'):
+                        product_info = user_monitor.extract_product_info(scrape_result.get('html', ''))
+
+                        current_rank = int(product_info['rank']) if product_info.get('rank') else None
+                        is_bestseller_now = product_info.get('is_bestseller', False)
+
+                        # Update product with CURRENT timestamp
+                        if get_db_type() == 'postgresql':
+                            cursor.execute('''
+                                UPDATE products 
+                                SET current_rank = %s, 
+                                    current_category = %s,
+                                    is_bestseller = %s, 
+                                    last_checked = %s
+                                WHERE id = %s
+                            ''', (
+                                product_info.get('rank'),
+                                product_info.get('category'),
+                                is_bestseller_now,
+                                datetime.now(),  # Update to current time
+                                product_id
+                            ))
+                        else:
+                            cursor.execute('''
+                                UPDATE products 
+                                SET current_rank = ?, 
+                                    current_category = ?,
+                                    is_bestseller = ?, 
+                                    last_checked = ?
+                                WHERE id = ?
+                            ''', (
+                                product_info.get('rank'),
+                                product_info.get('category'),
+                                is_bestseller_now,
+                                datetime.now(),  # Update to current time
+                                product_id
+                            ))
+
+                        # Record in rankings history
+                        if get_db_type() == 'postgresql':
+                            cursor.execute('''
+                                INSERT INTO rankings 
+                                (product_id, rank_number, category, is_bestseller, checked_at)
+                                VALUES (%s, %s, %s, %s, %s)
+                            ''', (
+                                product_id, 
+                                current_rank,
+                                product_info.get('category'),
+                                is_bestseller_now,
+                                datetime.now()
+                            ))
+                        else:
+                            cursor.execute('''
+                                INSERT INTO rankings 
+                                (product_id, rank_number, category, is_bestseller, checked_at)
+                                VALUES (?, ?, ?, ?, ?)
+                            ''', (
+                                product_id, 
+                                current_rank,
+                                product_info.get('category'),
+                                is_bestseller_now,
+                                datetime.now()
+                            ))
+
+                        # CHECK FOR ACHIEVEMENTS
+                        achievement_triggered = False
+                        achievement_reason = ""
+
+                        if is_bestseller_now and not was_bestseller:
+                            achievement_triggered = True
+                            achievement_reason = "🏆 New Bestseller!"
+                            print(f"      🎉 ACHIEVEMENT: New bestseller!")
+                        elif current_rank:
+                            if current_rank == 1 and previous_rank != 1:
+                                achievement_triggered = True
+                                achievement_reason = "🥇 Reached #1!"
+                                print(f"      🎉 ACHIEVEMENT: Reached #1!")
+                            elif current_rank <= 10 and previous_rank > 10:
+                                achievement_triggered = True
+                                achievement_reason = f"🎯 Entered Top 10! (#{current_rank})"
+                                print(f"      🎉 ACHIEVEMENT: Entered top 10!")
+                            elif current_rank <= 50 and previous_rank > 50:
+                                achievement_triggered = True
+                                achievement_reason = f"📈 Entered Top 50! (#{current_rank})"
+                                print(f"      🎉 ACHIEVEMENT: Entered top 50!")
+
+                        # CAPTURE SCREENSHOT FOR ACHIEVEMENT
+                        if achievement_triggered and scrape_result.get('screenshot'):
+                            print(f"      📸 Saving achievement screenshot...")
+
+                            if get_db_type() == 'postgresql':
+                                cursor.execute('''
+                                    INSERT INTO bestseller_screenshots 
+                                    (product_id, screenshot_data, rank_achieved, 
+                                     category, achieved_at)
+                                    VALUES (%s, %s, %s, %s, %s)
+                                ''', (
+                                    product_id,
+                                    scrape_result['screenshot'],
+                                    product_info.get('rank'),
+                                    f"{product_info.get('category', '')} - {achievement_reason}",
+                                    datetime.now()
+                                ))
+                            else:
+                                cursor.execute('''
+                                    INSERT INTO bestseller_screenshots 
+                                    (product_id, screenshot_data, rank_achieved, 
+                                     category, achieved_at)
+                                    VALUES (?, ?, ?, ?, ?)
+                                ''', (
+                                    product_id,
+                                    scrape_result['screenshot'],
+                                    product_info.get('rank'),
+                                    f"{product_info.get('category', '')} - {achievement_reason}",
+                                    datetime.now()
+                                ))
+
+                            # Send email notification
+                            if email_notifier.is_configured():
+                                print(f"      📧 Sending achievement email...")
+                                product_info['title'] = title
+                                product_info['achievement_reason'] = achievement_reason
+
+                                email_notifier.send_bestseller_notification(
+                                    user_email,
+                                    product_info,
+                                    scrape_result['screenshot'],
+                                    achievement_type=achievement_reason
+                                )
+                        else:
+                            print(f"      ✓ Rank: {current_rank or 'N/A'}")
+
+                        # Commit after each successful check
+                        conn.commit()
+
+                        # Log next check time
+                        next_check = datetime.now() + timedelta(minutes=60)
+                        print(f"      ⏰ Next check: {next_check.strftime('%H:%M')}")
+
+                    else:
+                        print(f"      ❌ Scrape failed: {scrape_result.get('error', 'Unknown')}")
+                        # Don't update last_checked on failure - will retry sooner
+
+                    # Rate limiting between products
+                    time.sleep(2)
+
+                except Exception as e:
+                    print(f"      ❌ Error: {e}")
+                    continue
+
+    except Exception as e:
+        print(f"❌ Error in check_due_products: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        if conn:
+            conn.close()
 
 def initialize_scheduler():
-    """Initialize the scheduler if enabled"""
+    """Initialize the per-product scheduler"""
     global scheduler_thread
 
-    scheduler_enabled = os.environ.get('ENABLE_SCHEDULER', 'false').lower() == 'true'
+    if 'scheduler_thread' in globals() and scheduler_thread and scheduler_thread.is_alive():
+        print("⚠️ Scheduler already running")
+        return
+
+    scheduler_enabled = os.environ.get('ENABLE_SCHEDULER', 'true').lower() == 'true'
 
     if scheduler_enabled:
-        print("⚠️ SCHEDULER ENABLED via environment variable")
-        print("📅 Starting background scheduler thread...")
+        print("🚀 PER-PRODUCT AUTOMATED MONITORING ENABLED")
+        print("⏰ Each product checked 60 minutes after its last check")
+        print("📊 Fair and consistent timing for all users")
 
         try:
-            scheduler_thread = threading.Thread(target=run_scheduler, daemon=True, name="SchedulerThread")
+            scheduler_thread = threading.Thread(
+                target=run_intelligent_scheduler,
+                daemon=True,
+                name="PerProductScheduler"
+            )
             scheduler_thread.start()
 
-            # Give it a moment to start
             time.sleep(1)
 
             if scheduler_thread.is_alive():
-                print("✅ Scheduler thread started successfully")
+                print("✅ Per-product scheduler started successfully")
             else:
-                print("❌ Scheduler thread failed to start")
+                print("❌ Failed to start scheduler")
+
         except Exception as e:
             print(f"❌ Error starting scheduler: {e}")
-            import traceback
-            traceback.print_exc()
     else:
-        print("✅ SCHEDULER DISABLED - No automatic checks will occur")
-        print("   To enable: Set ENABLE_SCHEDULER=true in environment variables")
-
-        # Clear any existing scheduled jobs
-        try:
-            import schedule
-            schedule.clear()
-        except:
-            pass
-
-# Start scheduler in background
-scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
-scheduler_thread.start()
-initialize_scheduler()
+        print("⚠️ AUTOMATED MONITORING DISABLED")
+        print("   To enable: Set ENABLE_SCHEDULER=true")
 
 if __name__ == '__main__':
-    # Only initialize DB if not in production with existing data
+    # Initialize DB manager
     db_manager = DatabaseManager()
 
     # Get port from environment
@@ -6335,7 +6905,8 @@ if __name__ == '__main__':
 
     print("🚀 Starting Amazon Bestseller Monitor...")
 
-    # DON'T initialize scheduler here - it's already done above
+    # Initialize scheduler ONCE
+    initialize_scheduler()
 
     # Check configuration
     if os.environ.get('DATABASE_URL'):

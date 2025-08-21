@@ -503,6 +503,15 @@
                 max-width: 100%;
                 box-sizing: border-box;
             }
+
+            .next-check-widget {
+                margin: 10px;
+                padding: 15px !important;
+            }
+
+            #next-check-list {
+                max-height: 200px !important;
+            }
         }
 
         /* Very small mobile screens */
@@ -630,9 +639,9 @@
                     📦 Add New Product
                 </a>
 
-                <a href="#" onclick="checkAllProducts()" class="btn btn-secondary">
-                    🔄 Check All Now
-                </a>
+                <span class="btn btn-secondary" style="cursor: default;">
+                    🤖 Auto-Monitoring Active
+                </span>
 
                 <a href="{{ url_for('settings') }}" class="btn btn-info">
                     ⚙️ Settings
@@ -658,6 +667,14 @@
             <a href="{{ url_for('settings') }}">Configure API Key</a>
         </div>
         {% endif %}
+
+        DASHBOARD_TIMER_WIDGET = """
+        <div class="next-check-widget" style="background: white; padding: 20px; border-radius: 10px; margin-bottom: 20px;">
+            <h3>⏰ Next Check Times</h3>
+            <div id="next-check-list" style="margin-top: 15px;">
+                <p style="color: #666;">Loading check times...</p>
+            </div>
+        </div>
 
         <h2>📦 Your Products</h2>
         {% if products %}
@@ -1116,36 +1133,6 @@
                 });
         }
 
-        // Improved mobile button handling
-        function checkAllProducts() {
-            const btn = event.target;
-            btn.innerHTML = '⏳ Checking...';
-            btn.disabled = true;
-
-            fetch('/check_products')
-                .then(response => response.json())
-                .then(data => {
-                    if (data.status) {
-                        btn.innerHTML = '✅ Complete!';
-                        setTimeout(() => {
-                            btn.innerHTML = '🔄 Check All Now';
-                            btn.disabled = false;
-                            location.reload();
-                        }, 2000);
-                    } else {
-                        throw new Error(data.error || 'Unknown error');
-                    }
-                })
-                .catch(error => {
-                    btn.innerHTML = '❌ Failed';
-                    console.error('Error:', error);
-                    setTimeout(() => {
-                        btn.innerHTML = '🔄 Check All Now';
-                        btn.disabled = false;
-                    }, 3000);
-                });
-        }
-
         // Mobile-friendly touch handling
         document.addEventListener('DOMContentLoaded', function() {
             // Add touch-friendly class to buttons on mobile
@@ -1165,6 +1152,67 @@
                 });
             }
         });
+
+        function loadNextCheckTimes() {
+            fetch('/api/next_check_times')
+                .then(response => response.json())
+                .then(products => {
+                    const container = document.getElementById('next-check-list');
+
+                    if (products.length === 0) {
+                        container.innerHTML = '<p style="color: #666;">No products added yet</p>';
+                        return;
+                    }
+
+                    const html = products.map(product => {
+                        let statusBadge = '';
+                        let timeText = '';
+
+                        if (product.status === 'paused') {
+                            statusBadge = '<span style="color: #dc3545;">⏸️ Paused</span>';
+                            timeText = 'Not scheduled';
+                        } else if (product.status === 'due') {
+                            statusBadge = '<span style="color: #ff9900;">⏳ Checking soon...</span>';
+                            timeText = 'Due now';
+                        } else if (product.minutes_until_check !== null) {
+                            const hours = Math.floor(product.minutes_until_check / 60);
+                            const minutes = product.minutes_until_check % 60;
+
+                            if (hours > 0) {
+                                timeText = `in ${hours}h ${minutes}m`;
+                            } else {
+                                timeText = `in ${minutes} minutes`;
+                            }
+
+                            statusBadge = '<span style="color: #28a745;">✅ Active</span>';
+                        } else {
+                            statusBadge = '<span style="color: #6c757d;">🆕 New</span>';
+                            timeText = 'First check pending';
+                        }
+
+                        return `
+                            <div style="padding: 10px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center;">
+                                <div>
+                                    <strong>${product.title.substring(0, 40)}...</strong><br>
+                                    <small style="color: #666;">Next check: ${timeText}</small>
+                                </div>
+                                <div>${statusBadge}</div>
+                            </div>
+                        `;
+                    }).join('');
+
+                    container.innerHTML = html;
+                })
+                .catch(error => {
+                    console.error('Error loading check times:', error);
+                });
+        }
+
+        // Load on page load
+        document.addEventListener('DOMContentLoaded', loadNextCheckTimes);
+
+        // Refresh every minute
+        setInterval(loadNextCheckTimes, 60000);
     </script>
 </body>
 </html>
