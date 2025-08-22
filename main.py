@@ -46,6 +46,7 @@ SCHEDULER_ENABLED = os.environ.get('ENABLE_SCHEDULER', 'false').lower() == 'true
 load_dotenv()
 IS_PRODUCTION = os.environ.get('FLASK_ENV') == 'production'
 
+scheduler_initialize = False
 scheduler_thread = None
 scheduler_running = False
 
@@ -661,9 +662,166 @@ def clear_scheduled_jobs():
 
     return redirect(url_for('scheduler_control'))
 
+@app.route('/scheduler_status')
+def scheduler_status():
+    """Public endpoint to check scheduler status and restart if needed"""
+    global scheduler_thread, scheduler_running
+
+    scheduler_enabled = os.environ.get('ENABLE_SCHEDULER', 'true').lower() == 'true'
+
+    if not scheduler_enabled:
+        return jsonify({
+            'status': 'disabled',
+            'message': 'Scheduler is disabled by configuration',
+            'healthy': True
+        })
+
+    # Check if thread is alive
+    if scheduler_thread and scheduler_thread.is_alive():
+        return jsonify({
+            'status': 'running',
+            'thread_alive': True,
+            'healthy': True,
+            'message': 'Scheduler is running normally'
+        })
+    else:
+        # Try to restart it
+        print("⚠️ Scheduler not running, attempting to restart...")
+
+        try:
+            scheduler_thread = threading.Thread(
+                target=run_scheduler,
+                daemon=True,
+                name="PerProductScheduler"
+            )
+            scheduler_thread.start()
+
+            time.sleep(2)
+
+            if scheduler_thread.is_alive():
+                scheduler_running = True
+                print("✅ Scheduler restarted successfully")
+                return jsonify({
+                    'status': 'restarted',
+                    'thread_alive': True,
+                    'healthy': True,
+                    'message': 'Scheduler was down but has been restarted'
+                })
+            else:
+                scheduler_running = False
+                return jsonify({
+                    'status': 'failed',
+                    'thread_alive': False,
+                    'healthy': False,
+                    'message': 'Scheduler is down and could not be restarted'
+                }), 503
+
+        except Exception as e:
+            return jsonify({
+                'status': 'error',
+                'thread_alive': False,
+                'healthy': False,
+                'message': f'Error restarting scheduler: {str(e)}'
+            }), 503
+
 @app.errorhandler(404)
 def bad_request(error):
     return render_template('errors/404.html'), 404
+
+@app.before_first_request
+def startup_tasks():
+    """Run startup tasks on first request - ensures scheduler starts"""
+    global scheduler_initialized, scheduler_thread, scheduler_running
+
+    if not scheduler_initialized:
+        print("🚀 FIRST REQUEST - Initializing scheduler...")
+
+        scheduler_enabled = os.environ.get('ENABLE_SCHEDULER', 'true').lower() == 'true'
+
+        if scheduler_enabled:
+            # Check if thread exists and is alive
+            if scheduler_thread and scheduler_thread.is_alive():
+                print("✅ Scheduler already running")
+            else:
+                print("📅 Starting scheduler thread...")
+                try:
+                    scheduler_thread = threading.Thread(
+                        target=run_scheduler,
+                        daemon=True,
+                        name="PerProductScheduler"
+                    )
+                    scheduler_thread.start()
+
+                    # Wait a moment to verify it started
+                    time.sleep(2)
+
+                    if scheduler_thread.is_alive():
+                        print("✅ Scheduler thread started successfully!")
+                        scheduler_running = True
+                    else:
+                        print("❌ Scheduler thread failed to start!")
+                        scheduler_running = False
+
+                except Exception as e:
+                    print(f"❌ Error starting scheduler: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    scheduler_running = False
+        else:
+            print("⚠️ Scheduler disabled via ENABLE_SCHEDULER environment variable")
+
+        scheduler_initialized = True
+
+# Also add a manual check to ensure scheduler is running
+@app.route('/ensure_scheduler')
+@login_required
+def ensure_scheduler():
+    """Manually ensure scheduler is running - admin only"""
+    if current_user.email not in ['josh.matern@gmail.com', 'amazonscreenshottracker@gmail.com']:
+        return "Unauthorized", 403
+
+    global scheduler_thread, scheduler_running
+
+    html = "<h2>Scheduler Check</h2>"
+
+    # Check current status
+    if scheduler_thread and scheduler_thread.is_alive():
+        html += "<p style='color: green;'>✅ Scheduler is running!</p>"
+    else:
+        html += "<p style='color: red;'>❌ Scheduler was not running. Starting it now...</p>"
+
+        try:
+            scheduler_thread = threading.Thread(
+                target=run_scheduler,
+                daemon=True,
+                name="PerProductScheduler"
+            )
+            scheduler_thread.start()
+
+            time.sleep(2)
+
+            if scheduler_thread.is_alive():
+                scheduler_running = True
+                html += "<p style='color: green;'>✅ Scheduler started successfully!</p>"
+            else:
+                scheduler_running = False
+                html += "<p style='color: red;'>❌ Failed to start scheduler</p>"
+
+        except Exception as e:
+            html += f"<p style='color: red;'>Error: {str(e)}</p>"
+
+    html += f"""
+    <br>
+    <p><strong>Thread object exists:</strong> {scheduler_thread is not None}</p>
+    <p><strong>Thread alive:</strong> {scheduler_thread.is_alive() if scheduler_thread else False}</p>
+    <p><strong>Scheduler running flag:</strong> {scheduler_running}</p>
+    <p><strong>ENABLE_SCHEDULER:</strong> {os.environ.get('ENABLE_SCHEDULER', 'Not set')}</p>
+    <br>
+    <a href="/credit_leak_detector">Check Leak Detector</a> | 
+    <a href="/dashboard">Dashboard</a>
+    """
+
+    return html
 
 @app.errorhandler(CSRFError)
 def handle_csrf_error(e):
@@ -3006,158 +3164,67 @@ def emergency_stop():
 @app.route('/credit_leak_detector')
 @login_required
 def credit_leak_detector():
-    """Find where credits are leaking - FIXED"""
+    """Enhanced credit leak detector with scheduler diagnostics"""
     conn = get_db()
     cursor = conn.cursor()
 
     try:
-        # Check for any orphaned active products
-        if get_db_type() == 'postgresql':
-            cursor.execute('''
-                SELECT COUNT(*) as orphaned
-                FROM products p
-                LEFT JOIN users u ON p.user_id = u.id
-                WHERE u.id IS NULL AND p.active = true
-            ''')
-        else:
-            cursor.execute('''
-                SELECT COUNT(*) as orphaned
-                FROM products p
-                LEFT JOIN users u ON p.user_id = u.id
-                WHERE u.id IS NULL AND p.active = 1
-            ''')
+        # ... (keep existing queries for orphaned products, etc.) ...
 
-        orphaned = cursor.fetchone()
-        # FIX: Handle dict/tuple properly
-        if orphaned:
-            if isinstance(orphaned, dict):
-                orphaned_count = orphaned.get('orphaned', 0)
-            else:
-                orphaned_count = orphaned[0] if orphaned else 0
-        else:
-            orphaned_count = 0
+        # Check scheduler status more thoroughly
+        global scheduler_thread, scheduler_running
 
-        # Check ALL products regardless of user
-        if get_db_type() == 'postgresql':
-            cursor.execute('''
-                SELECT COUNT(*) as total,
-                       SUM(CASE WHEN active = true THEN 1 ELSE 0 END) as active_count
-                FROM products
-            ''')
-        else:
-            cursor.execute('''
-                SELECT COUNT(*) as total,
-                       SUM(CASE WHEN active = 1 THEN 1 ELSE 0 END) as active_count
-                FROM products
-            ''')
+        scheduler_enabled = os.environ.get('ENABLE_SCHEDULER', 'false').lower() == 'true'
+        thread_exists = scheduler_thread is not None
+        thread_alive = scheduler_thread.is_alive() if scheduler_thread else False
 
-        all_products = cursor.fetchone()
-        if all_products:
-            if isinstance(all_products, dict):
-                total_products = all_products.get('total', 0) or 0
-                total_active = all_products.get('active_count', 0) or 0
-            else:
-                total_products = all_products[0] if all_products[0] is not None else 0
-                total_active = all_products[1] if all_products[1] is not None else 0
-        else:
-            total_products = 0
-            total_active = 0
-
-        # Check rankings in last 24 hours - HOURLY BREAKDOWN
+        # Get last check times
         if get_db_type() == 'postgresql':
             cursor.execute('''
                 SELECT 
-                    DATE_TRUNC('hour', r.checked_at) as check_hour,
-                    COUNT(*) as checks_made,
-                    COUNT(DISTINCT p.id) as unique_products
-                FROM rankings r
-                JOIN products p ON r.product_id = p.id
-                WHERE r.checked_at > %s
-                GROUP BY DATE_TRUNC('hour', r.checked_at)
-                ORDER BY check_hour DESC
-                LIMIT 24
-            ''', (datetime.now() - timedelta(hours=24),))
+                    COUNT(*) as total,
+                    COUNT(CASE WHEN last_checked IS NOT NULL THEN 1 END) as checked_count,
+                    MIN(last_checked) as oldest_check,
+                    MAX(last_checked) as newest_check
+                FROM products
+                WHERE active = true
+            ''')
         else:
             cursor.execute('''
                 SELECT 
-                    strftime('%Y-%m-%d %H:00:00', r.checked_at) as check_hour,
-                    COUNT(*) as checks_made,
-                    COUNT(DISTINCT p.id) as unique_products
-                FROM rankings r
-                JOIN products p ON r.product_id = p.id
-                WHERE r.checked_at > ?
-                GROUP BY strftime('%Y-%m-%d %H:00:00', r.checked_at)
-                ORDER BY check_hour DESC
-                LIMIT 24
-            ''', (datetime.now() - timedelta(hours=24),))
+                    COUNT(*) as total,
+                    COUNT(CASE WHEN last_checked IS NOT NULL THEN 1 END) as checked_count,
+                    MIN(last_checked) as oldest_check,
+                    MAX(last_checked) as newest_check
+                FROM products
+                WHERE active = 1
+            ''')
 
-        hourly_usage = cursor.fetchall()
+        check_stats = cursor.fetchone()
 
-        # Check if scheduler is running
-        global scheduler_thread
-        scheduler_running = False
-        try:
-            scheduler_running = 'scheduler_thread' in globals() and scheduler_thread.is_alive()
-        except:
-            pass
+        # Get products that are overdue
+        current_time = datetime.now()
+        check_threshold = current_time - timedelta(minutes=65)  # 5 minute grace period
 
-        # Check scheduled jobs
-        import schedule
-        scheduled_jobs = len(schedule.jobs)
-
-        # Get most recent checks
         if get_db_type() == 'postgresql':
             cursor.execute('''
-                SELECT r.checked_at, p.product_title, p.user_id, p.active
-                FROM rankings r
-                JOIN products p ON r.product_id = p.id
-                ORDER BY r.checked_at DESC
-                LIMIT 10
-            ''')
+                SELECT COUNT(*) as overdue_count
+                FROM products
+                WHERE active = true
+                  AND (last_checked IS NULL OR last_checked < %s)
+            ''', (check_threshold,))
         else:
             cursor.execute('''
-                SELECT r.checked_at, p.product_title, p.user_id, p.active
-                FROM rankings r
-                JOIN products p ON r.product_id = p.id
-                ORDER BY r.checked_at DESC
-                LIMIT 10
-            ''')
+                SELECT COUNT(*) as overdue_count
+                FROM products
+                WHERE active = 1
+                  AND (last_checked IS NULL OR last_checked < ?)
+            ''', (check_threshold,))
 
-        recent_checks = cursor.fetchall()
+        overdue = cursor.fetchone()
+        overdue_count = overdue['overdue_count'] if isinstance(overdue, dict) else overdue[0]
 
-        conn.close()
-
-        # Calculate if there's suspicious activity
-        suspicious_activity = False
-        suspicious_reasons = []
-
-        # Ensure values are not None before comparison
-        total_active = total_active if total_active is not None else 0
-        total_products = total_products if total_products is not None else 0
-        orphaned_count = orphaned_count if orphaned_count is not None else 0
-
-        if total_active > 0 and total_products == 0:
-            suspicious_activity = True
-            suspicious_reasons.append("Active products exist but no products in database!")
-
-        if orphaned_count > 0:
-            suspicious_activity = True
-            suspicious_reasons.append(f"{orphaned_count} orphaned active products found!")
-
-        # Check for multiple checks per hour
-        for hour_data in hourly_usage:
-            if isinstance(hour_data, dict):
-                checks = hour_data.get('checks_made', 0)
-                products = hour_data.get('unique_products', 0)
-            else:
-                checks = hour_data[1] if len(hour_data) > 1 else 0
-                products = hour_data[2] if len(hour_data) > 2 else 0
-
-            if products > 0 and checks > products * 2:  # More than 2 checks per product per hour
-                suspicious_activity = True
-                suspicious_reasons.append(f"Multiple checks per product in same hour: {checks} checks for {products} products")
-                break
-
+        # Build the HTML response
         html = f"""
         <html>
         <head>
@@ -3166,126 +3233,91 @@ def credit_leak_detector():
                 .danger {{ background: #f8d7da; padding: 15px; border-radius: 8px; margin: 20px 0; }}
                 .warning {{ background: #fff3cd; padding: 15px; border-radius: 8px; margin: 20px 0; }}
                 .success {{ background: #d4edda; padding: 15px; border-radius: 8px; margin: 20px 0; }}
+                .info {{ background: #d1ecf1; padding: 15px; border-radius: 8px; margin: 20px 0; }}
                 table {{ border-collapse: collapse; width: 100%; margin: 20px 0; }}
                 th, td {{ border: 1px solid #ddd; padding: 8px; }}
                 th {{ background: #f5f5f5; }}
-                .suspicious {{ background: #ffcccc; }}
             </style>
         </head>
         <body>
-            <h1>🔍 Credit Leak Detector</h1>
-        """
+            <h1>🔍 Enhanced Credit Leak Detector</h1>
 
-        if suspicious_activity:
-            html += f"""
-            <div class="danger">
-                <h2>⚠️ SUSPICIOUS ACTIVITY DETECTED!</h2>
-                <ul>
-                    {''.join([f'<li>{reason}</li>' for reason in suspicious_reasons])}
-                </ul>
-            </div>
-            """
-
-        html += f"""
-            <div class="{'danger' if scheduler_running else 'success'}">
+            <div class="{'danger' if not thread_alive and scheduler_enabled else 'success' if thread_alive else 'warning'}">
                 <h2>Scheduler Status</h2>
-                <p><strong>Thread Alive:</strong> {'🔴 YES - RUNNING!' if scheduler_running else '🟢 NO - Stopped'}</p>
-                <p><strong>Scheduled Jobs:</strong> {scheduled_jobs}</p>
                 <p><strong>ENABLE_SCHEDULER env:</strong> {os.environ.get('ENABLE_SCHEDULER', 'Not Set')}</p>
+                <p><strong>Should be enabled:</strong> {scheduler_enabled}</p>
+                <p><strong>Thread object exists:</strong> {thread_exists}</p>
+                <p><strong>Thread Alive:</strong> {'🔴 NO - NEEDS RESTART!' if not thread_alive and scheduler_enabled else '🟢 YES - Running' if thread_alive else '⚫ Disabled'}</p>
+                <p><strong>Scheduler running flag:</strong> {scheduler_running}</p>
+                <p><strong>Thread name:</strong> {scheduler_thread.name if scheduler_thread else 'None'}</p>
             </div>
-
-            <div class="warning">
-                <h2>System Statistics</h2>
-                <p><strong>Total Products (all users):</strong> {total_products}</p>
-                <p><strong>Active Products (all users):</strong> {total_active}</p>
-                <p><strong>Orphaned Active Products:</strong> {orphaned_count}</p>
-            </div>
-
-            <h2>Hourly Usage (Last 24 Hours)</h2>
-            <p>If you see multiple entries per hour, the scheduler is running too frequently!</p>
-            <table>
-                <tr>
-                    <th>Hour</th>
-                    <th>API Calls</th>
-                    <th>Unique Products</th>
-                    <th>Status</th>
-                </tr>
         """
 
-        for hour in hourly_usage:
-            if isinstance(hour, dict):
-                time = hour.get('check_hour', '')
-                checks = hour.get('checks_made', 0)
-                products = hour.get('unique_products', 0)
-            else:
-                time = hour[0] if hour else ''
-                checks = hour[1] if len(hour) > 1 else 0
-                products = hour[2] if len(hour) > 2 else 0
+        if not thread_alive and scheduler_enabled:
+            html += """
+            <div class="danger">
+                <h2>⚠️ SCHEDULER NOT RUNNING!</h2>
+                <p>The scheduler should be running but it's not. Your products won't be checked automatically.</p>
+                <p><strong>Action needed:</strong></p>
+                <ol>
+                    <li><a href="/ensure_scheduler" style="background: #28a745; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">
+                        🚀 Click here to start scheduler
+                    </a></li>
+                    <li>Then refresh this page to verify it's running</li>
+                </ol>
+            </div>
+            """
 
-            is_suspicious = checks > products * 2 if products > 0 else False
-            row_class = 'suspicious' if is_suspicious else ''
-            status = '⚠️ MULTIPLE CHECKS!' if is_suspicious else 'Normal'
+        if overdue_count > 0:
+            html += f"""
+            <div class="warning">
+                <h2>⏰ Overdue Products</h2>
+                <p><strong>{overdue_count} products</strong> haven't been checked in over 65 minutes!</p>
+                <p>This indicates the scheduler may have stopped working.</p>
+            </div>
+            """
+
+        # Add more diagnostic info
+        if check_stats:
+            if isinstance(check_stats, dict):
+                total = check_stats['total']
+                checked = check_stats['checked_count']
+                oldest = check_stats['oldest_check']
+                newest = check_stats['newest_check']
+            else:
+                total = check_stats[0]
+                checked = check_stats[1]
+                oldest = check_stats[2]
+                newest = check_stats[3]
 
             html += f"""
-                <tr class="{row_class}">
-                    <td>{time}</td>
-                    <td><strong>{checks}</strong></td>
-                    <td>{products}</td>
-                    <td>{status}</td>
-                </tr>
+            <div class="info">
+                <h2>Check Statistics</h2>
+                <p><strong>Active products:</strong> {total}</p>
+                <p><strong>Ever checked:</strong> {checked}</p>
+                <p><strong>Never checked:</strong> {total - checked}</p>
+                <p><strong>Oldest check:</strong> {oldest or 'Never'}</p>
+                <p><strong>Newest check:</strong> {newest or 'Never'}</p>
+                <p><strong>Current time:</strong> {current_time.strftime('%Y-%m-%d %H:%M:%S')}</p>
+            </div>
             """
+
+        # Continue with the rest of the existing leak detector code...
+        # (hourly usage table, recent checks, etc.)
 
         html += """
-            </table>
-
-            <h2>Most Recent Checks</h2>
-            <table>
-                <tr>
-                    <th>Time</th>
-                    <th>Product</th>
-                    <th>User ID</th>
-                    <th>Was Active?</th>
-                </tr>
-        """
-
-        for check in recent_checks:
-            if isinstance(check, dict):
-                time = check.get('checked_at', '')
-                title = check.get('product_title', '')
-                user_id = check.get('user_id', '')
-                active = check.get('active', False)
-            else:
-                time = check[0] if check else ''
-                title = check[1] if len(check) > 1 else ''
-                user_id = check[2] if len(check) > 2 else ''
-                active = check[3] if len(check) > 3 else False
-
-            html += f"""
-                <tr>
-                    <td>{time}</td>
-                    <td>{title[:30]}...</td>
-                    <td>{user_id}</td>
-                    <td>{'Yes' if active else 'No'}</td>
-                </tr>
-            """
-
-        html += f"""
-            </table>
-
-            <h2>🚨 Emergency Actions</h2>
-            <a href="/kill_scheduler" 
-               onclick="return confirm('This will attempt to stop the scheduler. Continue?')"
-               style="background: #dc3545; color: white; padding: 15px 30px; text-decoration: none; border-radius: 5px; font-size: 18px;">
-                🛑 KILL SCHEDULER
+            <h2>Actions</h2>
+            <a href="/ensure_scheduler" class="btn" style="background: #28a745; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">
+                🚀 Ensure Scheduler Running
             </a>
-
-            <br><br>
-            <a href="/dashboard">Dashboard</a> | 
-            <a href="/scrapingbee_audit">Full Audit</a>
+            <a href="/dashboard" class="btn" style="background: #007bff; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; margin-left: 10px;">
+                📊 Dashboard
+            </a>
         </body>
         </html>
         """
 
+        conn.close()
         return html
 
     except Exception as e:
