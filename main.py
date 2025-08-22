@@ -2287,8 +2287,11 @@ def scheduler_status():
             'healthy': True
         })
 
-    # Check if thread is alive
-    if scheduler_thread and scheduler_thread.is_alive():
+    # Check if thread exists and is alive
+    thread_exists = scheduler_thread is not None
+    thread_alive = scheduler_thread.is_alive() if scheduler_thread else False
+
+    if thread_alive:
         return jsonify({
             'status': 'running',
             'thread_alive': True,
@@ -6053,6 +6056,39 @@ def test_encryption():
         </html>
         """, 500
 
+@app.route('/force_start_scheduler')
+@login_required
+def force_start_scheduler():
+    """Force start the scheduler"""
+    if current_user.email not in ['amazonscreenshottracker@gmail.com', 'josh.matern@gmail.com']:
+        return "Unauthorized", 403
+
+    global scheduler_thread, scheduler_running, scheduler_initialized
+
+    # Reset state
+    scheduler_initialized = False
+    scheduler_running = False
+
+    # Try to start
+    success = ensure_scheduler_running()
+
+    if success:
+        return """
+        <h2>✅ Scheduler Started!</h2>
+        <p>The scheduler should now be running.</p>
+        <ul>
+            <li><a href="/credit_leak_detector">Check Status</a></li>
+            <li><a href="/scheduler_status">Scheduler Status JSON</a></li>
+            <li><a href="/dashboard">Dashboard</a></li>
+        </ul>
+        """
+    else:
+        return """
+        <h2>❌ Failed to Start Scheduler</h2>
+        <p>Check the logs for errors.</p>
+        <a href="/dashboard">Dashboard</a>
+        """
+
 @app.route('/screenshot/<int:screenshot_id>')
 def view_screenshot(screenshot_id):
     conn = sqlite3.connect('amazon_monitor.db')
@@ -6966,13 +7002,22 @@ def create_app():
     """Application factory pattern for better WSGI compatibility"""
     return app
 
+# ============= AUTOMATIC SCHEDULER START =============
+def start_scheduler_with_delay():
+    """Start scheduler after a delay to ensure app is ready"""
+    time.sleep(5)  # Wait for app to fully initialize
+
+    if os.environ.get('ENABLE_SCHEDULER', 'false').lower() == 'true':
+        print("📅 Auto-starting scheduler after delay...")
+        ensure_scheduler_running()
+
 # ============= MAIN EXECUTION =============
 print("🚀 Starting Amazon Bestseller Monitor...")
-print(f"Python version: {sys.version}")
 
-# Start scheduler in background (non-blocking)
+# Start scheduler in background thread after delay
 if os.environ.get('ENABLE_SCHEDULER', 'false').lower() == 'true':
-    threading.Thread(target=init_scheduler_background, daemon=True).start()
+    print("📅 Scheduler will start in 5 seconds...")
+    threading.Thread(target=start_scheduler_with_delay, daemon=True).start()
 
 # For development
 if __name__ == '__main__':
