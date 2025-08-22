@@ -81,6 +81,7 @@ limiter.init_app(app)
 auth = Blueprint('auth', __name__)
 
 # ============= GLOBAL VARIABLES =============
+SCHEDULER_ENABLED = os.environ.get('ENABLE_SCHEDULER', 'false').lower() == 'true'
 scheduler_initialize = False
 scheduler_thread = None
 scheduler_running = False
@@ -177,9 +178,15 @@ def ensure_scheduler_running():
     """Ensure scheduler is running - thread-safe"""
     global scheduler_initialized, scheduler_thread, scheduler_running, scheduler_lock
 
-    # Initialize lock if it doesn't exist
+    # Safety check - initialize if not exists
+    if 'scheduler_initialized' not in globals():
+        globals()['scheduler_initialized'] = False
+    if 'scheduler_thread' not in globals():
+        globals()['scheduler_thread'] = None
+    if 'scheduler_running' not in globals():
+        globals()['scheduler_running'] = False
     if 'scheduler_lock' not in globals():
-        scheduler_lock = threading.Lock()
+        globals()['scheduler_lock'] = threading.Lock()
 
     with scheduler_lock:
         if scheduler_initialized and scheduler_thread and scheduler_thread.is_alive():
@@ -6999,6 +7006,16 @@ def init_scheduler_if_needed():
     else:
         print("⚠️ Scheduler disabled via ENABLE_SCHEDULER")
 
+# ============= ENSURE GLOBALS EXIST =============
+# Initialize scheduler globals if they don't exist
+if 'scheduler_initialized' not in globals():
+    scheduler_initialized = False
+if 'scheduler_thread' not in globals():
+    scheduler_thread = None
+if 'scheduler_running' not in globals():
+    scheduler_running = False
+if 'scheduler_lock' not in globals():
+    scheduler_lock = threading.Lock()
 
 
 # ============= APPLICATION FACTORY =============
@@ -7009,11 +7026,7 @@ def create_app():
 # ============= AUTOMATIC SCHEDULER START =============
 def start_scheduler_with_delay():
     """Start scheduler after a delay to ensure app is ready"""
-    global scheduler_lock
-
-    # Ensure lock exists
-    if 'scheduler_lock' not in globals():
-        scheduler_lock = threading.Lock()
+    global scheduler_initialized, scheduler_thread, scheduler_running, scheduler_lock
 
     time.sleep(5)  # Wait for app to fully initialize
 
