@@ -491,19 +491,6 @@ def check_due_products():
         return -1
 
 # ============= REQUEST HANDLERS =============
-@app.before_request
-def check_scheduler_status():
-    """Lightweight check to ensure scheduler is running"""
-    global scheduler_initialized, scheduler_thread
-
-    # Only check occasionally, not every request
-    if not scheduler_initialized or (scheduler_thread and not scheduler_thread.is_alive()):
-        # Only try to start for authenticated users to avoid startup delays
-        if request.endpoint and 'static' not in request.endpoint:
-            # Check every 10th request randomly to reduce overhead
-            import random
-            if random.randint(1, 10) == 1:
-                ensure_scheduler_running()
 
 # ============= HEALTH CHECK ENDPOINT =============
 @app.route('/health')
@@ -2316,51 +2303,6 @@ def scheduler_status():
                 'healthy': False,
                 'message': 'Scheduler is down and could not be restarted'
             }), 503
-
-
-@app.before_first_request
-def startup_tasks():
-    """Run startup tasks on first request - ensures scheduler starts"""
-    global scheduler_initialized, scheduler_thread, scheduler_running
-
-    if not scheduler_initialized:
-        print("🚀 FIRST REQUEST - Initializing scheduler...")
-
-        scheduler_enabled = os.environ.get('ENABLE_SCHEDULER', 'true').lower() == 'true'
-
-        if scheduler_enabled:
-            # Check if thread exists and is alive
-            if scheduler_thread and scheduler_thread.is_alive():
-                print("✅ Scheduler already running")
-            else:
-                print("📅 Starting scheduler thread...")
-                try:
-                    scheduler_thread = threading.Thread(
-                        target=run_scheduler,
-                        daemon=True,
-                        name="PerProductScheduler"
-                    )
-                    scheduler_thread.start()
-
-                    # Wait a moment to verify it started
-                    time.sleep(2)
-
-                    if scheduler_thread.is_alive():
-                        print("✅ Scheduler thread started successfully!")
-                        scheduler_running = True
-                    else:
-                        print("❌ Scheduler thread failed to start!")
-                        scheduler_running = False
-
-                except Exception as e:
-                    print(f"❌ Error starting scheduler: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    scheduler_running = False
-        else:
-            print("⚠️ Scheduler disabled via ENABLE_SCHEDULER environment variable")
-
-        scheduler_initialized = True
 
 # Also add a manual check to ensure scheduler is running
 @app.route('/ensure_scheduler')
@@ -6962,43 +6904,29 @@ def check_specific_product(user_id, product_id):
             conn.close()
         raise
 
-#def initialize_scheduler():
-#    """Initialize the per-product scheduler - FIXED to work with gunicorn"""
-#    global scheduler_thread, scheduler_running
+def init_scheduler_if_needed():
+    """Initialize scheduler only if enabled and not already running"""
+    global scheduler_initialized, scheduler_thread, scheduler_running
 
-    # Check if already running
-#    if scheduler_running or (scheduler_thread and scheduler_thread.is_alive()):
-#        print("⚠️ Scheduler already running")
- #       return
-
-#    scheduler_enabled = os.environ.get('ENABLE_SCHEDULER', 'true').lower() == 'true'
-
-#    if not scheduler_enabled:
-        print("⚠️ AUTOMATED MONITORING DISABLED via ENABLE_SCHEDULER")
+    if scheduler_initialized:
         return
 
-#    print("🚀 INITIALIZING PER-PRODUCT AUTOMATED MONITORING")
-#    print("⏰ Each product will be checked 60 minutes after its last check")
-
-#    try:
-#        scheduler_thread = threading.Thread(
-#            target=run_scheduler,  # Keep existing function name
-#            daemon=True,
-#            name="PerProductScheduler"
-#        )
-#        scheduler_thread.start()
-
-#        time.sleep(1)
-
-#        if scheduler_thread.is_alive():
-#            print("✅ Per-product scheduler started successfully")
-#        else:
-#            print("❌ Failed to start scheduler thread")
-#
- #   except Exception as e:
- #       print(f"❌ Error starting scheduler: {e}")
- #       import traceback
- #       traceback.print_exc()
+    if os.environ.get('ENABLE_SCHEDULER', 'false').lower() == 'true':
+        try:
+            print("📅 Starting scheduler in background...")
+            scheduler_thread = threading.Thread(
+                target=run_scheduler,
+                daemon=True,
+                name="PerProductScheduler"
+            )
+            scheduler_thread.start()
+            scheduler_initialized = True
+            scheduler_running = True
+            print("✅ Scheduler started")
+        except Exception as e:
+            print(f"⚠️ Scheduler failed to start: {e}")
+    else:
+        print("⚠️ Scheduler disabled via ENABLE_SCHEDULER")
 
 # ============= APPLICATION FACTORY =============
 def create_app():
@@ -7007,17 +6935,12 @@ def create_app():
 
 # ============= MAIN EXECUTION =============
 if __name__ == '__main__':
-    # Only for local development
-    print("🚀 Starting in development mode...")
-    initialize_scheduler_safely()
-
+    # Development mode
+    init_scheduler_if_needed()
     port = int(os.environ.get('PORT', 5000))
     app.run(debug=True, host='0.0.0.0', port=port)
 else:
-    # For production (gunicorn)
-    print("🚀 Starting in production mode...")
-
-    # Delay scheduler initialization to avoid blocking
-    @app.before_first_request
-    def startup():
-        initialize_scheduler_safely()
+    # Production mode (gunicorn)
+    print("🚀 Running in production mode")
+    # Delay scheduler init to avoid blocking
+    threading.Timer(5.0, init_scheduler_if_needed).start()
