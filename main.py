@@ -229,7 +229,7 @@ def ensure_scheduler_running():
 
 def run_scheduler():
     """Per-product intelligent scheduler - checks each product 60 minutes after last check"""
-    global scheduler_running
+    global scheduler_running, scheduler_initialized, scheduler_thread
 
     print("🎯 Intelligent Per-Product Scheduler Started")
     print("📊 Each product will be checked 60 minutes after its last check")
