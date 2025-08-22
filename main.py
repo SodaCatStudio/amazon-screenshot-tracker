@@ -49,6 +49,94 @@ IS_PRODUCTION = os.environ.get('FLASK_ENV') == 'production'
 scheduler_initialize = False
 scheduler_thread = None
 scheduler_running = False
+scheduler_lock = threading.Lock()
+
+def initialize_app():
+    """Initialize the application and start scheduler"""
+    print("🚀 Initializing Amazon Bestseller Monitor...")
+
+    # Initialize database
+    db_manager = DatabaseManager()
+
+    # Start scheduler
+    if ensure_scheduler_running():
+        print("✅ Scheduler started successfully during app initialization")
+    else:
+        print("⚠️ Scheduler will start on first request")
+
+    return app
+
+def ensure_scheduler_running():
+    """Ensure scheduler is running - thread-safe"""
+    global scheduler_initialized, scheduler_thread, scheduler_running
+
+    with scheduler_lock:
+        if scheduler_initialized and scheduler_thread and scheduler_thread.is_alive():
+            return True
+
+        scheduler_enabled = os.environ.get('ENABLE_SCHEDULER', 'true').lower() == 'true'
+
+        if not scheduler_enabled:
+            print("⚠️ Scheduler disabled via ENABLE_SCHEDULER environment variable")
+            return False
+
+        print("🚀 Starting scheduler thread...")
+
+        try:
+            scheduler_thread = threading.Thread(
+                target=run_scheduler,
+                daemon=True,
+                name="PerProductScheduler"
+            )
+            scheduler_thread.start()
+
+            time.sleep(2)
+
+            if scheduler_thread.is_alive():
+                scheduler_running = True
+                scheduler_initialized = True
+                print("✅ Scheduler thread started successfully!")
+                return True
+            else:
+                scheduler_running = False
+                print("❌ Scheduler thread failed to start!")
+                return False
+
+        except Exception as e:
+            print(f"❌ Error starting scheduler: {e}")
+            import traceback
+            traceback.print_exc()
+            scheduler_running = False
+            return False
+
+# Add a middleware to check scheduler on each request (lightweight check)
+@app.before_request
+def check_scheduler_status():
+    """Lightweight check to ensure scheduler is running"""
+    global scheduler_initialized, scheduler_thread
+
+    # Only check occasionally, not every request
+    if not scheduler_initialized or (scheduler_thread and not scheduler_thread.is_alive()):
+        # Only try to start for authenticated users to avoid startup delays for public
+        if request.endpoint and 'static' not in request.endpoint:
+            # Check every 10th request randomly to reduce overhead
+            import random
+            if random.randint(1, 10) == 1:
+                ensure_scheduler_running()
+
+# Initialize scheduler when module loads (for gunicorn)
+# This should work even if before_first_request doesn't exist
+print("🔧 Checking Flask version and initializing scheduler...")
+print(f"Flask version: {flask.__version__ if 'flask' in dir() else 'Unknown'}")
+
+# Try to start scheduler immediately when module loads
+try:
+    if os.environ.get('ENABLE_SCHEDULER', 'true').lower() == 'true':
+        print("📅 Attempting to start scheduler on module load...")
+        ensure_scheduler_running()
+except Exception as e:
+    print(f"⚠️ Could not start scheduler on module load: {e}")
+    print("Scheduler will start on first request instead")
 
 def signal_handler(sig, frame):
     """Handle shutdown signals gracefully"""
@@ -688,40 +776,19 @@ def scheduler_status():
         # Try to restart it
         print("⚠️ Scheduler not running, attempting to restart...")
 
-        try:
-            scheduler_thread = threading.Thread(
-                target=run_scheduler,
-                daemon=True,
-                name="PerProductScheduler"
-            )
-            scheduler_thread.start()
-
-            time.sleep(2)
-
-            if scheduler_thread.is_alive():
-                scheduler_running = True
-                print("✅ Scheduler restarted successfully")
-                return jsonify({
-                    'status': 'restarted',
-                    'thread_alive': True,
-                    'healthy': True,
-                    'message': 'Scheduler was down but has been restarted'
-                })
-            else:
-                scheduler_running = False
-                return jsonify({
-                    'status': 'failed',
-                    'thread_alive': False,
-                    'healthy': False,
-                    'message': 'Scheduler is down and could not be restarted'
-                }), 503
-
-        except Exception as e:
+        if ensure_scheduler_running():
             return jsonify({
-                'status': 'error',
+                'status': 'restarted',
+                'thread_alive': True,
+                'healthy': True,
+                'message': 'Scheduler was down but has been restarted'
+            })
+        else:
+            return jsonify({
+                'status': 'failed',
                 'thread_alive': False,
                 'healthy': False,
-                'message': f'Error restarting scheduler: {str(e)}'
+                'message': 'Scheduler is down and could not be restarted'
             }), 503
 
 @app.errorhandler(404)
@@ -775,7 +842,7 @@ def startup_tasks():
 # Also add a manual check to ensure scheduler is running
 @app.route('/ensure_scheduler')
 @login_required
-def ensure_scheduler():
+def ensure_scheduler_endpoint():
     """Manually ensure scheduler is running - admin only"""
     if current_user.email not in ['josh.matern@gmail.com', 'amazonscreenshottracker@gmail.com']:
         return "Unauthorized", 403
@@ -786,29 +853,14 @@ def ensure_scheduler():
 
     # Check current status
     if scheduler_thread and scheduler_thread.is_alive():
-        html += "<p style='color: green;'>✅ Scheduler is running!</p>"
+        html += "<p style='color: green;'>✅ Scheduler is already running!</p>"
     else:
         html += "<p style='color: red;'>❌ Scheduler was not running. Starting it now...</p>"
 
-        try:
-            scheduler_thread = threading.Thread(
-                target=run_scheduler,
-                daemon=True,
-                name="PerProductScheduler"
-            )
-            scheduler_thread.start()
-
-            time.sleep(2)
-
-            if scheduler_thread.is_alive():
-                scheduler_running = True
-                html += "<p style='color: green;'>✅ Scheduler started successfully!</p>"
-            else:
-                scheduler_running = False
-                html += "<p style='color: red;'>❌ Failed to start scheduler</p>"
-
-        except Exception as e:
-            html += f"<p style='color: red;'>Error: {str(e)}</p>"
+        if ensure_scheduler_running():
+            html += "<p style='color: green;'>✅ Scheduler started successfully!</p>"
+        else:
+            html += "<p style='color: red;'>❌ Failed to start scheduler</p>"
 
     html += f"""
     <br>
@@ -822,6 +874,7 @@ def ensure_scheduler():
     """
 
     return html
+
 
 @app.errorhandler(CSRFError)
 def handle_csrf_error(e):
