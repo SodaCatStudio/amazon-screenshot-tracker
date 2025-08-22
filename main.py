@@ -49,7 +49,7 @@ app = Flask(__name__)
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', secrets.token_hex(32))
 
 # ============= BASIC APP CONFIGURATION =============
-app.config['WTF_CSRF_ENABLED'] = True
+app.config['WTF_CSRF_ENABLED'] = os.environ.get('WTF_CSRF_ENABLED', 'true').lower() == 'true'
 app.config['SESSION_COOKIE_SECURE'] = IS_PRODUCTION  # HTTPS only in production
 app.config['SESSION_COOKIE_HTTPONLY'] = True  # No JS access
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'  # CSRF protection
@@ -84,7 +84,7 @@ auth = Blueprint('auth', __name__)
 scheduler_initialize = False
 scheduler_thread = None
 scheduler_running = False
-scheduler_lock = threading.Lock()
+#scheduler_lock = threading.Lock()
 
 # ============= CONFIGURATION VARIABLES =============
 # Password requirements
@@ -493,9 +493,11 @@ def check_due_products():
 # ============= REQUEST HANDLERS =============
 
 # ============= HEALTH CHECK ENDPOINT =============
+@csrf.exempt
 @app.route('/health')
+@limiter.exempt  # Exempt from rate limiting
 def health_check():
-    """Health check endpoint that doesn't fail due to scheduler"""
+    """Health check endpoint - CSRF exempt"""
     try:
         # Basic health check - just return OK
         return "OK", 200
@@ -1791,18 +1793,32 @@ def initialize_app():
 print("🔧 Checking Flask version and initializing scheduler...")
 print(f"Flask version: {flask.__version__ if 'flask' in dir() else 'Unknown'}")
 
-def initialize_scheduler_safely():
-    """Initialize scheduler only when app is ready"""
-    try:
-        if os.environ.get('ENABLE_SCHEDULER', 'false').lower() == 'true':
-            print("📅 Attempting to start scheduler...")
-            ensure_scheduler_running()
-        else:
-            print("⚠️ Scheduler disabled by configuration")
-    except Exception as e:
-        print(f"⚠️ Non-critical: Scheduler initialization failed: {e}")
-        # Don't crash the app if scheduler fails
-        pass
+def init_scheduler_background():
+    """Initialize scheduler in background without blocking"""
+    global scheduler_initialized, scheduler_thread, scheduler_running
+
+    # Wait a bit for app to fully start
+    time.sleep(10)
+
+    if scheduler_initialized:
+        return
+
+    if os.environ.get('ENABLE_SCHEDULER', 'false').lower() == 'true':
+        try:
+            print("📅 Starting scheduler...")
+            scheduler_thread = threading.Thread(
+                target=run_scheduler,
+                daemon=True,
+                name="PerProductScheduler"
+            )
+            scheduler_thread.start()
+            scheduler_initialized = True
+            scheduler_running = True
+            print("✅ Scheduler started successfully")
+        except Exception as e:
+            print(f"⚠️ Scheduler failed: {e}")
+    else:
+        print("⚠️ Scheduler is disabled")
 
 
 def get_insert_id(cursor, conn):
@@ -3266,6 +3282,24 @@ def debug_products():
 
     except Exception as e:
         return f"Debug Error: {str(e)}", 500
+
+@app.route('/ping')
+@csrf.exempt
+@limiter.exempt
+def ping():
+    """Ultra-simple endpoint for testing"""
+    return "pong", 200
+
+@app.route('/status')
+@csrf.exempt
+@limiter.exempt
+def status():
+    """Status endpoint with basic info"""
+    return jsonify({
+        'status': 'running',
+        'flask_version': flask.__version__,
+        'time': datetime.now().isoformat()
+    })
 
 @app.route('/debug/persistence-test')
 def persistence_test():
@@ -6934,13 +6968,15 @@ def create_app():
     return app
 
 # ============= MAIN EXECUTION =============
+print("🚀 Starting Amazon Bestseller Monitor...")
+print(f"Flask version: {flask.__version__}")
+print(f"Python version: {sys.version}")
+
+# Start scheduler in background (non-blocking)
+if os.environ.get('ENABLE_SCHEDULER', 'false').lower() == 'true':
+    threading.Thread(target=init_scheduler_background, daemon=True).start()
+
+# For development
 if __name__ == '__main__':
-    # Development mode
-    init_scheduler_if_needed()
     port = int(os.environ.get('PORT', 5000))
-    app.run(debug=True, host='0.0.0.0', port=port)
-else:
-    # Production mode (gunicorn)
-    print("🚀 Running in production mode")
-    # Delay scheduler init to avoid blocking
-    threading.Timer(5.0, init_scheduler_if_needed).start()
+    app.run(debug=False, host='0.0.0.0', port=port)
