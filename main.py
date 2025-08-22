@@ -41,31 +41,139 @@ import logging
 from logging.handlers import RotatingFileHandler
 from dotenv import load_dotenv
 
-SCHEDULER_ENABLED = os.environ.get('ENABLE_SCHEDULER', 'false').lower() == 'true'
-
 load_dotenv()
 IS_PRODUCTION = os.environ.get('FLASK_ENV') == 'production'
 
+# ============= INITIALIZE FLASK APP FIRST =============
+app = Flask(__name__)
+app.secret_key = os.environ.get('FLASK_SECRET_KEY', secrets.token_hex(32))
+
+# ============= BASIC APP CONFIGURATION =============
+app.config['WTF_CSRF_ENABLED'] = True
+app.config['SESSION_COOKIE_SECURE'] = IS_PRODUCTION  # HTTPS only in production
+app.config['SESSION_COOKIE_HTTPONLY'] = True  # No JS access
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'  # CSRF protection
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
+app.config['REMEMBER_COOKIE_DURATION'] = timedelta(days=14)
+app.config['REMEMBER_COOKIE_SECURE'] = True
+app.config['REMEMBER_COOKIE_HTTPONLY'] = True
+
+# ============= INITIALIZE EXTENSIONS =============
+login_manager = LoginManager()
+csrf = CSRFProtect()
+limiter = Limiter(
+    app=app,
+    key_func=get_remote_address,
+    default_limits=["200 per day", "50 per hour"],
+    storage_uri="memory://",  # Use in-memory storage
+    strategy="fixed-window"
+)
+
+login_manager.login_view = 'auth.login'  # type: ignore
+login_manager.login_message = 'Please log in to access this page.'
+login_manager.session_protection = 'strong'  # Protect against session hijacking
+
+login_manager.init_app(app)
+csrf.init_app(app)
+limiter.init_app(app)
+
+# Create authentication blueprint
+auth = Blueprint('auth', __name__)
+
+# ============= GLOBAL VARIABLES =============
+SCHEDULER_ENABLED = os.environ.get('ENABLE_SCHEDULER', 'false').lower() == 'true'
 scheduler_initialize = False
 scheduler_thread = None
 scheduler_running = False
 scheduler_lock = threading.Lock()
 
-def initialize_app():
-    """Initialize the application and start scheduler"""
-    print("🚀 Initializing Amazon Bestseller Monitor...")
+# ============= CONFIGURATION VARIABLES =============
+# Password requirements
+PASSWORD_MIN_LENGTH = 8
+PASSWORD_REQUIREMENTS = {
+    'min_length': 8,
+    'require_uppercase': True,
+    'require_lowercase': True,
+    'require_digit': True,
+    'require_special': True,
+    'max_length': 128, #Prevent DoS attacks with excessively long passwords
+}
 
-    # Initialize database
-    db_manager = DatabaseManager()
+# Email configuration from environment variables
+SMTP_SERVER = os.environ.get('SMTP_SERVER', 'smtp.gmail.com')
+SMTP_PORT = int(os.environ.get('SMTP_PORT', '587'))
+SMTP_USERNAME = os.environ.get('SMTP_USERNAME')
+SMTP_PASSWORD = os.environ.get('SMTP_PASSWORD')
+SENDER_EMAIL = os.environ.get('SENDER_EMAIL', SMTP_USERNAME)
+SENDER_NAME = os.environ.get('SENDER_NAME', 'Amazon Screenshot Tracker')
 
-    # Start scheduler
-    if ensure_scheduler_running():
-        print("✅ Scheduler started successfully during app initialization")
+# ScrapingBee configuration - using environment variables for security
+SCRAPINGBEE_API_KEY = os.environ.get('SCRAPINGBEE_SECRET_KEY')
+SCRAPINGBEE_URL = 'https://app.scrapingbee.com/api/v1/'
+
+# Validate that the API key is available
+if not SCRAPINGBEE_API_KEY:
+    print("⚠️  WARNING: SCRAPINGBEE_API_KEY environment variable not set!")
+
+# ============= SECURITY HEADERS (Production only) =============
+if IS_PRODUCTION:
+    talisman_config = {
+        'force_https': False,
+        'strict_transport_security': False,
+        'content_security_policy': {
+            'default-src': "'self'",
+            'img-src': "'self' data: https:",
+            'script-src': "'self' 'unsafe-inline'",
+            'style-src': "'self' 'unsafe-inline'",
+        },
+        'session_cookie_secure': True,
+        'session_cookie_http_only': True,
+    }
+    talisman = Talisman(app, **talisman_config)
+
+# ============= LOGGING CONFIGURATION =============
+if not app.debug:
+    # Create logs directory
+    if not os.path.exists('logs'):
+        os.mkdir('logs')
+
+    # Rotating file handler
+    file_handler = RotatingFileHandler('logs/amazon_monitor.log',
+                                     maxBytes=10240000,  # 10MB
+                                     backupCount=10)
+    file_handler.setFormatter(logging.Formatter(
+        '%(asctime)s %(levelname)s: %(message)s '
+        '[in %(pathname)s:%(lineno)d]'
+    ))
+    file_handler.setLevel(logging.INFO)
+    app.logger.addHandler(file_handler)
+    app.logger.setLevel(logging.INFO)
+    app.logger.info('Amazon Bestseller Monitor startup')
+
+# ============= DATABASE FUNCTIONS =============
+def get_db():
+    """Get database connection - PostgreSQL in production, SQLite in development"""
+    database_url = os.environ.get('DATABASE_URL')
+
+    if database_url:
+        # Production: PostgreSQL
+        try:
+            conn = psycopg2.connect(database_url, cursor_factory=RealDictCursor)
+            return conn
+        except Exception as e:
+            print(f"❌ PostgreSQL connection failed: {e}")
+            raise
     else:
-        print("⚠️ Scheduler will start on first request")
+        # Development: SQLite
+        conn = sqlite3.connect('amazon_monitor.db')
+        conn.row_factory = sqlite3.Row
+        return conn
 
-    return app
+def get_db_type():
+    """Determine if using PostgreSQL or SQLite"""
+    return 'postgresql' if os.environ.get('DATABASE_URL') else 'sqlite'
 
+# ============= SCHEDULER FUNCTIONS =============
 def ensure_scheduler_running():
     """Ensure scheduler is running - thread-safe"""
     global scheduler_initialized, scheduler_thread, scheduler_running
@@ -109,7 +217,281 @@ def ensure_scheduler_running():
             scheduler_running = False
             return False
 
-# Add a middleware to check scheduler on each request (lightweight check)
+def run_scheduler():
+    """Per-product intelligent scheduler - checks each product 60 minutes after last check"""
+    global scheduler_running
+
+    print("🎯 Intelligent Per-Product Scheduler Started")
+    print("📊 Each product will be checked 60 minutes after its last check")
+
+    scheduler_running = True
+    consecutive_errors = 0
+    max_consecutive_errors = 5
+
+    while scheduler_running:
+        try:
+            if not os.environ.get('ENABLE_SCHEDULER', 'true').lower() == 'true':
+                print("🛑 Scheduler disabled via environment variable")
+                break
+
+            products_checked = check_due_products()
+
+            if products_checked >= 0:
+                consecutive_errors = 0
+
+            for i in range(60):
+                if not scheduler_running:
+                    break
+                time.sleep(1)
+
+        except Exception as e:
+            consecutive_errors += 1
+            print(f"❌ Scheduler error ({consecutive_errors}/{max_consecutive_errors}): {e}")
+            import traceback
+            traceback.print_exc()
+
+            if consecutive_errors >= max_consecutive_errors:
+                print("❌ Too many consecutive errors, stopping scheduler")
+                break
+
+            time.sleep(300)
+
+    print("📅 Scheduler stopped")
+    scheduler_running = False
+
+def check_due_products():
+    """Check products that are due for their hourly check"""
+    current_time = datetime.now()
+    check_threshold = current_time - timedelta(minutes=60)
+
+    conn = None
+    products_checked = 0
+
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+
+        # Find products that haven't been checked in the last 60 minutes
+        if get_db_type() == 'postgresql':
+            cursor.execute('''
+                SELECT 
+                    p.id as product_id,
+                    p.product_url,
+                    p.product_title,
+                    p.current_rank,
+                    p.current_category,
+                    p.is_bestseller,
+                    p.last_checked,
+                    p.created_at,
+                    p.user_id,
+                    u.email,
+                    u.scrapingbee_api_key
+                FROM products p
+                JOIN users u ON p.user_id = u.id
+                WHERE p.active = true
+                  AND u.scrapingbee_api_key IS NOT NULL
+                  AND (
+                      p.last_checked IS NULL 
+                      OR p.last_checked <= %s
+                  )
+                ORDER BY 
+                    COALESCE(p.last_checked, p.created_at) ASC
+                LIMIT 10
+            ''', (check_threshold,))
+        else:
+            cursor.execute('''
+                SELECT 
+                    p.id as product_id,
+                    p.product_url,
+                    p.product_title,
+                    p.current_rank,
+                    p.current_category,
+                    p.is_bestseller,
+                    p.last_checked,
+                    p.created_at,
+                    p.user_id,
+                    u.email,
+                    u.scrapingbee_api_key
+                FROM products p
+                JOIN users u ON p.user_id = u.id
+                WHERE p.active = 1
+                  AND u.scrapingbee_api_key IS NOT NULL
+                  AND (
+                      p.last_checked IS NULL 
+                      OR p.last_checked <= ?
+                  )
+                ORDER BY 
+                    COALESCE(p.last_checked, p.created_at) ASC
+                LIMIT 10
+            ''', (check_threshold,))
+
+        due_products = cursor.fetchall()
+
+        if not due_products:
+            conn.close()
+            return 0
+
+        print(f"\n⏰ {current_time.strftime('%H:%M:%S')} - Found {len(due_products)} products due for checking")
+
+        # Process each product
+        for product in due_products:
+            try:
+                # Extract product data
+                if isinstance(product, dict):
+                    product_id = product['product_id']
+                    url = product['product_url']
+                    title = product['product_title']
+                    user_id = product['user_id']
+                    user_email = product['email']
+                    previous_rank = int(product['current_rank']) if product['current_rank'] else 999999
+                    was_bestseller = product['is_bestseller']
+                    last_checked = product['last_checked']
+                else:
+                    product_id = product[0]
+                    url = product[1]
+                    title = product[2]
+                    previous_rank = int(product[3]) if product[3] else 999999
+                    was_bestseller = product[5]
+                    last_checked = product[6]
+                    user_id = product[8]
+                    user_email = product[9]
+
+                if last_checked:
+                    time_since = current_time - datetime.fromisoformat(str(last_checked))
+                    minutes_since = int(time_since.total_seconds() / 60)
+                    print(f"  📦 Checking: {title[:40]}... (last: {minutes_since}min ago)")
+                else:
+                    print(f"  📦 Checking: {title[:40]}... (first check)")
+
+                # Create monitor for this user
+                user_monitor = AmazonMonitor.for_user(user_id)
+
+                if not user_monitor.api_key:
+                    print(f"    ⚠️ No API key for user {user_id}, skipping")
+                    continue
+
+                # Scrape the product
+                scrape_result = user_monitor.scrape_amazon_page(url)
+
+                if scrape_result.get('success'):
+                    product_info = user_monitor.extract_product_info(scrape_result.get('html', ''))
+
+                    current_rank = int(product_info['rank']) if product_info.get('rank') else None
+                    is_bestseller_now = product_info.get('is_bestseller', False)
+
+                    update_time = datetime.now()
+
+                    # Update product in database
+                    if get_db_type() == 'postgresql':
+                        cursor.execute('''
+                            UPDATE products 
+                            SET current_rank = %s, 
+                                current_category = %s,
+                                is_bestseller = %s, 
+                                last_checked = %s
+                            WHERE id = %s
+                        ''', (
+                            product_info.get('rank'),
+                            product_info.get('category'),
+                            is_bestseller_now,
+                            update_time,
+                            product_id
+                        ))
+                    else:
+                        cursor.execute('''
+                            UPDATE products 
+                            SET current_rank = ?, 
+                                current_category = ?,
+                                is_bestseller = ?, 
+                                last_checked = ?
+                            WHERE id = ?
+                        ''', (
+                            product_info.get('rank'),
+                            product_info.get('category'),
+                            is_bestseller_now,
+                            update_time,
+                            product_id
+                        ))
+
+                    # Check for achievements
+                    achievement_triggered = False
+                    achievement_reason = ""
+
+                    if is_bestseller_now and not was_bestseller:
+                        achievement_triggered = True
+                        achievement_reason = "🏆 New Bestseller!"
+                    elif current_rank:
+                        if current_rank == 1 and previous_rank != 1:
+                            achievement_triggered = True
+                            achievement_reason = "🥇 Reached #1!"
+                        elif current_rank <= 10 and previous_rank > 10:
+                            achievement_triggered = True
+                            achievement_reason = f"🎯 Top 10! (#{current_rank})"
+
+                    if achievement_triggered:
+                        print(f"    🎉 ACHIEVEMENT: {achievement_reason}")
+
+                        if scrape_result.get('screenshot'):
+                            # Save achievement screenshot
+                            if get_db_type() == 'postgresql':
+                                cursor.execute('''
+                                    INSERT INTO bestseller_screenshots 
+                                    (product_id, screenshot_data, rank_achieved, category, achieved_at)
+                                    VALUES (%s, %s, %s, %s, %s)
+                                ''', (product_id, scrape_result['screenshot'], 
+                                      product_info.get('rank'), 
+                                      f"{product_info.get('category', '')} - {achievement_reason}", 
+                                      update_time))
+                            else:
+                                cursor.execute('''
+                                    INSERT INTO bestseller_screenshots 
+                                    (product_id, screenshot_data, rank_achieved, category, achieved_at)
+                                    VALUES (?, ?, ?, ?, ?)
+                                ''', (product_id, scrape_result['screenshot'], 
+                                      product_info.get('rank'), 
+                                      f"{product_info.get('category', '')} - {achievement_reason}", 
+                                      update_time))
+
+                            # Send notification if configured
+                            if email_notifier.is_configured():
+                                product_info['title'] = title
+                                product_info['achievement_reason'] = achievement_reason
+                                email_notifier.send_bestseller_notification(
+                                    user_email, product_info, 
+                                    scrape_result['screenshot'], achievement_reason
+                                )
+                    else:
+                        print(f"    ✅ Rank: {current_rank or 'N/A'}")
+
+                    conn.commit()
+                    products_checked += 1
+
+                else:
+                    print(f"    ❌ Scrape failed: {scrape_result.get('error', 'Unknown')}")
+
+                time.sleep(2)
+
+            except Exception as e:
+                print(f"    ❌ Error checking product {product_id}: {e}")
+                continue
+
+        conn.close()
+        return products_checked
+
+    except Exception as e:
+        print(f"❌ Database error in check_due_products: {e}")
+        import traceback
+        traceback.print_exc()
+
+        if conn:
+            try:
+                conn.rollback()
+                conn.close()
+            except:
+                pass
+        return -1
+
+# ============= REQUEST HANDLERS =============
 @app.before_request
 def check_scheduler_status():
     """Lightweight check to ensure scheduler is running"""
@@ -117,27 +499,25 @@ def check_scheduler_status():
 
     # Only check occasionally, not every request
     if not scheduler_initialized or (scheduler_thread and not scheduler_thread.is_alive()):
-        # Only try to start for authenticated users to avoid startup delays for public
+        # Only try to start for authenticated users to avoid startup delays
         if request.endpoint and 'static' not in request.endpoint:
             # Check every 10th request randomly to reduce overhead
             import random
             if random.randint(1, 10) == 1:
                 ensure_scheduler_running()
 
-# Initialize scheduler when module loads (for gunicorn)
-# This should work even if before_first_request doesn't exist
-print("🔧 Checking Flask version and initializing scheduler...")
-print(f"Flask version: {flask.__version__ if 'flask' in dir() else 'Unknown'}")
+# ============= HEALTH CHECK ENDPOINT =============
+@app.route('/health')
+def health_check():
+    """Health check endpoint that doesn't fail due to scheduler"""
+    try:
+        # Basic health check - just return OK
+        return "OK", 200
+    except Exception as e:
+        print(f"Health check error: {e}")
+        return "OK", 200  # Still return OK to prevent container restart loops
 
-# Try to start scheduler immediately when module loads
-try:
-    if os.environ.get('ENABLE_SCHEDULER', 'true').lower() == 'true':
-        print("📅 Attempting to start scheduler on module load...")
-        ensure_scheduler_running()
-except Exception as e:
-    print(f"⚠️ Could not start scheduler on module load: {e}")
-    print("Scheduler will start on first request instead")
-
+# ============= SIGNAL HANDLERS =============
 def signal_handler(sig, frame):
     """Handle shutdown signals gracefully"""
     global scheduler_running
@@ -145,1218 +525,10 @@ def signal_handler(sig, frame):
     scheduler_running = False
     sys.exit(0)
 
-# Register signal handlers
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 
-def get_db():
-    """Get database connection - PostgreSQL in production, SQLite in development"""
-    database_url = os.environ.get('DATABASE_URL')
-
-    if database_url:
-        # Production: PostgreSQL
-        try:
-            conn = psycopg2.connect(database_url, cursor_factory=RealDictCursor)
-            return conn
-        except Exception as e:
-            print(f"❌ PostgreSQL connection failed: {e}")
-            raise
-    else:
-        # Development: SQLite
-        conn = sqlite3.connect('amazon_monitor.db')
-        conn.row_factory = sqlite3.Row
-        return conn
-
-def get_insert_id(cursor, conn):
-    """Get last insert ID for both databases"""
-    database_url = os.environ.get('DATABASE_URL')
-
-    if database_url:
-        # PostgreSQL: Use RETURNING
-        # This function should be called differently for PostgreSQL
-        return None  # Handle with RETURNING clause
-    else:
-        # SQLite
-        return cursor.lastrowid
-
-def execute_with_returning(cursor, query, params=None):
-    """Execute INSERT and return ID for PostgreSQL compatibility"""
-    database_url = os.environ.get('DATABASE_URL')
-
-    if database_url:
-        # PostgreSQL: Add RETURNING id
-        if query.strip().upper().startswith('INSERT') and 'RETURNING' not in query.upper():
-            query += ' RETURNING id'
-
-        if params:
-            cursor.execute(query, params)
-        else:
-            cursor.execute(query)
-
-        # Get the returned ID
-        result = cursor.fetchone()
-        return result['id'] if result else None
-    else:
-        # SQLite: Regular insert
-        if params:
-            cursor.execute(query, params)
-        else:
-            cursor.execute(query)
-        return cursor.lastrowid
-
-app = Flask(__name__)
-def create_app():
-    """Application factory pattern for better WSGI compatibility"""
-    return app
-app.secret_key = os.environ.get('FLASK_SECRET_KEY', secrets.token_hex(32))
-if not app.secret_key:
-    raise ValueError("FLASK_SECRET_KEY must be set in environment variables!")
-
-app.config['WTF_CSRF_ENABLED'] = True
-#@app.before_request
-#def log_request():
-#    print(f"📍 Request: {request.method} {request.path}")
-#    if current_user.is_authenticated:
-#        print(f"   User: {current_user.email}")
- #   else:
-#        print("   User: Anonymous")
-
-# Create authentication blueprint for better organization
-auth = Blueprint('auth', __name__)
-
-# Initialize Flask-Login with security settings
-login_manager = LoginManager()
-
-csrf = CSRFProtect()
-
-limiter = Limiter(
-    app=app,
-    key_func=get_remote_address,
-    default_limits=["200 per day", "50 per hour"],  # Increased from 50/day, 10/hour
-    storage_uri="memory://",  # Use in-memory storage
-    strategy="fixed-window"
-)
-
-login_manager.login_view = 'auth.login'  # type: ignore
-login_manager.login_message = 'Please log in to access this page.'
-login_manager.session_protection = 'strong'  # Protect against session hijacking
-
-login_manager.init_app(app)
-csrf.init_app(app)
-limiter.init_app(app)
-
-# Security configurations
-app.config['SESSION_COOKIE_SECURE'] = IS_PRODUCTION  # HTTPS only in production
-app.config['SESSION_COOKIE_HTTPONLY'] = True  # No JS access
-app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'  # CSRF protection
-app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
-app.config['REMEMBER_COOKIE_DURATION'] = timedelta(days=14)
-app.config['REMEMBER_COOKIE_SECURE'] = True
-app.config['REMEMBER_COOKIE_HTTPONLY'] = True
-
-# Password requirements
-PASSWORD_MIN_LENGTH = 8
-PASSWORD_REQUIREMENTS = {
-    'min_length': 8,
-    'require_uppercase': True,
-    'require_lowercase': True,
-    'require_digit': True,
-    'require_special': True,
-    'max_length': 128, #Prevent DoS attacks with excessively long passwords
-}
-
-# Email configuration from environment variables
-SMTP_SERVER = os.environ.get('SMTP_SERVER', 'smtp.gmail.com')
-SMTP_PORT = int(os.environ.get('SMTP_PORT', '587'))
-SMTP_USERNAME = os.environ.get('SMTP_USERNAME')
-SMTP_PASSWORD = os.environ.get('SMTP_PASSWORD')
-SENDER_EMAIL = os.environ.get('SENDER_EMAIL', SMTP_USERNAME)
-SENDER_NAME = os.environ.get('SENDER_NAME', 'Amazon Screenshot Tracker')
-
-# ScrapingBee configuration - using environment variables for security
-SCRAPINGBEE_API_KEY = os.environ.get('SCRAPINGBEE_SECRET_KEY')
-SCRAPINGBEE_URL = 'https://app.scrapingbee.com/api/v1/'
-
-# Validate that the API key is available
-if not SCRAPINGBEE_API_KEY:
-    print("⚠️  WARNING: SCRAPINGBEE_API_KEY environment variable not set!")
-    print("Please add your ScrapingBee API key as a secret in Replit")
-    print("Go to: Secrets tab → Add secret → Key: SCRAPINGBEE_API_KEY → Value: your_api_key")
-
-# CSRF Protection
-app.config['WTF_CSRF_ENABLED'] = True
-app.config['WTF_CSRF_TIME_LIMIT'] = None  # No time limit
-app.config['WTF_CSRF_CHECK_DEFAULT'] = True
-print(f"CSRF Enabled: {app.config.get('WTF_CSRF_ENABLED', 'Not Set')}")
-print(f"Secret Key Length: {len(app.config['SECRET_KEY'])}")
-
-csp = {
-    'default-src': [
-        '\'self\'',
-        'https://cdnjs.cloudflare.com',  # For any CDN resources
-        'https://app.scrapingbee.com',  # For ScrapingBee
-    ],
-    'img-src': [
-        '\'self\'',
-        'data:',
-        'https:',
-        'blob:',
-    ],
-    'script-src': [
-        '\'self\'',
-        '\'unsafe-inline\'',  # Remove in production if possible
-        'https://cdnjs.cloudflare.com',
-    ],
-    'style-src': [
-        '\'self\'',
-        '\'unsafe-inline\'',  # For inline styles
-        'https://cdnjs.cloudflare.com',
-    ],
-    'font-src': [
-        '\'self\'',
-        'https://cdnjs.cloudflare.com',
-    ],
-}
-
-# Initialize Talisman for security headers (disable in development)
-if os.environ.get('FLASK_ENV') == 'production':
-    # Railway-friendly Talisman configuration
-    talisman_config = {
-        'force_https': False,  # Railway terminates HTTPS
-        'strict_transport_security': False,  # Railway handles this
-        'content_security_policy': {
-            'default-src': "'self'",
-            'img-src': "'self' data: https:",
-            'script-src': "'self' 'unsafe-inline'",
-            'style-src': "'self' 'unsafe-inline'",
-        },
-        'session_cookie_secure': True,
-        'session_cookie_http_only': True,
-    }
-
-    talisman = Talisman(app, **talisman_config)
-
-if not app.debug:
-    # Create logs directory
-    if not os.path.exists('logs'):
-        os.mkdir('logs')
-
-    # Rotating file handler
-    file_handler = RotatingFileHandler('logs/amazon_monitor.log',
-                                     maxBytes=10240000,  # 10MB
-                                     backupCount=10)
-    file_handler.setFormatter(logging.Formatter(
-        '%(asctime)s %(levelname)s: %(message)s '
-        '[in %(pathname)s:%(lineno)d]'
-    ))
-    file_handler.setLevel(logging.INFO)
-    app.logger.addHandler(file_handler)
-
-    app.logger.setLevel(logging.INFO)
-    app.logger.info('Amazon Bestseller Monitor startup')
-
-@app.route('/admin/test_email_config')
-@login_required
-def test_email_config():
-    """Test and diagnose email configuration"""
-    # Security check
-    ADMIN_EMAILS = ['amazonscreenshottracker@gmail.com']
-    if current_user.email not in ADMIN_EMAILS:
-        return "Unauthorized", 403
-
-    diagnostics = []
-
-    # Check environment variables
-    diagnostics.append(f"SMTP_SERVER: {SMTP_SERVER or 'NOT SET'}")
-    diagnostics.append(f"SMTP_PORT: {SMTP_PORT or 'NOT SET'}")
-    diagnostics.append(f"SMTP_USERNAME: {'SET' if SMTP_USERNAME else 'NOT SET'}")
-    diagnostics.append(f"SMTP_PASSWORD: {'SET' if SMTP_PASSWORD else 'NOT SET'}")
-    diagnostics.append(f"SENDER_EMAIL: {SENDER_EMAIL or 'NOT SET'}")
-    diagnostics.append(f"Email configured: {email_notifier.is_configured()}")
-
-    # Try to send a test email
-    if email_notifier.is_configured():
-        try:
-            import smtplib
-            import socket
-
-            # Test connection
-            diagnostics.append("\nTesting SMTP connection...")
-
-            socket.setdefaulttimeout(10)
-            server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=10)
-            server.starttls()
-            server.login(SMTP_USERNAME, SMTP_PASSWORD)
-            server.quit()
-
-            diagnostics.append("✅ SMTP connection successful!")
-
-            # Try sending test email
-            test_html = """
-            <html>
-                <body>
-                    <h2>Test Email</h2>
-                    <p>This is a test email from your Amazon Screenshot Tracker.</p>
-                    <p>If you received this, your email configuration is working!</p>
-                </body>
-            </html>
-            """
-
-            result = email_notifier.send_email(
-                current_user.email,
-                "Test Email - Amazon Screenshot Tracker",
-                test_html
-            )
-
-            if result:
-                diagnostics.append(f"✅ Test email sent to {current_user.email}")
-            else:
-                diagnostics.append(f"❌ Failed to send test email")
-
-        except Exception as e:
-            diagnostics.append(f"❌ Error: {str(e)}")
-            import traceback
-            diagnostics.append(f"Traceback: {traceback.format_exc()}")
-    else:
-        diagnostics.append("❌ Email system not configured")
-
-    return "<pre>" + "\n".join(diagnostics) + "</pre>"
-
-@app.route('/admin/manual_verify', methods=['GET', 'POST'])
-@login_required
-def manual_verify():
-    """Manual verification page for admin"""
-    ADMIN_EMAILS = ['amazonscreenshottracker@gmail.com']
-    if current_user.email not in ADMIN_EMAILS:
-        return "Unauthorized", 403
-
-    if request.method == 'POST':
-        email = request.form.get('email')
-
-        conn = get_db()
-        cursor = conn.cursor()
-
-        try:
-            if get_db_type() == 'postgresql':
-                cursor.execute('''
-                    UPDATE users SET is_verified = true 
-                    WHERE LOWER(email) = LOWER(%s)
-                ''', (email,))
-            else:
-                cursor.execute('''
-                    UPDATE users SET is_verified = 1 
-                    WHERE LOWER(email) = LOWER(?)
-                ''', (email,))
-
-            if cursor.rowcount > 0:
-                conn.commit()
-                flash(f'User {email} verified successfully!', 'success')
-            else:
-                flash(f'User {email} not found', 'error')
-
-            conn.close()
-        except Exception as e:
-            conn.close()
-            flash(f'Error: {str(e)}', 'error')
-
-    # Get list of unverified users
-    conn = get_db()
-    cursor = conn.cursor()
-
-    if get_db_type() == 'postgresql':
-        cursor.execute('''
-            SELECT email, created_at 
-            FROM users 
-            WHERE is_verified = false 
-            ORDER BY created_at DESC
-        ''')
-    else:
-        cursor.execute('''
-            SELECT email, created_at 
-            FROM users 
-            WHERE is_verified = 0 
-            ORDER BY created_at DESC
-        ''')
-
-    unverified_users = cursor.fetchall()
-    conn.close()
-
-    html = """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Manual User Verification</title>
-        <style>
-            body { font-family: Arial, sans-serif; padding: 20px; }
-            .container { max-width: 800px; margin: 0 auto; }
-            .user-list { background: #f5f5f5; padding: 20px; border-radius: 8px; }
-            .user-item { background: white; padding: 10px; margin: 10px 0; border-radius: 5px; }
-            .btn { background: #ff9900; color: white; padding: 8px 16px; border: none; border-radius: 5px; cursor: pointer; }
-            .btn:hover { background: #e88b00; }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>Manual User Verification</h1>
-            <p>Admin tool to manually verify users when email system is not working.</p>
-
-            <h2>Verify by Email</h2>
-            <form method="POST">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                <input type="email" name="email" placeholder="user@email.com" required>
-                <button type="submit" class="btn">Verify User</button>
-            </form>
-
-            <h2>Unverified Users</h2>
-            <div class="user-list">
-    """
-
-    if unverified_users:
-        for user in unverified_users:
-            if isinstance(user, dict):
-                email = user['email']
-                created = user['created_at']
-            else:
-                email = user[0]
-                created = user[1]
-
-            html += f"""
-                <div class="user-item">
-                    <strong>{email}</strong> - Created: {created}
-                    <form method="POST" style="display: inline;">
-                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                        <input type="hidden" name="email" value="{email}">
-                        <button type="submit" class="btn">Verify</button>
-                    </form>
-                </div>
-            """
-    else:
-        html += "<p>No unverified users found.</p>"
-
-    html += """
-            </div>
-
-            <h2>Quick Actions</h2>
-            <p><a href="/admin/auto_verify_all" class="btn" onclick="return confirm('Verify ALL unverified users?')">Verify All Users</a></p>
-            <p><a href="/admin/test_email_config" class="btn">Test Email Configuration</a></p>
-        </div>
-    </body>
-    </html>
-    """
-
-    return render_template_string(html)
-
-@app.route('/health')
-def health_check():
-    """Health check endpoint that doesn't fail due to scheduler"""
-    try:
-        # Basic health check - just return OK
-        # Don't check scheduler status here as it could cause false failures
-        return "OK", 200
-    except Exception as e:
-        print(f"Health check error: {e}")
-        return "OK", 200  # Still return OK to prevent container restart loops
-
-@app.route('/scheduler_health')
-def scheduler_health():
-    """Separate endpoint to check scheduler health"""
-    global scheduler_thread
-
-    scheduler_enabled = os.environ.get('ENABLE_SCHEDULER', 'false').lower() == 'true'
-
-    if not scheduler_enabled:
-        return jsonify({
-            'status': 'disabled',
-            'message': 'Scheduler is disabled by configuration',
-            'healthy': True
-        })
-
-    if scheduler_thread and scheduler_thread.is_alive():
-        return jsonify({
-            'status': 'running',
-            'thread_alive': True,
-            'healthy': True
-        })
-    else:
-        return jsonify({
-            'status': 'stopped',
-            'thread_alive': False,
-            'healthy': False,
-            'message': 'Scheduler should be running but thread is dead'
-        }), 503
-
-@app.route('/scheduler_control')
-@login_required
-def scheduler_control():
-    """Control panel for the scheduler"""
-    if current_user.email != 'josh.matern@gmail.com':
-        return "Unauthorized", 403
-
-    global scheduler_thread
-    import schedule
-
-    scheduler_enabled = os.environ.get('ENABLE_SCHEDULER', 'false').lower() == 'true'
-    thread_alive = scheduler_thread and scheduler_thread.is_alive() if scheduler_thread else False
-    job_count = len(schedule.jobs) if schedule else 0
-
-    # Get next run time
-    next_run = None
-    if schedule.jobs:
-        try:
-            next_run = schedule.jobs[0].next_run
-        except:
-            pass
-
-    html = f"""
-    <html>
-    <head>
-        <style>
-            body {{ font-family: Arial, sans-serif; padding: 20px; }}
-            .status-box {{ 
-                padding: 20px; 
-                border-radius: 8px; 
-                margin: 20px 0;
-            }}
-            .enabled {{ background: #d4edda; }}
-            .disabled {{ background: #f8d7da; }}
-            .warning {{ background: #fff3cd; }}
-            .button {{
-                padding: 10px 20px;
-                margin: 10px;
-                border-radius: 5px;
-                text-decoration: none;
-                display: inline-block;
-                font-weight: bold;
-            }}
-            .start {{ background: #28a745; color: white; }}
-            .stop {{ background: #dc3545; color: white; }}
-            .info {{ background: #17a2b8; color: white; }}
-        </style>
-    </head>
-    <body>
-        <h1>⚙️ Scheduler Control Panel</h1>
-
-        <div class="status-box {'enabled' if scheduler_enabled else 'disabled'}">
-            <h2>Configuration</h2>
-            <p><strong>ENABLE_SCHEDULER:</strong> {os.environ.get('ENABLE_SCHEDULER', 'false')}</p>
-            <p><strong>Setting:</strong> {'ENABLED' if scheduler_enabled else 'DISABLED'}</p>
-        </div>
-
-        <div class="status-box {'enabled' if thread_alive else 'warning'}">
-            <h2>Runtime Status</h2>
-            <p><strong>Thread Alive:</strong> {'✅ Yes' if thread_alive else '❌ No'}</p>
-            <p><strong>Scheduled Jobs:</strong> {job_count}</p>
-            <p><strong>Next Run:</strong> {next_run or 'Not scheduled'}</p>
-        </div>
-
-        <div class="status-box warning">
-            <h2>⚠️ Important Notes</h2>
-            <ul>
-                <li>To permanently enable/disable, change ENABLE_SCHEDULER in Railway environment variables</li>
-                <li>Manual start/stop here is temporary until next deployment</li>
-                <li>Health checks will pass even if scheduler is disabled</li>
-            </ul>
-        </div>
-
-        <h2>Actions</h2>
-        <a href="/start_scheduler" class="button start">▶️ Start Scheduler</a>
-        <a href="/stop_scheduler" class="button stop">⏹️ Stop Scheduler</a>
-        <a href="/clear_scheduled_jobs" class="button info">🗑️ Clear Jobs</a>
-
-        <br><br>
-        <a href="/scheduler_status" class="button info">📊 Scheduler Status</a>
-        <a href="/credit_leak_detector" class="button info">🔍 Leak Detector</a>
-        <a href="/dashboard" class="button info">🏠 Dashboard</a>
-    </body>
-    </html>
-    """
-
-    return html
-
-@app.route('/start_scheduler')
-@login_required
-def start_scheduler():
-    """Manually start the scheduler - FIXED"""
-    if current_user.email != 'josh.matern@gmail.com':
-        return "Unauthorized", 403
-
-    global scheduler_thread
-
-    if scheduler_thread and scheduler_thread.is_alive():
-        flash('Scheduler is already running', 'info')
-        return redirect(url_for('scheduler_control'))
-
-    try:
-        # Start new thread with CORRECT function name
-        scheduler_thread = threading.Thread(
-            target=run_scheduler,
-            daemon=True, 
-            name="SchedulerThread"
-        )
-        scheduler_thread.start()
-
-        time.sleep(1)
-
-        if scheduler_thread.is_alive():
-            flash('✅ Scheduler started successfully', 'success')
-        else:
-            flash('❌ Scheduler failed to start', 'error')
-
-    except Exception as e:
-        flash(f'Error starting scheduler: {str(e)}', 'error')
-
-    return redirect(url_for('scheduler_control'))
-
-
-@app.route('/stop_scheduler')
-@login_required
-def stop_scheduler():
-    """Stop the scheduler"""
-    if current_user.email != 'josh.matern@gmail.com':
-        return "Unauthorized", 403
-
-    import schedule
-
-    try:
-        # Clear all jobs
-        schedule.clear()
-
-        # Set environment variable to stop the thread
-        os.environ['ENABLE_SCHEDULER'] = 'false'
-
-        flash('✅ Scheduler stopped. Thread will exit on next cycle (within 5 minutes)', 'success')
-
-    except Exception as e:
-        flash(f'Error stopping scheduler: {str(e)}', 'error')
-
-    return redirect(url_for('scheduler_control'))
-
-
-@app.route('/clear_scheduled_jobs')
-@login_required
-def clear_scheduled_jobs():
-    """Clear all scheduled jobs"""
-    if current_user.email != 'josh.matern@gmail.com':
-        return "Unauthorized", 403
-
-    import schedule
-
-    try:
-        job_count = len(schedule.jobs)
-        schedule.clear()
-        flash(f'✅ Cleared {job_count} scheduled jobs', 'success')
-    except Exception as e:
-        flash(f'Error clearing jobs: {str(e)}', 'error')
-
-    return redirect(url_for('scheduler_control'))
-
-@app.route('/scheduler_status')
-def scheduler_status():
-    """Public endpoint to check scheduler status and restart if needed"""
-    global scheduler_thread, scheduler_running
-
-    scheduler_enabled = os.environ.get('ENABLE_SCHEDULER', 'true').lower() == 'true'
-
-    if not scheduler_enabled:
-        return jsonify({
-            'status': 'disabled',
-            'message': 'Scheduler is disabled by configuration',
-            'healthy': True
-        })
-
-    # Check if thread is alive
-    if scheduler_thread and scheduler_thread.is_alive():
-        return jsonify({
-            'status': 'running',
-            'thread_alive': True,
-            'healthy': True,
-            'message': 'Scheduler is running normally'
-        })
-    else:
-        # Try to restart it
-        print("⚠️ Scheduler not running, attempting to restart...")
-
-        if ensure_scheduler_running():
-            return jsonify({
-                'status': 'restarted',
-                'thread_alive': True,
-                'healthy': True,
-                'message': 'Scheduler was down but has been restarted'
-            })
-        else:
-            return jsonify({
-                'status': 'failed',
-                'thread_alive': False,
-                'healthy': False,
-                'message': 'Scheduler is down and could not be restarted'
-            }), 503
-
-@app.errorhandler(404)
-def bad_request(error):
-    return render_template('errors/404.html'), 404
-
-@app.before_first_request
-def startup_tasks():
-    """Run startup tasks on first request - ensures scheduler starts"""
-    global scheduler_initialized, scheduler_thread, scheduler_running
-
-    if not scheduler_initialized:
-        print("🚀 FIRST REQUEST - Initializing scheduler...")
-
-        scheduler_enabled = os.environ.get('ENABLE_SCHEDULER', 'true').lower() == 'true'
-
-        if scheduler_enabled:
-            # Check if thread exists and is alive
-            if scheduler_thread and scheduler_thread.is_alive():
-                print("✅ Scheduler already running")
-            else:
-                print("📅 Starting scheduler thread...")
-                try:
-                    scheduler_thread = threading.Thread(
-                        target=run_scheduler,
-                        daemon=True,
-                        name="PerProductScheduler"
-                    )
-                    scheduler_thread.start()
-
-                    # Wait a moment to verify it started
-                    time.sleep(2)
-
-                    if scheduler_thread.is_alive():
-                        print("✅ Scheduler thread started successfully!")
-                        scheduler_running = True
-                    else:
-                        print("❌ Scheduler thread failed to start!")
-                        scheduler_running = False
-
-                except Exception as e:
-                    print(f"❌ Error starting scheduler: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    scheduler_running = False
-        else:
-            print("⚠️ Scheduler disabled via ENABLE_SCHEDULER environment variable")
-
-        scheduler_initialized = True
-
-# Also add a manual check to ensure scheduler is running
-@app.route('/ensure_scheduler')
-@login_required
-def ensure_scheduler_endpoint():
-    """Manually ensure scheduler is running - admin only"""
-    if current_user.email not in ['josh.matern@gmail.com', 'amazonscreenshottracker@gmail.com']:
-        return "Unauthorized", 403
-
-    global scheduler_thread, scheduler_running
-
-    html = "<h2>Scheduler Check</h2>"
-
-    # Check current status
-    if scheduler_thread and scheduler_thread.is_alive():
-        html += "<p style='color: green;'>✅ Scheduler is already running!</p>"
-    else:
-        html += "<p style='color: red;'>❌ Scheduler was not running. Starting it now...</p>"
-
-        if ensure_scheduler_running():
-            html += "<p style='color: green;'>✅ Scheduler started successfully!</p>"
-        else:
-            html += "<p style='color: red;'>❌ Failed to start scheduler</p>"
-
-    html += f"""
-    <br>
-    <p><strong>Thread object exists:</strong> {scheduler_thread is not None}</p>
-    <p><strong>Thread alive:</strong> {scheduler_thread.is_alive() if scheduler_thread else False}</p>
-    <p><strong>Scheduler running flag:</strong> {scheduler_running}</p>
-    <p><strong>ENABLE_SCHEDULER:</strong> {os.environ.get('ENABLE_SCHEDULER', 'Not set')}</p>
-    <br>
-    <a href="/credit_leak_detector">Check Leak Detector</a> | 
-    <a href="/dashboard">Dashboard</a>
-    """
-
-    return html
-
-
-@app.errorhandler(CSRFError)
-def handle_csrf_error(e):
-    flash('The form submission has expired. Please try again.', 'error')
-    return redirect(request.referrer or url_for('index'))
-
-@app.route('/csrf-test')
-def csrf_test():
-    return """
-    <form method="POST" action="/csrf-test-post">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-        <button type="submit">Test CSRF</button>
-    </form>
-    """
-
-@app.route('/csrf-test-post', methods=['POST'])
-def csrf_test_post():
-    return "CSRF token validated successfully!"
-
-class EmailNotifier:
-    """Handle all email notifications for the application with timeout protection"""
-    def __init__(self):
-        self.smtp_server = SMTP_SERVER
-        self.smtp_port = SMTP_PORT
-        self.username = SMTP_USERNAME
-        self.password = SMTP_PASSWORD
-        self.sender_email = SENDER_EMAIL
-        self.sender_name = SENDER_NAME
-        self.timeout = 10  # 10 second timeout for SMTP operations
-
-    def is_configured(self):
-        """Check if email settings are configured"""
-        return all([self.smtp_server, self.username, self.password])
-
-    def send_email(self, recipient, subject, html_content, attachments=None):
-        """Generic email sending method with timeout protection"""
-        if not self.is_configured():
-            print("❌ Email settings not configured")
-            return False
-
-        try:
-            msg = MIMEMultipart('related')
-            msg['Subject'] = subject
-            msg['From'] = formataddr((self.sender_name, self.sender_email or 'default@example.com'))
-            msg['To'] = recipient
-
-            # Attach HTML content
-            msg.attach(MIMEText(html_content, 'html'))
-
-            # Add attachments if any
-            if attachments:
-                for attachment in attachments:
-                    msg.attach(attachment)
-
-            # Send email with timeout
-            import socket
-            original_timeout = socket.getdefaulttimeout()
-            socket.setdefaulttimeout(self.timeout)
-
-            try:
-                with smtplib.SMTP(self.smtp_server, self.smtp_port, timeout=self.timeout) as server:
-                    server.starttls()
-                    if not self.username or not self.password:
-                        raise ValueError("SMTP username or password is not configured")
-                    server.login(self.username, self.password)
-                    server.send_message(msg)
-
-                print(f"✅ Email sent successfully to {recipient}")
-                return True
-
-            finally:
-                socket.setdefaulttimeout(original_timeout)
-
-        except smtplib.SMTPServerDisconnected:
-            print(f"❌ SMTP server disconnected while sending to {recipient}")
-            return False
-        except smtplib.SMTPConnectError:
-            print(f"❌ Could not connect to SMTP server")
-            return False
-        except socket.timeout:
-            print(f"❌ Email sending timed out after {self.timeout} seconds")
-            return False
-        except Exception as e:
-            print(f"❌ Failed to send email: {e}")
-            return False
-
-    def send_verification_email_async(self, email, token):
-        """Send verification email in background thread"""
-        import threading
-
-        def _send():
-            self.send_verification_email(email, token)
-
-        thread = threading.Thread(target=_send, daemon=True)
-        thread.start()
-        return True  # Return immediately
-
-    def send_verification_email(self, email, token):
-        """Send email verification link"""
-        try:
-            base_url = request.host_url.rstrip('/')
-        except RuntimeError:
-            base_url = os.environ.get('APP_URL', 'http://localhost:5000')
-
-        verification_link = f"{base_url}/auth/verify_email?token={token}"
-
-        # Get the reusable footer
-        footer = self.get_email_footer()
-
-        html_content = f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <style>
-                body {{
-                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-                    line-height: 1.6;
-                    color: #333;
-                    max-width: 600px;
-                    margin: 0 auto;
-                    padding: 20px;
-                }}
-                .container {{
-                    background-color: #f8f9fa;
-                    border-radius: 10px;
-                    padding: 30px;
-                }}
-                .header {{
-                    text-align: center;
-                    margin-bottom: 30px;
-                }}
-                .header h1 {{
-                    color: #232f3e;
-                    margin-bottom: 10px;
-                }}
-                .button {{
-                    display: inline-block;
-                    padding: 14px 30px;
-                    background-color: #ff9900;
-                    color: white;
-                    text-decoration: none;
-                    border-radius: 5px;
-                    font-weight: bold;
-                    margin: 20px 0;
-                }}
-                .warning {{
-                    background-color: #fff3cd;
-                    border: 1px solid #ffeaa7;
-                    padding: 10px;
-                    border-radius: 5px;
-                    margin-top: 20px;
-                }}
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="header">
-                    <h1>🏆 Welcome to Amazon Screenshot Tracker!</h1>
-                    <p>You're just one click away from tracking your Amazon success</p>
-                </div>
-
-                <p>Hi there!</p>
-
-                <p>Thanks for joining our beta! Please verify your email address to start monitoring your Amazon products and capturing those valuable ranking screenshots.</p>
-
-                <div style="text-align: center;">
-                    <a href="{verification_link}" class="button">Verify Email Address</a>
-                </div>
-
-                <p>Or copy and paste this link into your browser:</p>
-                <p style="word-break: break-all; background-color: #f5f5f5; padding: 10px; border-radius: 5px;">
-                    {verification_link}
-                </p>
-
-                <div class="warning">
-                    <strong>⏰ This link expires in 24 hours</strong><br>
-                    If you didn't create an account, you can safely ignore this email.
-                </div>
-
-                {footer}
-            </div>
-        </body>
-        </html>
-        """
-
-        return self.send_email(
-            email,
-            "[Beta] Verify Your Email - Amazon Screenshot Tracker",
-            html_content
-        )
-
-    def get_email_footer(self):
-        """Reusable professional email footer for all emails"""
-        return """
-        <div style="margin-top: 40px; padding-top: 20px; border-top: 2px solid #eee;">
-            <div style="text-align: center; color: #666; font-size: 14px;">
-                <p><strong>Amazon Screenshot Tracker</strong> - Currently in Beta 🚀</p>
-                <p style="font-size: 12px; margin: 10px 0;">
-                    This is an automated notification. Please do not reply to this email.
-                </p>
-                <p style="font-size: 12px;">
-                    Questions or feedback? Email us at: 
-                    <a href="mailto:support@amazonscreenshottracker.com" style="color: #ff9900;">
-                        support@amazonscreenshottracker.com
-                    </a>
-                </p>
-                <div style="margin-top: 15px; font-size: 11px; color: #999;">
-                    <p>
-                        <a href="#" style="color: #999;">Unsubscribe</a> | 
-                        <a href="#" style="color: #999;">Email Preferences</a> | 
-                        <a href="#" style="color: #999;">Privacy Policy</a>
-                    </p>
-                    <p style="margin-top: 10px;">
-                        © 2025 Amazon Screenshot Tracker. Not affiliated with Amazon.com, Inc.<br>
-                        Amazon is a trademark of Amazon.com, Inc.
-                    </p>
-                </div>
-            </div>
-        </div>
-        """
-
-    def send_password_reset_email(self, email, token):
-        """Send password reset email"""
-        try:
-            base_url = request.host_url.rstrip('/')
-        except RuntimeError:
-            base_url = os.environ.get('APP_URL', 'http://localhost:5000')
-
-        reset_link = f"{base_url}/auth/reset_password?token={token}"
-
-        # Get the reusable footer
-        footer = self.get_email_footer()
-
-        html_content = f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <style>
-                body {{
-                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-                    line-height: 1.6;
-                    color: #333;
-                    max-width: 600px;
-                    margin: 0 auto;
-                    padding: 20px;
-                }}
-                .container {{
-                    background-color: #f8f9fa;
-                    border-radius: 10px;
-                    padding: 30px;
-                }}
-                .header {{
-                    text-align: center;
-                    margin-bottom: 30px;
-                }}
-                .header h1 {{
-                    color: #232f3e;
-                }}
-                .button {{
-                    display: inline-block;
-                    padding: 14px 30px;
-                    background-color: #ff9900;
-                    color: white;
-                    text-decoration: none;
-                    border-radius: 5px;
-                    font-weight: bold;
-                    margin: 20px 0;
-                }}
-                .warning {{
-                    background-color: #fff3cd;
-                    border: 1px solid #ffeaa7;
-                    padding: 10px;
-                    border-radius: 5px;
-                    margin-top: 20px;
-                }}
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="header">
-                    <h1>🔐 Password Reset Request</h1>
-                </div>
-
-                <p>Hi there!</p>
-
-                <p>We received a request to reset your password for your Amazon Screenshot Tracker account.</p>
-
-                <div style="text-align: center;">
-                    <a href="{reset_link}" class="button">Reset Password</a>
-                </div>
-
-                <p>Or copy and paste this link into your browser:</p>
-                <p style="word-break: break-all; background-color: #f5f5f5; padding: 10px; border-radius: 5px;">
-                    {reset_link}
-                </p>
-
-                <div class="warning">
-                    <strong>⏰ This link expires in 1 hour</strong><br>
-                    If you didn't request a password reset, you can safely ignore this email. Your password won't be changed.
-                </div>
-
-                {footer}
-            </div>
-        </body>
-        </html>
-        """
-
-        return self.send_email(
-            email,
-            "[Beta] Password Reset - Amazon Screenshot Tracker",
-            html_content
-        )
-
-    def send_bestseller_notification(self, recipient_email, product_info, screenshot_data, achievement_type='bestseller'):
-        """Send email notification with bestseller screenshot attached"""
-
-        # Get the reusable footer
-        footer = self.get_email_footer()
-
-        if achievement_type == 'bestseller':
-            rank_text = f"#{product_info['rank']}" if product_info['rank'] else "Bestseller"
-            category_text = f" in {product_info['category']}" if product_info['category'] else ""
-            achievement_text = f"achieved {rank_text}{category_text}"
-        else:
-            achievement_text = f"reached your target rank in {achievement_type}"
-
-        html_content = f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <style>
-                body {{
-                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-                    line-height: 1.6;
-                    color: #333;
-                    max-width: 600px;
-                    margin: 0 auto;
-                    padding: 20px;
-                }}
-                .header {{
-                    background-color: #ff9900;
-                    color: white;
-                    padding: 30px;
-                    text-align: center;
-                    border-radius: 10px 10px 0 0;
-                }}
-                .content {{
-                    background-color: #f8f9fa;
-                    padding: 30px;
-                    border-radius: 0 0 10px 10px;
-                }}
-                .achievement-box {{
-                    background-color: white;
-                    padding: 20px;
-                    border-radius: 8px;
-                    margin: 20px 0;
-                    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-                }}
-                .product-title {{
-                    font-size: 18px;
-                    font-weight: bold;
-                    color: #232f3e;
-                    margin-bottom: 10px;
-                }}
-                .rank-display {{
-                    font-size: 36px;
-                    font-weight: bold;
-                    color: #ff9900;
-                    margin: 10px 0;
-                }}
-                .screenshot-preview {{
-                    margin: 20px 0;
-                    text-align: center;
-                }}
-                .screenshot-preview img {{
-                    max-width: 100%;
-                    border: 2px solid #ddd;
-                    border-radius: 8px;
-                    max-height: 400px;
-                }}
-            </style>
-        </head>
-        <body>
-            <div class="header">
-                <h1>🏆 [Beta] Achievement Unlocked!</h1>
-            </div>
-            <div class="content">
-                <p>Congratulations! Your product has {achievement_text}!</p>
-
-                <div class="achievement-box">
-                    <div class="product-title">{product_info['title']}</div>
-                    <div class="rank-display">#{product_info['rank'] or '1'}</div>
-                    <div>in {product_info['category'] or 'its category'}</div>
-                    <div style="color: #666; margin-top: 10px;">
-                        Achieved on: {datetime.now().strftime('%B %d, %Y at %I:%M %p')}
-                    </div>
-                </div>
-
-                <div class="screenshot-preview">
-                    <h3>Screenshot Evidence</h3>
-                    <p>We've captured a screenshot of your achievement! The full-size image is attached to this email.</p>
-                    <img src="cid:screenshot" alt="Achievement Screenshot">
-                </div>
-
-                <div style="margin-top: 30px; padding: 20px; background-color: #e8f4f8; border-radius: 8px;">
-                    <h3 style="color: #232f3e; margin-top: 0;">🎯 Keep Going!</h3>
-                    <p>Track more products and never miss another achievement:</p>
-                    <div style="text-align: center; margin-top: 15px;">
-                        <a href="{os.environ.get('APP_URL', '#')}/dashboard" 
-                           style="display: inline-block; padding: 12px 30px; background-color: #ff9900; 
-                                  color: white; text-decoration: none; border-radius: 5px; font-weight: bold;">
-                            View Dashboard
-                        </a>
-                    </div>
-                </div>
-
-                {footer}
-            </div>
-        </body>
-        </html>
-        """
-
-        attachments = []
-        if screenshot_data:
-            # Decode base64 screenshot data
-            if screenshot_data.startswith('data:image'):
-                screenshot_data = screenshot_data.split(',')[1]
-
-            img_data = base64.b64decode(screenshot_data)
-
-            # Create image attachment
-            img = MIMEImage(img_data)
-            img.add_header('Content-ID', '<screenshot>')
-            img.add_header('Content-Disposition', 'attachment', 
-                         filename=f'achievement_screenshot_{product_info["title"][:30]}.png')
-            attachments.append(img)
-
-        return self.send_email(
-            recipient_email,
-            f"[Beta] 🏆 Achievement: {product_info['title'][:50]}...",
-            html_content,
-            attachments
-        )
-
-# Initialize email notifier AFTER the class definition
-email_notifier = EmailNotifier()
-
-# Print email configuration status
-if email_notifier.is_configured():
-    print("✅ Email notifications configured")
-else:
-    print("⚠️ Email notifications not configured - emails will not be sent")
-    print("To enable emails, set these environment variables:")
-    print("  - SMTP_SERVER")
-    print("  - SMTP_USERNAME") 
-    print("  - SMTP_PASSWORD")
-
-class APIKeyEncryption:
-    def __init__(self):
-        # Generate a key from your secret
-        secret = app.config['SECRET_KEY'].encode()
-        self.cipher = Fernet(base64.urlsafe_b64encode(secret[:32].ljust(32, b'0')))
-
-    def encrypt(self, api_key):
-        """Encrypt API key before storing"""
-        if not api_key:
-            return None
-        return self.cipher.encrypt(api_key.encode()).decode()
-
-    def decrypt(self, encrypted_key):
-        """Decrypt API key for use"""
-        if not encrypted_key:
-            return None
-        return self.cipher.decrypt(encrypted_key.encode()).decode()
-
-# Initialize encryption
-api_encryption = APIKeyEncryption()
-
-def get_db_type():
-    """Determine if using PostgreSQL or SQLite"""
-    return 'postgresql' if os.environ.get('DATABASE_URL') else 'sqlite'
-
+# ============= CLASS DEFINITIONS =============
 class DatabaseManager:
     def __init__(self):
         # Only initialize if tables don't exist
@@ -1800,22 +972,1452 @@ class User(UserMixin):
         self.full_name = full_name
         self.is_verified = is_verified
         self._is_active = is_active  # Use private variable to avoid conflict
-        
+
     def get_id(self):
         """Return the user ID as a string for Fla"""
         return str(self.id)
-    
+
     @property
     def is_active(self):
         """Override is_active property"""
         return self._is_active
-    
+
     @is_active.setter
     def is_active(self, value):
         self._is_active = value
 
     def __repr__(self):
         return f'<User {self.email}>'
+
+class EmailNotifier:
+    """Handle all email notifications for the application with timeout protection"""
+    def __init__(self):
+        self.smtp_server = SMTP_SERVER
+        self.smtp_port = SMTP_PORT
+        self.username = SMTP_USERNAME
+        self.password = SMTP_PASSWORD
+        self.sender_email = SENDER_EMAIL
+        self.sender_name = SENDER_NAME
+        self.timeout = 10  # 10 second timeout for SMTP operations
+
+    def is_configured(self):
+        """Check if email settings are configured"""
+        return all([self.smtp_server, self.username, self.password])
+
+    def send_email(self, recipient, subject, html_content, attachments=None):
+        """Generic email sending method with timeout protection"""
+        if not self.is_configured():
+            print("❌ Email settings not configured")
+            return False
+
+        try:
+            msg = MIMEMultipart('related')
+            msg['Subject'] = subject
+            msg['From'] = formataddr((self.sender_name, self.sender_email or 'default@example.com'))
+            msg['To'] = recipient
+
+            # Attach HTML content
+            msg.attach(MIMEText(html_content, 'html'))
+
+            # Add attachments if any
+            if attachments:
+                for attachment in attachments:
+                    msg.attach(attachment)
+
+            # Send email with timeout
+            import socket
+            original_timeout = socket.getdefaulttimeout()
+            socket.setdefaulttimeout(self.timeout)
+
+            try:
+                with smtplib.SMTP(self.smtp_server, self.smtp_port, timeout=self.timeout) as server:
+                    server.starttls()
+                    if not self.username or not self.password:
+                        raise ValueError("SMTP username or password is not configured")
+                    server.login(self.username, self.password)
+                    server.send_message(msg)
+
+                print(f"✅ Email sent successfully to {recipient}")
+                return True
+
+            finally:
+                socket.setdefaulttimeout(original_timeout)
+
+        except smtplib.SMTPServerDisconnected:
+            print(f"❌ SMTP server disconnected while sending to {recipient}")
+            return False
+        except smtplib.SMTPConnectError:
+            print(f"❌ Could not connect to SMTP server")
+            return False
+        except socket.timeout:
+            print(f"❌ Email sending timed out after {self.timeout} seconds")
+            return False
+        except Exception as e:
+            print(f"❌ Failed to send email: {e}")
+            return False
+
+    def send_verification_email_async(self, email, token):
+        """Send verification email in background thread"""
+        import threading
+
+        def _send():
+            self.send_verification_email(email, token)
+
+        thread = threading.Thread(target=_send, daemon=True)
+        thread.start()
+        return True  # Return immediately
+
+    def send_verification_email(self, email, token):
+        """Send email verification link"""
+        try:
+            base_url = request.host_url.rstrip('/')
+        except RuntimeError:
+            base_url = os.environ.get('APP_URL', 'http://localhost:5000')
+
+        verification_link = f"{base_url}/auth/verify_email?token={token}"
+
+        # Get the reusable footer
+        footer = self.get_email_footer()
+
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+                body {{
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                    line-height: 1.6;
+                    color: #333;
+                    max-width: 600px;
+                    margin: 0 auto;
+                    padding: 20px;
+                }}
+                .container {{
+                    background-color: #f8f9fa;
+                    border-radius: 10px;
+                    padding: 30px;
+                }}
+                .header {{
+                    text-align: center;
+                    margin-bottom: 30px;
+                }}
+                .header h1 {{
+                    color: #232f3e;
+                    margin-bottom: 10px;
+                }}
+                .button {{
+                    display: inline-block;
+                    padding: 14px 30px;
+                    background-color: #ff9900;
+                    color: white;
+                    text-decoration: none;
+                    border-radius: 5px;
+                    font-weight: bold;
+                    margin: 20px 0;
+                }}
+                .warning {{
+                    background-color: #fff3cd;
+                    border: 1px solid #ffeaa7;
+                    padding: 10px;
+                    border-radius: 5px;
+                    margin-top: 20px;
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h1>🏆 Welcome to Amazon Screenshot Tracker!</h1>
+                    <p>You're just one click away from tracking your Amazon success</p>
+                </div>
+
+                <p>Hi there!</p>
+
+                <p>Thanks for joining our beta! Please verify your email address to start monitoring your Amazon products and capturing those valuable ranking screenshots.</p>
+
+                <div style="text-align: center;">
+                    <a href="{verification_link}" class="button">Verify Email Address</a>
+                </div>
+
+                <p>Or copy and paste this link into your browser:</p>
+                <p style="word-break: break-all; background-color: #f5f5f5; padding: 10px; border-radius: 5px;">
+                    {verification_link}
+                </p>
+
+                <div class="warning">
+                    <strong>⏰ This link expires in 24 hours</strong><br>
+                    If you didn't create an account, you can safely ignore this email.
+                </div>
+
+                {footer}
+            </div>
+        </body>
+        </html>
+        """
+
+        return self.send_email(
+            email,
+            "[Beta] Verify Your Email - Amazon Screenshot Tracker",
+            html_content
+        )
+
+    def get_email_footer(self):
+        """Reusable professional email footer for all emails"""
+        return """
+        <div style="margin-top: 40px; padding-top: 20px; border-top: 2px solid #eee;">
+            <div style="text-align: center; color: #666; font-size: 14px;">
+                <p><strong>Amazon Screenshot Tracker</strong> - Currently in Beta 🚀</p>
+                <p style="font-size: 12px; margin: 10px 0;">
+                    This is an automated notification. Please do not reply to this email.
+                </p>
+                <p style="font-size: 12px;">
+                    Questions or feedback? Email us at: 
+                    <a href="mailto:support@amazonscreenshottracker.com" style="color: #ff9900;">
+                        support@amazonscreenshottracker.com
+                    </a>
+                </p>
+                <div style="margin-top: 15px; font-size: 11px; color: #999;">
+                    <p>
+                        <a href="#" style="color: #999;">Unsubscribe</a> | 
+                        <a href="#" style="color: #999;">Email Preferences</a> | 
+                        <a href="#" style="color: #999;">Privacy Policy</a>
+                    </p>
+                    <p style="margin-top: 10px;">
+                        © 2025 Amazon Screenshot Tracker. Not affiliated with Amazon.com, Inc.<br>
+                        Amazon is a trademark of Amazon.com, Inc.
+                    </p>
+                </div>
+            </div>
+        </div>
+        """
+
+    def send_password_reset_email(self, email, token):
+        """Send password reset email"""
+        try:
+            base_url = request.host_url.rstrip('/')
+        except RuntimeError:
+            base_url = os.environ.get('APP_URL', 'http://localhost:5000')
+
+        reset_link = f"{base_url}/auth/reset_password?token={token}"
+
+        # Get the reusable footer
+        footer = self.get_email_footer()
+
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+                body {{
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                    line-height: 1.6;
+                    color: #333;
+                    max-width: 600px;
+                    margin: 0 auto;
+                    padding: 20px;
+                }}
+                .container {{
+                    background-color: #f8f9fa;
+                    border-radius: 10px;
+                    padding: 30px;
+                }}
+                .header {{
+                    text-align: center;
+                    margin-bottom: 30px;
+                }}
+                .header h1 {{
+                    color: #232f3e;
+                }}
+                .button {{
+                    display: inline-block;
+                    padding: 14px 30px;
+                    background-color: #ff9900;
+                    color: white;
+                    text-decoration: none;
+                    border-radius: 5px;
+                    font-weight: bold;
+                    margin: 20px 0;
+                }}
+                .warning {{
+                    background-color: #fff3cd;
+                    border: 1px solid #ffeaa7;
+                    padding: 10px;
+                    border-radius: 5px;
+                    margin-top: 20px;
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h1>🔐 Password Reset Request</h1>
+                </div>
+
+                <p>Hi there!</p>
+
+                <p>We received a request to reset your password for your Amazon Screenshot Tracker account.</p>
+
+                <div style="text-align: center;">
+                    <a href="{reset_link}" class="button">Reset Password</a>
+                </div>
+
+                <p>Or copy and paste this link into your browser:</p>
+                <p style="word-break: break-all; background-color: #f5f5f5; padding: 10px; border-radius: 5px;">
+                    {reset_link}
+                </p>
+
+                <div class="warning">
+                    <strong>⏰ This link expires in 1 hour</strong><br>
+                    If you didn't request a password reset, you can safely ignore this email. Your password won't be changed.
+                </div>
+
+                {footer}
+            </div>
+        </body>
+        </html>
+        """
+
+        return self.send_email(
+            email,
+            "[Beta] Password Reset - Amazon Screenshot Tracker",
+            html_content
+        )
+
+    def send_bestseller_notification(self, recipient_email, product_info, screenshot_data, achievement_type='bestseller'):
+        """Send email notification with bestseller screenshot attached"""
+
+        # Get the reusable footer
+        footer = self.get_email_footer()
+
+        if achievement_type == 'bestseller':
+            rank_text = f"#{product_info['rank']}" if product_info['rank'] else "Bestseller"
+            category_text = f" in {product_info['category']}" if product_info['category'] else ""
+            achievement_text = f"achieved {rank_text}{category_text}"
+        else:
+            achievement_text = f"reached your target rank in {achievement_type}"
+
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+                body {{
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                    line-height: 1.6;
+                    color: #333;
+                    max-width: 600px;
+                    margin: 0 auto;
+                    padding: 20px;
+                }}
+                .header {{
+                    background-color: #ff9900;
+                    color: white;
+                    padding: 30px;
+                    text-align: center;
+                    border-radius: 10px 10px 0 0;
+                }}
+                .content {{
+                    background-color: #f8f9fa;
+                    padding: 30px;
+                    border-radius: 0 0 10px 10px;
+                }}
+                .achievement-box {{
+                    background-color: white;
+                    padding: 20px;
+                    border-radius: 8px;
+                    margin: 20px 0;
+                    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                }}
+                .product-title {{
+                    font-size: 18px;
+                    font-weight: bold;
+                    color: #232f3e;
+                    margin-bottom: 10px;
+                }}
+                .rank-display {{
+                    font-size: 36px;
+                    font-weight: bold;
+                    color: #ff9900;
+                    margin: 10px 0;
+                }}
+                .screenshot-preview {{
+                    margin: 20px 0;
+                    text-align: center;
+                }}
+                .screenshot-preview img {{
+                    max-width: 100%;
+                    border: 2px solid #ddd;
+                    border-radius: 8px;
+                    max-height: 400px;
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="header">
+                <h1>🏆 [Beta] Achievement Unlocked!</h1>
+            </div>
+            <div class="content">
+                <p>Congratulations! Your product has {achievement_text}!</p>
+
+                <div class="achievement-box">
+                    <div class="product-title">{product_info['title']}</div>
+                    <div class="rank-display">#{product_info['rank'] or '1'}</div>
+                    <div>in {product_info['category'] or 'its category'}</div>
+                    <div style="color: #666; margin-top: 10px;">
+                        Achieved on: {datetime.now().strftime('%B %d, %Y at %I:%M %p')}
+                    </div>
+                </div>
+
+                <div class="screenshot-preview">
+                    <h3>Screenshot Evidence</h3>
+                    <p>We've captured a screenshot of your achievement! The full-size image is attached to this email.</p>
+                    <img src="cid:screenshot" alt="Achievement Screenshot">
+                </div>
+
+                <div style="margin-top: 30px; padding: 20px; background-color: #e8f4f8; border-radius: 8px;">
+                    <h3 style="color: #232f3e; margin-top: 0;">🎯 Keep Going!</h3>
+                    <p>Track more products and never miss another achievement:</p>
+                    <div style="text-align: center; margin-top: 15px;">
+                        <a href="{os.environ.get('APP_URL', '#')}/dashboard" 
+                           style="display: inline-block; padding: 12px 30px; background-color: #ff9900; 
+                                  color: white; text-decoration: none; border-radius: 5px; font-weight: bold;">
+                            View Dashboard
+                        </a>
+                    </div>
+                </div>
+
+                {footer}
+            </div>
+        </body>
+        </html>
+        """
+
+        attachments = []
+        if screenshot_data:
+            # Decode base64 screenshot data
+            if screenshot_data.startswith('data:image'):
+                screenshot_data = screenshot_data.split(',')[1]
+
+            img_data = base64.b64decode(screenshot_data)
+
+            # Create image attachment
+            img = MIMEImage(img_data)
+            img.add_header('Content-ID', '<screenshot>')
+            img.add_header('Content-Disposition', 'attachment', 
+                         filename=f'achievement_screenshot_{product_info["title"][:30]}.png')
+            attachments.append(img)
+
+        return self.send_email(
+            recipient_email,
+            f"[Beta] 🏆 Achievement: {product_info['title'][:50]}...",
+            html_content,
+            attachments
+        )
+
+class APIKeyEncryption:
+    def __init__(self):
+        # Generate a key from your secret
+        secret = app.config['SECRET_KEY'].encode()
+        self.cipher = Fernet(base64.urlsafe_b64encode(secret[:32].ljust(32, b'0')))
+
+    def encrypt(self, api_key):
+        """Encrypt API key before storing"""
+        if not api_key:
+            return None
+        return self.cipher.encrypt(api_key.encode()).decode()
+
+    def decrypt(self, encrypted_key):
+        """Decrypt API key for use"""
+        if not encrypted_key:
+            return None
+        return self.cipher.decrypt(encrypted_key.encode()).decode()
+
+class AmazonMonitor:
+    def __init__(self, api_key=None):
+        self.api_key = api_key or SCRAPINGBEE_API_KEY
+
+    @classmethod
+    def for_user(cls, user_id):
+        """Create monitor instance with user's API key"""
+        conn = get_db()
+        cursor = conn.cursor()
+
+        try:
+            if get_db_type() == 'postgresql':
+                cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = %s', (user_id,))
+            else:
+                cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = ?', (user_id,))
+
+            result = cursor.fetchone()
+
+            if result:
+                if isinstance(result, dict):
+                    encrypted_key = result.get('scrapingbee_api_key')
+                else:
+                    encrypted_key = result[0] if result else None
+            else:
+                encrypted_key = None
+
+            conn.close()
+
+            if encrypted_key:
+                try:
+                    decrypted_key = api_encryption.decrypt(encrypted_key)
+                    print(f"✅ Using user-specific API key for user {user_id}")
+                    return cls(decrypted_key)
+                except Exception as e:
+                    print(f"❌ Error decrypting API key for user {user_id}: {e}")
+
+            print(f"⚠️ No user-specific API key found for user {user_id}. Using system default.")
+            return cls()
+
+        except Exception as e:
+            print(f"❌ Error retrieving API key for user {user_id}: {e}")
+            if conn:
+                conn.close()
+            return cls()
+
+    def scrape_amazon_page(self, url):
+        """Use ScrapingBee to scrape Amazon page and take screenshot - FULLY FIXED"""
+        if not self.api_key:
+            print("❌ ScrapingBee API key not configured")
+            return {'success': False, 'error': 'ScrapingBee API key not configured', 'html': '', 'screenshot': None}
+
+        try:
+            print(f"🔄 Starting ScrapingBee request for: {url}")
+            print(f"🔑 Using API key: {self.api_key[:10]}...")
+
+            # Use json_response to get both HTML and screenshot
+            params = {
+                'api_key': self.api_key,
+                'url': url,
+                'render_js': 'true',  # Required for screenshots
+                'screenshot': 'true',  # Enable screenshot
+                'json_response': 'true',  # Get JSON response with both HTML and screenshot
+                'screenshot_full_page': 'false',
+                'wait': '3000',
+                'premium_proxy': 'true',
+                'country_code': 'us',
+            }
+
+            print("📤 Making request to ScrapingBee with screenshot enabled...")
+            response = requests.get(SCRAPINGBEE_URL, params=params, timeout=60)
+
+            print(f"📥 ScrapingBee response status: {response.status_code}")
+
+            if response.status_code == 200:
+                print("✅ ScrapingBee request successful")
+
+                try:
+                    # With json_response=true, we get a JSON object
+                    response_data = response.json()
+
+                    html_content = response_data.get('body', '')
+                    screenshot_data = response_data.get('screenshot', '')
+
+                    print(f"📄 HTML content length: {len(html_content) if html_content else 0} characters")
+                    print(f"📸 Screenshot data present: {'Yes' if screenshot_data else 'No'}")
+
+                    if screenshot_data:
+                        print(f"📸 Screenshot size: {len(screenshot_data)} characters")
+                        # The screenshot is already base64 encoded
+                        if not screenshot_data.startswith('data:'):
+                            # Ensure it's just the base64 data, no data URI prefix
+                            screenshot_data = screenshot_data.replace('data:image/png;base64,', '')
+
+                    return {
+                        'html': html_content or '',
+                        'screenshot': screenshot_data if screenshot_data else None,
+                        'success': True
+                    }
+
+                except json.JSONDecodeError as e:
+                    print(f"⚠️ JSON decode error, trying alternative method: {e}")
+                    # Fallback to non-JSON response
+                    return {
+                        'html': response.text,
+                        'screenshot': response.headers.get('Spb-Screenshot'),
+                        'success': True
+                    }
+
+            else:
+                error_msg = f'HTTP {response.status_code}: {response.text[:500]}'
+                print(f"❌ ScrapingBee error: {error_msg}")
+
+                # Check for specific errors
+                if response.status_code == 401:
+                    error_msg = "Invalid API key. Please check your ScrapingBee API key."
+                elif response.status_code == 429:
+                    error_msg = "Rate limit reached. Please wait and try again."
+                elif response.status_code == 402:
+                    error_msg = "Insufficient credits. Please check your ScrapingBee account."
+
+                return {'success': False, 'error': error_msg, 'html': '', 'screenshot': None}
+
+        except requests.exceptions.Timeout:
+            error_msg = 'ScrapingBee request timed out (60s)'
+            print(f"⏰ {error_msg}")
+            return {'success': False, 'error': error_msg, 'html': '', 'screenshot': None}
+        except Exception as e:
+            error_msg = f'ScrapingBee request failed: {str(e)}'
+            print(f"💥 {error_msg}")
+            import traceback
+            traceback.print_exc()
+            return {'success': False, 'error': error_msg, 'html': '', 'screenshot': None}
+
+    def extract_product_info(self, html):
+        """Extract product ranking and bestseller info from Amazon HTML - FIXED"""
+        if not html:
+            print("⚠️ No HTML content to extract from")
+            return {
+                'title': 'Product Title Loading...',
+                'rank': None,
+                'category': '',
+                'is_bestseller': False,
+                'bestseller_categories': []
+            }
+
+        soup = BeautifulSoup(html, 'html.parser')
+
+        product_info = {
+            'title': '',
+            'rank': None,
+            'category': '',
+            'is_bestseller': False,
+            'bestseller_categories': []
+        }
+
+        try:
+            print("🔍 Starting HTML parsing...")
+
+            # Extract title - multiple methods
+            title_selectors = [
+                ('span', {'id': 'productTitle'}),
+                ('h1', {'id': 'title'}),
+                ('h1', {'class': 'a-size-large'}),
+                ('span', {'class': 'a-size-large product-title-word-break'})
+            ]
+
+            for tag, attrs in title_selectors:
+                title_element = soup.find(tag, attrs)
+                if title_element:
+                    product_info['title'] = ' '.join(title_element.stripped_strings)
+                    print(f"📋 Found title: {product_info['title'][:100]}...")
+                    break
+
+            if not product_info['title']:
+                # Try meta tags
+                meta_title = soup.find('meta', {'property': 'og:title'})
+                if meta_title and meta_title.get('content'):
+                    product_info['title'] = meta_title['content']
+                    print(f"📋 Found title in meta: {product_info['title'][:100]}...")
+                else:
+                    product_info['title'] = 'Unknown Product'
+                    print("⚠️ Could not find product title")
+
+            # Look for bestseller badges
+            print("🔍 Searching for bestseller indicators...")
+
+            # Check for bestseller badges
+            badge_patterns = [
+                'best seller',
+                'best-seller', 
+                'bestseller',
+                '#1 best seller',
+                'amazon\'s choice'
+            ]
+
+            for element in soup.find_all(['span', 'div', 'a'], class_=lambda x: x and 'badge' in x.lower()):
+                text = element.get_text().strip().lower()
+                for pattern in badge_patterns:
+                    if pattern in text:
+                        product_info['is_bestseller'] = True
+                        print(f"🏆 Found bestseller badge: {text}")
+                        break
+
+            # Extract ranking - search entire page
+            print("🔍 Searching for ranking information...")
+
+            # Look for "Best Sellers Rank"
+            page_text = soup.get_text()
+
+            # Multiple patterns for rank extraction
+            rank_patterns = [
+                r'Best Sellers Rank[:\s]*#?([\d,]+)\s+in\s+([^(\n]+)',
+                r'Amazon Best Sellers Rank[:\s]*#?([\d,]+)\s+in\s+([^(\n]+)',
+                r'#([\d,]+)\s+in\s+([^(\n#]+)'
+            ]
+
+            for pattern in rank_patterns:
+                matches = re.findall(pattern, page_text, re.IGNORECASE)
+                if matches:
+                    for match in matches:
+                        rank_num = match[0].replace(',', '').strip()
+                        category = match[1].strip()
+
+                        if rank_num.isdigit() and len(category) > 2:
+                            product_info['rank'] = rank_num
+                            product_info['category'] = category.split('(')[0].strip()
+                            print(f"📈 Found rank: #{rank_num} in {product_info['category']}")
+
+                            if rank_num == '1':
+                                product_info['is_bestseller'] = True
+                                print("🏆 Product is #1 - marking as bestseller!")
+                            break
+
+                    if product_info['rank']:
+                        break
+
+            # If no rank found, try more specific selectors
+            if not product_info['rank']:
+                rank_elements = soup.find_all(text=re.compile(r'#\d+\s+in', re.I))
+                for elem in rank_elements[:5]:
+                    if elem and elem.strip():
+                        match = re.search(r'#([\d,]+)\s+in\s+([^(\n]+)', elem)
+                        if match:
+                            product_info['rank'] = match.group(1).replace(',', '')
+                            product_info['category'] = match.group(2).strip()
+                            print(f"📈 Found rank in element: #{product_info['rank']} in {product_info['category']}")
+                            break
+
+        except Exception as e:
+            print(f"❌ Error extracting product info: {e}")
+            import traceback
+            traceback.print_exc()
+
+        print(f"📊 Final product info: Title='{product_info['title'][:50]}...', Rank={product_info['rank']}, Category={product_info['category']}")
+        return product_info
+
+    def extract_category_from_text(self, text):
+        """Extract category from text containing bestseller information"""
+        try:
+            if text:
+                # Look for "in [Category]" pattern
+                category_match = re.search(r'in (.+?)(?:\s|$)', text)
+                if category_match:
+                    return category_match.group(1).strip()
+
+        except Exception as e:
+            print(f"Error extracting category from text: {e}")
+        return None
+
+    def check_category_achievements(self, product_id, product_info, current_rank, current_category):
+        """Check if product has achieved target category rankings"""
+        conn = sqlite3.connect('amazon_monitor.db')
+        cursor = conn.cursor()
+
+        # Get all target categories for this product
+        cursor.execute('''
+            SELECT id, category_name, target_rank, best_rank_achieved
+            FROM target_categories 
+            WHERE product_id = ? AND is_achieved = 0
+        ''', (product_id,))
+
+        target_categories = cursor.fetchall()
+        achievements = []
+
+        for target_id, target_category, target_rank, best_rank in target_categories:
+            # Check if current category matches (case-insensitive partial match)
+            if target_category.lower() in current_category.lower():
+                current_rank_num = int(current_rank) if current_rank else None
+
+                if current_rank_num:
+                    # Update best rank if this is better
+                    if not best_rank or current_rank_num < best_rank:
+                        cursor.execute('''
+                            UPDATE target_categories 
+                            SET best_rank_achieved = ? 
+                            WHERE id = ?
+                        ''', (current_rank_num, target_id))
+
+                    # Check if target achieved
+                    if current_rank_num <= target_rank:
+                        cursor.execute('''
+                            UPDATE target_categories 
+                            SET is_achieved = 1, date_achieved = ? 
+                            WHERE id = ?
+                        ''', (datetime.now(), target_id))
+
+                        achievements.append({
+                            'category': target_category,
+                            'rank': current_rank_num,
+                            'target_rank': target_rank
+                        })
+
+                        print(f"🎯 Target achieved! #{current_rank_num} in {target_category}")
+
+        conn.commit()
+        conn.close()
+
+        return achievements
+
+# ============= INITIALIZE COMPONENTS =============
+db_manager = DatabaseManager()
+email_notifier = EmailNotifier()
+api_encryption = APIKeyEncryption()
+monitor = AmazonMonitor(SCRAPINGBEE_API_KEY)
+
+# ============= REGISTER BLUEPRINTS =============
+app.register_blueprint(auth, url_prefix='/auth')
+
+# ============= ERROR HANDLERS =============
+@app.errorhandler(404)
+def bad_request(error):
+    return render_template('errors/404.html'), 404
+
+@app.errorhandler(CSRFError)
+def handle_csrf_error(e):
+    flash('The form submission has expired. Please try again.', 'error')
+    return redirect(request.referrer or url_for('index'))
+
+@app.errorhandler(429)
+def rate_limit_handler(e):
+    """Handle rate limit exceeded errors"""
+    flash('Rate limit exceeded. Please wait a moment and try again.', 'warning')
+    return redirect(request.referrer or url_for('dashboard'))
+
+# ============= SECURITY HEADERS =============
+@app.after_request
+def security_headers(response):
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['X-XSS-Protection'] = '1; mode=block'
+    response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
+    return response
+
+# ============= ROUTES =============
+
+def initialize_app():
+    """Initialize the application and start scheduler"""
+    print("🚀 Initializing Amazon Bestseller Monitor...")
+
+
+    # Start scheduler
+    if ensure_scheduler_running():
+        print("✅ Scheduler started successfully during app initialization")
+    else:
+        print("⚠️ Scheduler will start on first request")
+
+    return app
+
+# Initialize scheduler when module loads (for gunicorn)
+# This should work even if before_first_request doesn't exist
+print("🔧 Checking Flask version and initializing scheduler...")
+print(f"Flask version: {flask.__version__ if 'flask' in dir() else 'Unknown'}")
+
+# Try to start scheduler immediately when module loads
+try:
+    if os.environ.get('ENABLE_SCHEDULER', 'true').lower() == 'true':
+        print("📅 Attempting to start scheduler on module load...")
+        ensure_scheduler_running()
+except Exception as e:
+    print(f"⚠️ Could not start scheduler on module load: {e}")
+    print("Scheduler will start on first request instead")
+
+
+def get_insert_id(cursor, conn):
+    """Get last insert ID for both databases"""
+    database_url = os.environ.get('DATABASE_URL')
+
+    if database_url:
+        # PostgreSQL: Use RETURNING
+        # This function should be called differently for PostgreSQL
+        return None  # Handle with RETURNING clause
+    else:
+        # SQLite
+        return cursor.lastrowid
+
+def execute_with_returning(cursor, query, params=None):
+    """Execute INSERT and return ID for PostgreSQL compatibility"""
+    database_url = os.environ.get('DATABASE_URL')
+
+    if database_url:
+        # PostgreSQL: Add RETURNING id
+        if query.strip().upper().startswith('INSERT') and 'RETURNING' not in query.upper():
+            query += ' RETURNING id'
+
+        if params:
+            cursor.execute(query, params)
+        else:
+            cursor.execute(query)
+
+        # Get the returned ID
+        result = cursor.fetchone()
+        return result['id'] if result else None
+    else:
+        # SQLite: Regular insert
+        if params:
+            cursor.execute(query, params)
+        else:
+            cursor.execute(query)
+        return cursor.lastrowid
+
+if not app.secret_key:
+    raise ValueError("FLASK_SECRET_KEY must be set in environment variables!")
+
+# CSRF Protection
+app.config['WTF_CSRF_TIME_LIMIT'] = None  # No time limit
+app.config['WTF_CSRF_CHECK_DEFAULT'] = True
+print(f"CSRF Enabled: {app.config.get('WTF_CSRF_ENABLED', 'Not Set')}")
+print(f"Secret Key Length: {len(app.config['SECRET_KEY'])}")
+
+csp = {
+    'default-src': [
+        '\'self\'',
+        'https://cdnjs.cloudflare.com',  # For any CDN resources
+        'https://app.scrapingbee.com',  # For ScrapingBee
+    ],
+    'img-src': [
+        '\'self\'',
+        'data:',
+        'https:',
+        'blob:',
+    ],
+    'script-src': [
+        '\'self\'',
+        '\'unsafe-inline\'',  # Remove in production if possible
+        'https://cdnjs.cloudflare.com',
+    ],
+    'style-src': [
+        '\'self\'',
+        '\'unsafe-inline\'',  # For inline styles
+        'https://cdnjs.cloudflare.com',
+    ],
+    'font-src': [
+        '\'self\'',
+        'https://cdnjs.cloudflare.com',
+    ],
+}
+
+@app.route('/admin/test_email_config')
+@login_required
+def test_email_config():
+    """Test and diagnose email configuration"""
+    # Security check
+    ADMIN_EMAILS = ['amazonscreenshottracker@gmail.com']
+    if current_user.email not in ADMIN_EMAILS:
+        return "Unauthorized", 403
+
+    diagnostics = []
+
+    # Check environment variables
+    diagnostics.append(f"SMTP_SERVER: {SMTP_SERVER or 'NOT SET'}")
+    diagnostics.append(f"SMTP_PORT: {SMTP_PORT or 'NOT SET'}")
+    diagnostics.append(f"SMTP_USERNAME: {'SET' if SMTP_USERNAME else 'NOT SET'}")
+    diagnostics.append(f"SMTP_PASSWORD: {'SET' if SMTP_PASSWORD else 'NOT SET'}")
+    diagnostics.append(f"SENDER_EMAIL: {SENDER_EMAIL or 'NOT SET'}")
+    diagnostics.append(f"Email configured: {email_notifier.is_configured()}")
+
+    # Try to send a test email
+    if email_notifier.is_configured():
+        try:
+            import smtplib
+            import socket
+
+            # Test connection
+            diagnostics.append("\nTesting SMTP connection...")
+
+            socket.setdefaulttimeout(10)
+            server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=10)
+            server.starttls()
+            server.login(SMTP_USERNAME, SMTP_PASSWORD)
+            server.quit()
+
+            diagnostics.append("✅ SMTP connection successful!")
+
+            # Try sending test email
+            test_html = """
+            <html>
+                <body>
+                    <h2>Test Email</h2>
+                    <p>This is a test email from your Amazon Screenshot Tracker.</p>
+                    <p>If you received this, your email configuration is working!</p>
+                </body>
+            </html>
+            """
+
+            result = email_notifier.send_email(
+                current_user.email,
+                "Test Email - Amazon Screenshot Tracker",
+                test_html
+            )
+
+            if result:
+                diagnostics.append(f"✅ Test email sent to {current_user.email}")
+            else:
+                diagnostics.append(f"❌ Failed to send test email")
+
+        except Exception as e:
+            diagnostics.append(f"❌ Error: {str(e)}")
+            import traceback
+            diagnostics.append(f"Traceback: {traceback.format_exc()}")
+    else:
+        diagnostics.append("❌ Email system not configured")
+
+    return "<pre>" + "\n".join(diagnostics) + "</pre>"
+
+@app.route('/admin/manual_verify', methods=['GET', 'POST'])
+@login_required
+def manual_verify():
+    """Manual verification page for admin"""
+    ADMIN_EMAILS = ['amazonscreenshottracker@gmail.com']
+    if current_user.email not in ADMIN_EMAILS:
+        return "Unauthorized", 403
+
+    if request.method == 'POST':
+        email = request.form.get('email')
+
+        conn = get_db()
+        cursor = conn.cursor()
+
+        try:
+            if get_db_type() == 'postgresql':
+                cursor.execute('''
+                    UPDATE users SET is_verified = true 
+                    WHERE LOWER(email) = LOWER(%s)
+                ''', (email,))
+            else:
+                cursor.execute('''
+                    UPDATE users SET is_verified = 1 
+                    WHERE LOWER(email) = LOWER(?)
+                ''', (email,))
+
+            if cursor.rowcount > 0:
+                conn.commit()
+                flash(f'User {email} verified successfully!', 'success')
+            else:
+                flash(f'User {email} not found', 'error')
+
+            conn.close()
+        except Exception as e:
+            conn.close()
+            flash(f'Error: {str(e)}', 'error')
+
+    # Get list of unverified users
+    conn = get_db()
+    cursor = conn.cursor()
+
+    if get_db_type() == 'postgresql':
+        cursor.execute('''
+            SELECT email, created_at 
+            FROM users 
+            WHERE is_verified = false 
+            ORDER BY created_at DESC
+        ''')
+    else:
+        cursor.execute('''
+            SELECT email, created_at 
+            FROM users 
+            WHERE is_verified = 0 
+            ORDER BY created_at DESC
+        ''')
+
+    unverified_users = cursor.fetchall()
+    conn.close()
+
+    html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Manual User Verification</title>
+        <style>
+            body { font-family: Arial, sans-serif; padding: 20px; }
+            .container { max-width: 800px; margin: 0 auto; }
+            .user-list { background: #f5f5f5; padding: 20px; border-radius: 8px; }
+            .user-item { background: white; padding: 10px; margin: 10px 0; border-radius: 5px; }
+            .btn { background: #ff9900; color: white; padding: 8px 16px; border: none; border-radius: 5px; cursor: pointer; }
+            .btn:hover { background: #e88b00; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>Manual User Verification</h1>
+            <p>Admin tool to manually verify users when email system is not working.</p>
+
+            <h2>Verify by Email</h2>
+            <form method="POST">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <input type="email" name="email" placeholder="user@email.com" required>
+                <button type="submit" class="btn">Verify User</button>
+            </form>
+
+            <h2>Unverified Users</h2>
+            <div class="user-list">
+    """
+
+    if unverified_users:
+        for user in unverified_users:
+            if isinstance(user, dict):
+                email = user['email']
+                created = user['created_at']
+            else:
+                email = user[0]
+                created = user[1]
+
+            html += f"""
+                <div class="user-item">
+                    <strong>{email}</strong> - Created: {created}
+                    <form method="POST" style="display: inline;">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <input type="hidden" name="email" value="{email}">
+                        <button type="submit" class="btn">Verify</button>
+                    </form>
+                </div>
+            """
+    else:
+        html += "<p>No unverified users found.</p>"
+
+    html += """
+            </div>
+
+            <h2>Quick Actions</h2>
+            <p><a href="/admin/auto_verify_all" class="btn" onclick="return confirm('Verify ALL unverified users?')">Verify All Users</a></p>
+            <p><a href="/admin/test_email_config" class="btn">Test Email Configuration</a></p>
+        </div>
+    </body>
+    </html>
+    """
+
+    return render_template_string(html)
+
+@app.route('/scheduler_health')
+def scheduler_health():
+    """Separate endpoint to check scheduler health"""
+    global scheduler_thread
+
+    scheduler_enabled = os.environ.get('ENABLE_SCHEDULER', 'false').lower() == 'true'
+
+    if not scheduler_enabled:
+        return jsonify({
+            'status': 'disabled',
+            'message': 'Scheduler is disabled by configuration',
+            'healthy': True
+        })
+
+    if scheduler_thread and scheduler_thread.is_alive():
+        return jsonify({
+            'status': 'running',
+            'thread_alive': True,
+            'healthy': True
+        })
+    else:
+        return jsonify({
+            'status': 'stopped',
+            'thread_alive': False,
+            'healthy': False,
+            'message': 'Scheduler should be running but thread is dead'
+        }), 503
+
+@app.route('/scheduler_control')
+@login_required
+def scheduler_control():
+    """Control panel for the scheduler"""
+    if current_user.email != 'josh.matern@gmail.com':
+        return "Unauthorized", 403
+
+    global scheduler_thread
+    import schedule
+
+    scheduler_enabled = os.environ.get('ENABLE_SCHEDULER', 'false').lower() == 'true'
+    thread_alive = scheduler_thread and scheduler_thread.is_alive() if scheduler_thread else False
+    job_count = len(schedule.jobs) if schedule else 0
+
+    # Get next run time
+    next_run = None
+    if schedule.jobs:
+        try:
+            next_run = schedule.jobs[0].next_run
+        except:
+            pass
+
+    html = f"""
+    <html>
+    <head>
+        <style>
+            body {{ font-family: Arial, sans-serif; padding: 20px; }}
+            .status-box {{ 
+                padding: 20px; 
+                border-radius: 8px; 
+                margin: 20px 0;
+            }}
+            .enabled {{ background: #d4edda; }}
+            .disabled {{ background: #f8d7da; }}
+            .warning {{ background: #fff3cd; }}
+            .button {{
+                padding: 10px 20px;
+                margin: 10px;
+                border-radius: 5px;
+                text-decoration: none;
+                display: inline-block;
+                font-weight: bold;
+            }}
+            .start {{ background: #28a745; color: white; }}
+            .stop {{ background: #dc3545; color: white; }}
+            .info {{ background: #17a2b8; color: white; }}
+        </style>
+    </head>
+    <body>
+        <h1>⚙️ Scheduler Control Panel</h1>
+
+        <div class="status-box {'enabled' if scheduler_enabled else 'disabled'}">
+            <h2>Configuration</h2>
+            <p><strong>ENABLE_SCHEDULER:</strong> {os.environ.get('ENABLE_SCHEDULER', 'false')}</p>
+            <p><strong>Setting:</strong> {'ENABLED' if scheduler_enabled else 'DISABLED'}</p>
+        </div>
+
+        <div class="status-box {'enabled' if thread_alive else 'warning'}">
+            <h2>Runtime Status</h2>
+            <p><strong>Thread Alive:</strong> {'✅ Yes' if thread_alive else '❌ No'}</p>
+            <p><strong>Scheduled Jobs:</strong> {job_count}</p>
+            <p><strong>Next Run:</strong> {next_run or 'Not scheduled'}</p>
+        </div>
+
+        <div class="status-box warning">
+            <h2>⚠️ Important Notes</h2>
+            <ul>
+                <li>To permanently enable/disable, change ENABLE_SCHEDULER in Railway environment variables</li>
+                <li>Manual start/stop here is temporary until next deployment</li>
+                <li>Health checks will pass even if scheduler is disabled</li>
+            </ul>
+        </div>
+
+        <h2>Actions</h2>
+        <a href="/start_scheduler" class="button start">▶️ Start Scheduler</a>
+        <a href="/stop_scheduler" class="button stop">⏹️ Stop Scheduler</a>
+        <a href="/clear_scheduled_jobs" class="button info">🗑️ Clear Jobs</a>
+
+        <br><br>
+        <a href="/scheduler_status" class="button info">📊 Scheduler Status</a>
+        <a href="/credit_leak_detector" class="button info">🔍 Leak Detector</a>
+        <a href="/dashboard" class="button info">🏠 Dashboard</a>
+    </body>
+    </html>
+    """
+
+    return html
+
+@app.route('/start_scheduler')
+@login_required
+def start_scheduler():
+    """Manually start the scheduler - FIXED"""
+    if current_user.email != 'josh.matern@gmail.com':
+        return "Unauthorized", 403
+
+    global scheduler_thread
+
+    if scheduler_thread and scheduler_thread.is_alive():
+        flash('Scheduler is already running', 'info')
+        return redirect(url_for('scheduler_control'))
+
+    try:
+        # Start new thread with CORRECT function name
+        scheduler_thread = threading.Thread(
+            target=run_scheduler,
+            daemon=True, 
+            name="SchedulerThread"
+        )
+        scheduler_thread.start()
+
+        time.sleep(1)
+
+        if scheduler_thread.is_alive():
+            flash('✅ Scheduler started successfully', 'success')
+        else:
+            flash('❌ Scheduler failed to start', 'error')
+
+    except Exception as e:
+        flash(f'Error starting scheduler: {str(e)}', 'error')
+
+    return redirect(url_for('scheduler_control'))
+
+
+@app.route('/stop_scheduler')
+@login_required
+def stop_scheduler():
+    """Stop the scheduler"""
+    if current_user.email != 'josh.matern@gmail.com':
+        return "Unauthorized", 403
+
+    import schedule
+
+    try:
+        # Clear all jobs
+        schedule.clear()
+
+        # Set environment variable to stop the thread
+        os.environ['ENABLE_SCHEDULER'] = 'false'
+
+        flash('✅ Scheduler stopped. Thread will exit on next cycle (within 5 minutes)', 'success')
+
+    except Exception as e:
+        flash(f'Error stopping scheduler: {str(e)}', 'error')
+
+    return redirect(url_for('scheduler_control'))
+
+
+@app.route('/clear_scheduled_jobs')
+@login_required
+def clear_scheduled_jobs():
+    """Clear all scheduled jobs"""
+    if current_user.email != 'josh.matern@gmail.com':
+        return "Unauthorized", 403
+
+    import schedule
+
+    try:
+        job_count = len(schedule.jobs)
+        schedule.clear()
+        flash(f'✅ Cleared {job_count} scheduled jobs', 'success')
+    except Exception as e:
+        flash(f'Error clearing jobs: {str(e)}', 'error')
+
+    return redirect(url_for('scheduler_control'))
+
+@app.route('/scheduler_status')
+def scheduler_status():
+    """Public endpoint to check scheduler status and restart if needed"""
+    global scheduler_thread, scheduler_running
+
+    scheduler_enabled = os.environ.get('ENABLE_SCHEDULER', 'true').lower() == 'true'
+
+    if not scheduler_enabled:
+        return jsonify({
+            'status': 'disabled',
+            'message': 'Scheduler is disabled by configuration',
+            'healthy': True
+        })
+
+    # Check if thread is alive
+    if scheduler_thread and scheduler_thread.is_alive():
+        return jsonify({
+            'status': 'running',
+            'thread_alive': True,
+            'healthy': True,
+            'message': 'Scheduler is running normally'
+        })
+    else:
+        # Try to restart it
+        print("⚠️ Scheduler not running, attempting to restart...")
+
+        if ensure_scheduler_running():
+            return jsonify({
+                'status': 'restarted',
+                'thread_alive': True,
+                'healthy': True,
+                'message': 'Scheduler was down but has been restarted'
+            })
+        else:
+            return jsonify({
+                'status': 'failed',
+                'thread_alive': False,
+                'healthy': False,
+                'message': 'Scheduler is down and could not be restarted'
+            }), 503
+
+
+@app.before_first_request
+def startup_tasks():
+    """Run startup tasks on first request - ensures scheduler starts"""
+    global scheduler_initialized, scheduler_thread, scheduler_running
+
+    if not scheduler_initialized:
+        print("🚀 FIRST REQUEST - Initializing scheduler...")
+
+        scheduler_enabled = os.environ.get('ENABLE_SCHEDULER', 'true').lower() == 'true'
+
+        if scheduler_enabled:
+            # Check if thread exists and is alive
+            if scheduler_thread and scheduler_thread.is_alive():
+                print("✅ Scheduler already running")
+            else:
+                print("📅 Starting scheduler thread...")
+                try:
+                    scheduler_thread = threading.Thread(
+                        target=run_scheduler,
+                        daemon=True,
+                        name="PerProductScheduler"
+                    )
+                    scheduler_thread.start()
+
+                    # Wait a moment to verify it started
+                    time.sleep(2)
+
+                    if scheduler_thread.is_alive():
+                        print("✅ Scheduler thread started successfully!")
+                        scheduler_running = True
+                    else:
+                        print("❌ Scheduler thread failed to start!")
+                        scheduler_running = False
+
+                except Exception as e:
+                    print(f"❌ Error starting scheduler: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    scheduler_running = False
+        else:
+            print("⚠️ Scheduler disabled via ENABLE_SCHEDULER environment variable")
+
+        scheduler_initialized = True
+
+# Also add a manual check to ensure scheduler is running
+@app.route('/ensure_scheduler')
+@login_required
+def ensure_scheduler_endpoint():
+    """Manually ensure scheduler is running - admin only"""
+    if current_user.email not in ['josh.matern@gmail.com', 'amazonscreenshottracker@gmail.com']:
+        return "Unauthorized", 403
+
+    global scheduler_thread, scheduler_running
+
+    html = "<h2>Scheduler Check</h2>"
+
+    # Check current status
+    if scheduler_thread and scheduler_thread.is_alive():
+        html += "<p style='color: green;'>✅ Scheduler is already running!</p>"
+    else:
+        html += "<p style='color: red;'>❌ Scheduler was not running. Starting it now...</p>"
+
+        if ensure_scheduler_running():
+            html += "<p style='color: green;'>✅ Scheduler started successfully!</p>"
+        else:
+            html += "<p style='color: red;'>❌ Failed to start scheduler</p>"
+
+    html += f"""
+    <br>
+    <p><strong>Thread object exists:</strong> {scheduler_thread is not None}</p>
+    <p><strong>Thread alive:</strong> {scheduler_thread.is_alive() if scheduler_thread else False}</p>
+    <p><strong>Scheduler running flag:</strong> {scheduler_running}</p>
+    <p><strong>ENABLE_SCHEDULER:</strong> {os.environ.get('ENABLE_SCHEDULER', 'Not set')}</p>
+    <br>
+    <a href="/credit_leak_detector">Check Leak Detector</a> | 
+    <a href="/dashboard">Dashboard</a>
+    """
+
+    return html
+
+@app.route('/csrf-test')
+def csrf_test():
+    return """
+    <form method="POST" action="/csrf-test-post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button type="submit">Test CSRF</button>
+    </form>
+    """
+
+@app.route('/csrf-test-post', methods=['POST'])
+def csrf_test_post():
+    return "CSRF token validated successfully!"
+
+# Print email configuration status
+if email_notifier.is_configured():
+    print("✅ Email notifications configured")
+else:
+    print("⚠️ Email notifications not configured - emails will not be sent")
+    print("To enable emails, set these environment variables:")
+    print("  - SMTP_SERVER")
+    print("  - SMTP_USERNAME") 
+    print("  - SMTP_PASSWORD")
+
 
 @login_manager.user_loader
 def load_user(user_id):
@@ -3497,341 +4099,6 @@ def test_email():
     except Exception as e:
         return f"Email test failed: {str(e)}", 500
 
-# Register blueprint
-app.register_blueprint(auth, url_prefix='/auth')
-
-# Additional security headers
-@app.after_request
-def security_headers(response):
-    response.headers['X-Content-Type-Options'] = 'nosniff'
-    response.headers['X-Frame-Options'] = 'DENY'
-    response.headers['X-XSS-Protection'] = '1; mode=block'
-    response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
-    return response
-
-class AmazonMonitor:
-    def __init__(self, api_key=None):
-        self.api_key = api_key or SCRAPINGBEE_API_KEY
-
-    @classmethod
-    def for_user(cls, user_id):
-        """Create monitor instance with user's API key"""
-        conn = get_db()
-        cursor = conn.cursor()
-
-        try:
-            if get_db_type() == 'postgresql':
-                cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = %s', (user_id,))
-            else:
-                cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = ?', (user_id,))
-
-            result = cursor.fetchone()
-
-            if result:
-                if isinstance(result, dict):
-                    encrypted_key = result.get('scrapingbee_api_key')
-                else:
-                    encrypted_key = result[0] if result else None
-            else:
-                encrypted_key = None
-
-            conn.close()
-
-            if encrypted_key:
-                try:
-                    decrypted_key = api_encryption.decrypt(encrypted_key)
-                    print(f"✅ Using user-specific API key for user {user_id}")
-                    return cls(decrypted_key)
-                except Exception as e:
-                    print(f"❌ Error decrypting API key for user {user_id}: {e}")
-
-            print(f"⚠️ No user-specific API key found for user {user_id}. Using system default.")
-            return cls()
-
-        except Exception as e:
-            print(f"❌ Error retrieving API key for user {user_id}: {e}")
-            if conn:
-                conn.close()
-            return cls()
-    
-    def scrape_amazon_page(self, url):
-        """Use ScrapingBee to scrape Amazon page and take screenshot - FULLY FIXED"""
-        if not self.api_key:
-            print("❌ ScrapingBee API key not configured")
-            return {'success': False, 'error': 'ScrapingBee API key not configured', 'html': '', 'screenshot': None}
-
-        try:
-            print(f"🔄 Starting ScrapingBee request for: {url}")
-            print(f"🔑 Using API key: {self.api_key[:10]}...")
-
-            # Use json_response to get both HTML and screenshot
-            params = {
-                'api_key': self.api_key,
-                'url': url,
-                'render_js': 'true',  # Required for screenshots
-                'screenshot': 'true',  # Enable screenshot
-                'json_response': 'true',  # Get JSON response with both HTML and screenshot
-                'screenshot_full_page': 'false',
-                'wait': '3000',
-                'premium_proxy': 'true',
-                'country_code': 'us',
-            }
-
-            print("📤 Making request to ScrapingBee with screenshot enabled...")
-            response = requests.get(SCRAPINGBEE_URL, params=params, timeout=60)
-
-            print(f"📥 ScrapingBee response status: {response.status_code}")
-
-            if response.status_code == 200:
-                print("✅ ScrapingBee request successful")
-
-                try:
-                    # With json_response=true, we get a JSON object
-                    response_data = response.json()
-
-                    html_content = response_data.get('body', '')
-                    screenshot_data = response_data.get('screenshot', '')
-
-                    print(f"📄 HTML content length: {len(html_content) if html_content else 0} characters")
-                    print(f"📸 Screenshot data present: {'Yes' if screenshot_data else 'No'}")
-
-                    if screenshot_data:
-                        print(f"📸 Screenshot size: {len(screenshot_data)} characters")
-                        # The screenshot is already base64 encoded
-                        if not screenshot_data.startswith('data:'):
-                            # Ensure it's just the base64 data, no data URI prefix
-                            screenshot_data = screenshot_data.replace('data:image/png;base64,', '')
-
-                    return {
-                        'html': html_content or '',
-                        'screenshot': screenshot_data if screenshot_data else None,
-                        'success': True
-                    }
-
-                except json.JSONDecodeError as e:
-                    print(f"⚠️ JSON decode error, trying alternative method: {e}")
-                    # Fallback to non-JSON response
-                    return {
-                        'html': response.text,
-                        'screenshot': response.headers.get('Spb-Screenshot'),
-                        'success': True
-                    }
-
-            else:
-                error_msg = f'HTTP {response.status_code}: {response.text[:500]}'
-                print(f"❌ ScrapingBee error: {error_msg}")
-
-                # Check for specific errors
-                if response.status_code == 401:
-                    error_msg = "Invalid API key. Please check your ScrapingBee API key."
-                elif response.status_code == 429:
-                    error_msg = "Rate limit reached. Please wait and try again."
-                elif response.status_code == 402:
-                    error_msg = "Insufficient credits. Please check your ScrapingBee account."
-
-                return {'success': False, 'error': error_msg, 'html': '', 'screenshot': None}
-
-        except requests.exceptions.Timeout:
-            error_msg = 'ScrapingBee request timed out (60s)'
-            print(f"⏰ {error_msg}")
-            return {'success': False, 'error': error_msg, 'html': '', 'screenshot': None}
-        except Exception as e:
-            error_msg = f'ScrapingBee request failed: {str(e)}'
-            print(f"💥 {error_msg}")
-            import traceback
-            traceback.print_exc()
-            return {'success': False, 'error': error_msg, 'html': '', 'screenshot': None}
-
-    def extract_product_info(self, html):
-        """Extract product ranking and bestseller info from Amazon HTML - FIXED"""
-        if not html:
-            print("⚠️ No HTML content to extract from")
-            return {
-                'title': 'Product Title Loading...',
-                'rank': None,
-                'category': '',
-                'is_bestseller': False,
-                'bestseller_categories': []
-            }
-
-        soup = BeautifulSoup(html, 'html.parser')
-
-        product_info = {
-            'title': '',
-            'rank': None,
-            'category': '',
-            'is_bestseller': False,
-            'bestseller_categories': []
-        }
-
-        try:
-            print("🔍 Starting HTML parsing...")
-
-            # Extract title - multiple methods
-            title_selectors = [
-                ('span', {'id': 'productTitle'}),
-                ('h1', {'id': 'title'}),
-                ('h1', {'class': 'a-size-large'}),
-                ('span', {'class': 'a-size-large product-title-word-break'})
-            ]
-
-            for tag, attrs in title_selectors:
-                title_element = soup.find(tag, attrs)
-                if title_element:
-                    product_info['title'] = ' '.join(title_element.stripped_strings)
-                    print(f"📋 Found title: {product_info['title'][:100]}...")
-                    break
-
-            if not product_info['title']:
-                # Try meta tags
-                meta_title = soup.find('meta', {'property': 'og:title'})
-                if meta_title and meta_title.get('content'):
-                    product_info['title'] = meta_title['content']
-                    print(f"📋 Found title in meta: {product_info['title'][:100]}...")
-                else:
-                    product_info['title'] = 'Unknown Product'
-                    print("⚠️ Could not find product title")
-
-            # Look for bestseller badges
-            print("🔍 Searching for bestseller indicators...")
-
-            # Check for bestseller badges
-            badge_patterns = [
-                'best seller',
-                'best-seller', 
-                'bestseller',
-                '#1 best seller',
-                'amazon\'s choice'
-            ]
-
-            for element in soup.find_all(['span', 'div', 'a'], class_=lambda x: x and 'badge' in x.lower()):
-                text = element.get_text().strip().lower()
-                for pattern in badge_patterns:
-                    if pattern in text:
-                        product_info['is_bestseller'] = True
-                        print(f"🏆 Found bestseller badge: {text}")
-                        break
-
-            # Extract ranking - search entire page
-            print("🔍 Searching for ranking information...")
-
-            # Look for "Best Sellers Rank"
-            page_text = soup.get_text()
-
-            # Multiple patterns for rank extraction
-            rank_patterns = [
-                r'Best Sellers Rank[:\s]*#?([\d,]+)\s+in\s+([^(\n]+)',
-                r'Amazon Best Sellers Rank[:\s]*#?([\d,]+)\s+in\s+([^(\n]+)',
-                r'#([\d,]+)\s+in\s+([^(\n#]+)'
-            ]
-
-            for pattern in rank_patterns:
-                matches = re.findall(pattern, page_text, re.IGNORECASE)
-                if matches:
-                    for match in matches:
-                        rank_num = match[0].replace(',', '').strip()
-                        category = match[1].strip()
-
-                        if rank_num.isdigit() and len(category) > 2:
-                            product_info['rank'] = rank_num
-                            product_info['category'] = category.split('(')[0].strip()
-                            print(f"📈 Found rank: #{rank_num} in {product_info['category']}")
-
-                            if rank_num == '1':
-                                product_info['is_bestseller'] = True
-                                print("🏆 Product is #1 - marking as bestseller!")
-                            break
-
-                    if product_info['rank']:
-                        break
-
-            # If no rank found, try more specific selectors
-            if not product_info['rank']:
-                rank_elements = soup.find_all(text=re.compile(r'#\d+\s+in', re.I))
-                for elem in rank_elements[:5]:
-                    if elem and elem.strip():
-                        match = re.search(r'#([\d,]+)\s+in\s+([^(\n]+)', elem)
-                        if match:
-                            product_info['rank'] = match.group(1).replace(',', '')
-                            product_info['category'] = match.group(2).strip()
-                            print(f"📈 Found rank in element: #{product_info['rank']} in {product_info['category']}")
-                            break
-
-        except Exception as e:
-            print(f"❌ Error extracting product info: {e}")
-            import traceback
-            traceback.print_exc()
-
-        print(f"📊 Final product info: Title='{product_info['title'][:50]}...', Rank={product_info['rank']}, Category={product_info['category']}")
-        return product_info
-
-    def extract_category_from_text(self, text):
-        """Extract category from text containing bestseller information"""
-        try:
-            if text:
-                # Look for "in [Category]" pattern
-                category_match = re.search(r'in (.+?)(?:\s|$)', text)
-                if category_match:
-                    return category_match.group(1).strip()
-
-        except Exception as e:
-            print(f"Error extracting category from text: {e}")
-        return None
-
-    def check_category_achievements(self, product_id, product_info, current_rank, current_category):
-        """Check if product has achieved target category rankings"""
-        conn = sqlite3.connect('amazon_monitor.db')
-        cursor = conn.cursor()
-
-        # Get all target categories for this product
-        cursor.execute('''
-            SELECT id, category_name, target_rank, best_rank_achieved
-            FROM target_categories 
-            WHERE product_id = ? AND is_achieved = 0
-        ''', (product_id,))
-
-        target_categories = cursor.fetchall()
-        achievements = []
-
-        for target_id, target_category, target_rank, best_rank in target_categories:
-            # Check if current category matches (case-insensitive partial match)
-            if target_category.lower() in current_category.lower():
-                current_rank_num = int(current_rank) if current_rank else None
-
-                if current_rank_num:
-                    # Update best rank if this is better
-                    if not best_rank or current_rank_num < best_rank:
-                        cursor.execute('''
-                            UPDATE target_categories 
-                            SET best_rank_achieved = ? 
-                            WHERE id = ?
-                        ''', (current_rank_num, target_id))
-
-                    # Check if target achieved
-                    if current_rank_num <= target_rank:
-                        cursor.execute('''
-                            UPDATE target_categories 
-                            SET is_achieved = 1, date_achieved = ? 
-                            WHERE id = ?
-                        ''', (datetime.now(), target_id))
-
-                        achievements.append({
-                            'category': target_category,
-                            'rank': current_rank_num,
-                            'target_rank': target_rank
-                        })
-
-                        print(f"🎯 Target achieved! #{current_rank_num} in {target_category}")
-
-        conn.commit()
-        conn.close()
-
-        return achievements
-
-# Initialize components
-db_manager = DatabaseManager()
-monitor = AmazonMonitor(SCRAPINGBEE_API_KEY)
-
 @app.route('/')
 def index():
     """Landing page - properly handle authenticated users"""
@@ -4575,14 +4842,6 @@ def reset_rate_limits():
         return redirect(url_for('dashboard'))
     except Exception as e:
         return f"Error resetting rate limits: {str(e)}", 500
-
-
-# Add error handler for rate limit exceeded
-@app.errorhandler(429)
-def rate_limit_handler(e):
-    """Handle rate limit exceeded errors"""
-    flash('Rate limit exceeded. Please wait a moment and try again.', 'warning')
-    return redirect(request.referrer or url_for('dashboard'))
 
 @app.route('/check_scrapingbee_usage')
 @login_required
@@ -6690,316 +6949,6 @@ def check_specific_product(user_id, product_id):
             conn.close()
         raise
 
-def run_scheduler():
-    """
-    Per-product intelligent scheduler - checks each product 60 minutes after last check
-    ENHANCED VERSION with better error handling and persistence
-    """
-    global scheduler_running
-
-    print("🎯 Intelligent Per-Product Scheduler Started")
-    print("📊 Each product will be checked 60 minutes after its last check")
-
-    scheduler_running = True
-    consecutive_errors = 0
-    max_consecutive_errors = 5
-
-    while scheduler_running:
-        try:
-            # Check if scheduler should still be running
-            if not os.environ.get('ENABLE_SCHEDULER', 'true').lower() == 'true':
-                print("🛑 Scheduler disabled via environment variable")
-                break
-
-            # Check for products that need checking
-            products_checked = check_due_products()
-
-            # Reset error counter on successful check
-            if products_checked >= 0:
-                consecutive_errors = 0
-
-            # Sleep for 60 seconds before next check cycle
-            for i in range(60):
-                if not scheduler_running:
-                    break
-                time.sleep(1)
-
-        except Exception as e:
-            consecutive_errors += 1
-            print(f"❌ Scheduler error ({consecutive_errors}/{max_consecutive_errors}): {e}")
-            import traceback
-            traceback.print_exc()
-
-            if consecutive_errors >= max_consecutive_errors:
-                print("❌ Too many consecutive errors, stopping scheduler")
-                break
-
-            # Wait 5 minutes on error before retrying
-            time.sleep(300)
-
-    print("📅 Scheduler stopped")
-    scheduler_running = False
-
-def check_due_products():
-    """
-    Check products that are due for their hourly check.
-    ENHANCED VERSION - Returns number of products checked, or -1 on error
-    """
-    current_time = datetime.now()
-    check_threshold = current_time - timedelta(minutes=60)
-
-    conn = None
-    products_checked = 0
-
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-
-        # Find products that haven't been checked in the last 60 minutes
-        if get_db_type() == 'postgresql':
-            cursor.execute('''
-                SELECT 
-                    p.id as product_id,
-                    p.product_url,
-                    p.product_title,
-                    p.current_rank,
-                    p.current_category,
-                    p.is_bestseller,
-                    p.last_checked,
-                    p.created_at,
-                    p.user_id,
-                    u.email,
-                    u.scrapingbee_api_key
-                FROM products p
-                JOIN users u ON p.user_id = u.id
-                WHERE p.active = true
-                  AND u.scrapingbee_api_key IS NOT NULL
-                  AND (
-                      p.last_checked IS NULL 
-                      OR p.last_checked <= %s
-                  )
-                ORDER BY 
-                    COALESCE(p.last_checked, p.created_at) ASC
-                LIMIT 10
-            ''', (check_threshold,))
-        else:
-            cursor.execute('''
-                SELECT 
-                    p.id as product_id,
-                    p.product_url,
-                    p.product_title,
-                    p.current_rank,
-                    p.current_category,
-                    p.is_bestseller,
-                    p.last_checked,
-                    p.created_at,
-                    p.user_id,
-                    u.email,
-                    u.scrapingbee_api_key
-                FROM products p
-                JOIN users u ON p.user_id = u.id
-                WHERE p.active = 1
-                  AND u.scrapingbee_api_key IS NOT NULL
-                  AND (
-                      p.last_checked IS NULL 
-                      OR p.last_checked <= ?
-                  )
-                ORDER BY 
-                    COALESCE(p.last_checked, p.created_at) ASC
-                LIMIT 10
-            ''', (check_threshold,))
-
-        due_products = cursor.fetchall()
-
-        if not due_products:
-            # No products due right now
-            conn.close()
-            return 0
-
-        print(f"\n⏰ {current_time.strftime('%H:%M:%S')} - Found {len(due_products)} products due for checking")
-
-        # Process each product
-        for product in due_products:
-            try:
-                # Extract product data
-                if isinstance(product, dict):
-                    product_id = product['product_id']
-                    url = product['product_url']
-                    title = product['product_title']
-                    user_id = product['user_id']
-                    user_email = product['email']
-                    previous_rank = int(product['current_rank']) if product['current_rank'] else 999999
-                    was_bestseller = product['is_bestseller']
-                    last_checked = product['last_checked']
-                else:
-                    product_id = product[0]
-                    url = product[1]
-                    title = product[2]
-                    previous_rank = int(product[3]) if product[3] else 999999
-                    was_bestseller = product[5]
-                    last_checked = product[6]
-                    user_id = product[8]
-                    user_email = product[9]
-
-                # Log check timing
-                if last_checked:
-                    time_since = current_time - datetime.fromisoformat(str(last_checked))
-                    minutes_since = int(time_since.total_seconds() / 60)
-                    print(f"  📦 Checking: {title[:40]}... (last: {minutes_since}min ago)")
-                else:
-                    print(f"  📦 Checking: {title[:40]}... (first check)")
-
-                # Create monitor for this user
-                user_monitor = AmazonMonitor.for_user(user_id)
-
-                if not user_monitor.api_key:
-                    print(f"    ⚠️ No API key for user {user_id}, skipping")
-                    continue
-
-                # Scrape the product
-                scrape_result = user_monitor.scrape_amazon_page(url)
-
-                if scrape_result.get('success'):
-                    product_info = user_monitor.extract_product_info(scrape_result.get('html', ''))
-
-                    current_rank = int(product_info['rank']) if product_info.get('rank') else None
-                    is_bestseller_now = product_info.get('is_bestseller', False)
-
-                    # CRITICAL: Update with current timestamp
-                    update_time = datetime.now()
-
-                    # Update product in database
-                    if get_db_type() == 'postgresql':
-                        cursor.execute('''
-                            UPDATE products 
-                            SET current_rank = %s, 
-                                current_category = %s,
-                                is_bestseller = %s, 
-                                last_checked = %s
-                            WHERE id = %s
-                        ''', (
-                            product_info.get('rank'),
-                            product_info.get('category'),
-                            is_bestseller_now,
-                            update_time,
-                            product_id
-                        ))
-                    else:
-                        cursor.execute('''
-                            UPDATE products 
-                            SET current_rank = ?, 
-                                current_category = ?,
-                                is_bestseller = ?, 
-                                last_checked = ?
-                            WHERE id = ?
-                        ''', (
-                            product_info.get('rank'),
-                            product_info.get('category'),
-                            is_bestseller_now,
-                            update_time,
-                            product_id
-                        ))
-
-                    # Record in rankings history
-                    if get_db_type() == 'postgresql':
-                        cursor.execute('''
-                            INSERT INTO rankings 
-                            (product_id, rank_number, category, is_bestseller, checked_at)
-                            VALUES (%s, %s, %s, %s, %s)
-                        ''', (product_id, current_rank, product_info.get('category'), 
-                              is_bestseller_now, update_time))
-                    else:
-                        cursor.execute('''
-                            INSERT INTO rankings 
-                            (product_id, rank_number, category, is_bestseller, checked_at)
-                            VALUES (?, ?, ?, ?, ?)
-                        ''', (product_id, current_rank, product_info.get('category'), 
-                              is_bestseller_now, update_time))
-
-                    # Check for achievements
-                    achievement_triggered = False
-                    achievement_reason = ""
-
-                    if is_bestseller_now and not was_bestseller:
-                        achievement_triggered = True
-                        achievement_reason = "🏆 New Bestseller!"
-                    elif current_rank:
-                        if current_rank == 1 and previous_rank != 1:
-                            achievement_triggered = True
-                            achievement_reason = "🥇 Reached #1!"
-                        elif current_rank <= 10 and previous_rank > 10:
-                            achievement_triggered = True
-                            achievement_reason = f"🎯 Top 10! (#{current_rank})"
-                        elif current_rank <= 50 and previous_rank > 50:
-                            achievement_triggered = True
-                            achievement_reason = f"📈 Top 50! (#{current_rank})"
-
-                    if achievement_triggered:
-                        print(f"    🎉 ACHIEVEMENT: {achievement_reason}")
-
-                        if scrape_result.get('screenshot'):
-                            # Save achievement screenshot
-                            if get_db_type() == 'postgresql':
-                                cursor.execute('''
-                                    INSERT INTO bestseller_screenshots 
-                                    (product_id, screenshot_data, rank_achieved, category, achieved_at)
-                                    VALUES (%s, %s, %s, %s, %s)
-                                ''', (product_id, scrape_result['screenshot'], 
-                                      product_info.get('rank'), 
-                                      f"{product_info.get('category', '')} - {achievement_reason}", 
-                                      update_time))
-                            else:
-                                cursor.execute('''
-                                    INSERT INTO bestseller_screenshots 
-                                    (product_id, screenshot_data, rank_achieved, category, achieved_at)
-                                    VALUES (?, ?, ?, ?, ?)
-                                ''', (product_id, scrape_result['screenshot'], 
-                                      product_info.get('rank'), 
-                                      f"{product_info.get('category', '')} - {achievement_reason}", 
-                                      update_time))
-
-                            # Send notification
-                            if email_notifier.is_configured():
-                                product_info['title'] = title
-                                product_info['achievement_reason'] = achievement_reason
-                                email_notifier.send_bestseller_notification(
-                                    user_email, product_info, 
-                                    scrape_result['screenshot'], achievement_reason
-                                )
-                    else:
-                        print(f"    ✅ Rank: {current_rank or 'N/A'}, Next: {(update_time + timedelta(minutes=60)).strftime('%H:%M')}")
-
-                    # Commit after each successful check
-                    conn.commit()
-                    products_checked += 1
-
-                else:
-                    print(f"    ❌ Scrape failed: {scrape_result.get('error', 'Unknown')}")
-                    # Don't update last_checked on failure
-
-                # Rate limiting between products
-                time.sleep(2)
-
-            except Exception as e:
-                print(f"    ❌ Error checking product {product_id}: {e}")
-                continue
-
-        conn.close()
-        return products_checked
-
-    except Exception as e:
-        print(f"❌ Database error in check_due_products: {e}")
-        import traceback
-        traceback.print_exc()
-
-        if conn:
-            try:
-                conn.rollback()
-                conn.close()
-            except:
-                pass
-        return -1
-
 def initialize_scheduler():
     """Initialize the per-product scheduler - FIXED to work with gunicorn"""
     global scheduler_thread, scheduler_running
@@ -7038,12 +6987,15 @@ def initialize_scheduler():
         import traceback
         traceback.print_exc()
 
+# ============= APPLICATION FACTORY =============
+def create_app():
+    """Application factory pattern for better WSGI compatibility"""
+    return app
+
+# ============= MAIN EXECUTION =============
 if __name__ == '__main__':
     print("🔧 Module loaded - checking scheduler initialization...")
-    # Initialize DB manager
-    db_manager = DatabaseManager()
 
-    # Get port from environment
     port = int(os.environ.get('PORT', 5000))
     is_production = os.environ.get('RAILWAY_ENVIRONMENT') is not None
 
@@ -7051,7 +7003,7 @@ if __name__ == '__main__':
 
     # Initialize scheduler ONCE
     if not scheduler_running and os.environ.get('ENABLE_SCHEDULER', 'true').lower() == 'true':
-        initialize_scheduler()
+        ensure_scheduler_running()
     else:
         print("⚠️ Scheduler already running or disabled")
 
@@ -7071,8 +7023,9 @@ if __name__ == '__main__':
         app.run(debug=False, host='0.0.0.0', port=port)
     else:
         app.run(debug=True, host='0.0.0.0', port=port)
-
-if __name__ != '__main__':
+else:
     # For gunicorn
     print("🔧 Configuring app for gunicorn...")
-    # Don't initialize database here
+    # Ensure scheduler starts when gunicorn loads the module
+    if os.environ.get('ENABLE_SCHEDULER', 'true').lower() == 'true':
+        ensure_scheduler_running()
