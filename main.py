@@ -81,7 +81,6 @@ limiter.init_app(app)
 auth = Blueprint('auth', __name__)
 
 # ============= GLOBAL VARIABLES =============
-SCHEDULER_ENABLED = os.environ.get('ENABLE_SCHEDULER', 'false').lower() == 'true'
 scheduler_initialize = False
 scheduler_thread = None
 scheduler_running = False
@@ -1805,14 +1804,18 @@ def initialize_app():
 print("🔧 Checking Flask version and initializing scheduler...")
 print(f"Flask version: {flask.__version__ if 'flask' in dir() else 'Unknown'}")
 
-# Try to start scheduler immediately when module loads
-try:
-    if os.environ.get('ENABLE_SCHEDULER', 'true').lower() == 'true':
-        print("📅 Attempting to start scheduler on module load...")
-        ensure_scheduler_running()
-except Exception as e:
-    print(f"⚠️ Could not start scheduler on module load: {e}")
-    print("Scheduler will start on first request instead")
+def initialize_scheduler_safely():
+    """Initialize scheduler only when app is ready"""
+    try:
+        if os.environ.get('ENABLE_SCHEDULER', 'false').lower() == 'true':
+            print("📅 Attempting to start scheduler...")
+            ensure_scheduler_running()
+        else:
+            print("⚠️ Scheduler disabled by configuration")
+    except Exception as e:
+        print(f"⚠️ Non-critical: Scheduler initialization failed: {e}")
+        # Don't crash the app if scheduler fails
+        pass
 
 
 def get_insert_id(cursor, conn):
@@ -6357,6 +6360,16 @@ def send_feedback():
 
     return redirect(url_for('dashboard'))
 
+@app.route('/deployment-test')
+def deployment_test():
+    """Simple test to verify deployment is working"""
+    return jsonify({
+        'status': 'ok',
+        'message': 'App is deployed and running',
+        'timestamp': datetime.now().isoformat(),
+        'scheduler_enabled': os.environ.get('ENABLE_SCHEDULER', 'false')
+    })
+
 @app.route('/toggle_monitoring/<int:product_id>')
 @login_required
 def toggle_monitoring(product_id):
@@ -6949,43 +6962,43 @@ def check_specific_product(user_id, product_id):
             conn.close()
         raise
 
-def initialize_scheduler():
-    """Initialize the per-product scheduler - FIXED to work with gunicorn"""
-    global scheduler_thread, scheduler_running
+#def initialize_scheduler():
+#    """Initialize the per-product scheduler - FIXED to work with gunicorn"""
+#    global scheduler_thread, scheduler_running
 
     # Check if already running
-    if scheduler_running or (scheduler_thread and scheduler_thread.is_alive()):
-        print("⚠️ Scheduler already running")
-        return
+#    if scheduler_running or (scheduler_thread and scheduler_thread.is_alive()):
+#        print("⚠️ Scheduler already running")
+ #       return
 
-    scheduler_enabled = os.environ.get('ENABLE_SCHEDULER', 'true').lower() == 'true'
+#    scheduler_enabled = os.environ.get('ENABLE_SCHEDULER', 'true').lower() == 'true'
 
-    if not scheduler_enabled:
+#    if not scheduler_enabled:
         print("⚠️ AUTOMATED MONITORING DISABLED via ENABLE_SCHEDULER")
         return
 
-    print("🚀 INITIALIZING PER-PRODUCT AUTOMATED MONITORING")
-    print("⏰ Each product will be checked 60 minutes after its last check")
+#    print("🚀 INITIALIZING PER-PRODUCT AUTOMATED MONITORING")
+#    print("⏰ Each product will be checked 60 minutes after its last check")
 
-    try:
-        scheduler_thread = threading.Thread(
-            target=run_scheduler,  # Keep existing function name
-            daemon=True,
-            name="PerProductScheduler"
-        )
-        scheduler_thread.start()
+#    try:
+#        scheduler_thread = threading.Thread(
+#            target=run_scheduler,  # Keep existing function name
+#            daemon=True,
+#            name="PerProductScheduler"
+#        )
+#        scheduler_thread.start()
 
-        time.sleep(1)
+#        time.sleep(1)
 
-        if scheduler_thread.is_alive():
-            print("✅ Per-product scheduler started successfully")
-        else:
-            print("❌ Failed to start scheduler thread")
-
-    except Exception as e:
-        print(f"❌ Error starting scheduler: {e}")
-        import traceback
-        traceback.print_exc()
+#        if scheduler_thread.is_alive():
+#            print("✅ Per-product scheduler started successfully")
+#        else:
+#            print("❌ Failed to start scheduler thread")
+#
+ #   except Exception as e:
+ #       print(f"❌ Error starting scheduler: {e}")
+ #       import traceback
+ #       traceback.print_exc()
 
 # ============= APPLICATION FACTORY =============
 def create_app():
@@ -6994,38 +7007,17 @@ def create_app():
 
 # ============= MAIN EXECUTION =============
 if __name__ == '__main__':
-    print("🔧 Module loaded - checking scheduler initialization...")
+    # Only for local development
+    print("🚀 Starting in development mode...")
+    initialize_scheduler_safely()
 
     port = int(os.environ.get('PORT', 5000))
-    is_production = os.environ.get('RAILWAY_ENVIRONMENT') is not None
-
-    print("🚀 Starting Amazon Bestseller Monitor...")
-
-    # Initialize scheduler ONCE
-    if not scheduler_running and os.environ.get('ENABLE_SCHEDULER', 'true').lower() == 'true':
-        ensure_scheduler_running()
-    else:
-        print("⚠️ Scheduler already running or disabled")
-
-    # Check configuration
-    if os.environ.get('DATABASE_URL'):
-        print("✅ PostgreSQL database configured")
-    else:
-        print("⚠️ Using SQLite for development")
-
-    if SCRAPINGBEE_API_KEY:
-        print("✅ ScrapingBee API key loaded")
-    else:
-        print("❌ ScrapingBee API key not configured")
-
-    # Start the application
-    if is_production:
-        app.run(debug=False, host='0.0.0.0', port=port)
-    else:
-        app.run(debug=True, host='0.0.0.0', port=port)
+    app.run(debug=True, host='0.0.0.0', port=port)
 else:
-    # For gunicorn
-    print("🔧 Configuring app for gunicorn...")
-    # Ensure scheduler starts when gunicorn loads the module
-    if os.environ.get('ENABLE_SCHEDULER', 'true').lower() == 'true':
-        ensure_scheduler_running()
+    # For production (gunicorn)
+    print("🚀 Starting in production mode...")
+
+    # Delay scheduler initialization to avoid blocking
+    @app.before_first_request
+    def startup():
+        initialize_scheduler_safely()
