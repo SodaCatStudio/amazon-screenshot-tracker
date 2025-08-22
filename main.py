@@ -84,7 +84,7 @@ auth = Blueprint('auth', __name__)
 scheduler_initialize = False
 scheduler_thread = None
 scheduler_running = False
-#scheduler_lock = threading.Lock()
+scheduler_lock = threading.Lock()
 
 # ============= CONFIGURATION VARIABLES =============
 # Password requirements
@@ -175,7 +175,11 @@ def get_db_type():
 # ============= SCHEDULER FUNCTIONS =============
 def ensure_scheduler_running():
     """Ensure scheduler is running - thread-safe"""
-    global scheduler_initialized, scheduler_thread, scheduler_running
+    global scheduler_initialized, scheduler_thread, scheduler_running, scheduler_lock
+
+    # Initialize lock if it doesn't exist
+    if 'scheduler_lock' not in globals():
+        scheduler_lock = threading.Lock()
 
     with scheduler_lock:
         if scheduler_initialized and scheduler_thread and scheduler_thread.is_alive():
@@ -7005,11 +7009,22 @@ def create_app():
 # ============= AUTOMATIC SCHEDULER START =============
 def start_scheduler_with_delay():
     """Start scheduler after a delay to ensure app is ready"""
+    global scheduler_lock
+
+    # Ensure lock exists
+    if 'scheduler_lock' not in globals():
+        scheduler_lock = threading.Lock()
+
     time.sleep(5)  # Wait for app to fully initialize
 
     if os.environ.get('ENABLE_SCHEDULER', 'false').lower() == 'true':
         print("📅 Auto-starting scheduler after delay...")
-        ensure_scheduler_running()
+        try:
+            ensure_scheduler_running()
+        except Exception as e:
+            print(f"❌ Failed to start scheduler: {e}")
+            import traceback
+            traceback.print_exc()
 
 # ============= MAIN EXECUTION =============
 print("🚀 Starting Amazon Bestseller Monitor...")
