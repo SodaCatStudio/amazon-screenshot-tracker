@@ -495,15 +495,12 @@ def check_due_products():
 # ============= HEALTH CHECK ENDPOINT =============
 @csrf.exempt
 @app.route('/health')
-@limiter.exempt  # Exempt from rate limiting
 def health_check():
-    """Health check endpoint - CSRF exempt"""
+    """Health check endpoint that doesn't fail due to scheduler"""
     try:
-        # Basic health check - just return OK
         return "OK", 200
     except Exception as e:
-        print(f"Health check error: {e}")
-        return "OK", 200  # Still return OK to prevent container restart loops
+        return "OK", 200  # Always return OK to prevent restart loops
 
 # ============= SIGNAL HANDLERS =============
 def signal_handler(sig, frame):
@@ -1744,9 +1741,6 @@ db_manager = DatabaseManager()
 email_notifier = EmailNotifier()
 api_encryption = APIKeyEncryption()
 monitor = AmazonMonitor(SCRAPINGBEE_API_KEY)
-
-# ============= REGISTER BLUEPRINTS =============
-app.register_blueprint(auth, url_prefix='/auth')
 
 # ============= ERROR HANDLERS =============
 @app.errorhandler(404)
@@ -3236,6 +3230,9 @@ def resend_verification():
                 conn.close()
 
     return render_template('auth/resend_verification.html')
+
+# ============= REGISTER BLUEPRINTS =============
+app.register_blueprint(auth, url_prefix='/auth')
 
 @app.route('/debug/products')
 def debug_products():
@@ -6962,6 +6959,8 @@ def init_scheduler_if_needed():
     else:
         print("⚠️ Scheduler disabled via ENABLE_SCHEDULER")
 
+
+
 # ============= APPLICATION FACTORY =============
 def create_app():
     """Application factory pattern for better WSGI compatibility"""
@@ -6969,7 +6968,6 @@ def create_app():
 
 # ============= MAIN EXECUTION =============
 print("🚀 Starting Amazon Bestseller Monitor...")
-print(f"Flask version: {flask.__version__}")
 print(f"Python version: {sys.version}")
 
 # Start scheduler in background (non-blocking)
