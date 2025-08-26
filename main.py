@@ -345,6 +345,7 @@ def check_due_products():
 
         # Process each product
         for product in due_products:
+            product_id = None
             try:
                 # Extract product data
                 if isinstance(product, dict):
@@ -2896,6 +2897,8 @@ def login():
 
     return render_template('auth/login.html')
 
+
+
 # Add a simple test route first
 @auth.route('/test')
 def test_auth():
@@ -3719,6 +3722,25 @@ def generate_verification_link(email):
             conn.rollback()
             conn.close()
         return f"Error: {str(e)}", 500
+
+@app.route('/debug/email_config')
+@login_required
+def debug_email_config():
+    """Check email configuration"""
+    if current_user.email not in ['amazonscreenshottracker@gmail.com', 'josh.matern@gmail.com']:
+        return "Unauthorized", 403
+
+    return f"""
+    <h2>Email Configuration Status</h2>
+    <p><strong>SMTP_SERVER:</strong> {SMTP_SERVER or 'NOT SET'}</p>
+    <p><strong>SMTP_PORT:</strong> {SMTP_PORT or 'NOT SET'}</p>
+    <p><strong>SMTP_USERNAME:</strong> {'SET' if SMTP_USERNAME else 'NOT SET'}</p>
+    <p><strong>SMTP_PASSWORD:</strong> {'SET' if SMTP_PASSWORD else 'NOT SET'}</p>
+    <p><strong>SENDER_EMAIL:</strong> {SENDER_EMAIL or 'NOT SET'}</p>
+    <p><strong>Is Configured:</strong> {email_notifier.is_configured()}</p>
+    <br>
+    <a href="/test_email_to_self">Test Send Email</a>
+    """
 
 @app.route('/emergency_stop')
 @login_required
