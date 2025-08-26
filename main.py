@@ -1,13 +1,14 @@
 # Amazon Bestseller Screenshot Monitor
 # A web app to monitor Amazon products and capture bestseller screenshots
 
-from flask import Flask, render_template, request, jsonify, send_file, flash, redirect, url_for, Blueprint, session
+from flask import Flask, render_template, request, jsonify, send_file, flash, redirect, url_for, Blueprint, session, render_template_string
 from werkzeug.security import generate_password_hash, check_password_hash
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from functools import wraps
 import secrets
+import flask
 import string
 import sqlite3
 import requests
@@ -498,7 +499,7 @@ def check_due_products():
             try:
                 conn.rollback()
                 conn.close()
-            except:
+            except Exception as e:
                 pass
         return -1
 
@@ -537,7 +538,7 @@ class DatabaseManager:
 
     def init_db_if_needed(self):
         """Only create tables if they don't exist - preserve data"""
-        print(f"🔧 Checking database state...")
+        print("🔧 Checking database state...")
         conn = get_db()
         cursor = conn.cursor()
         db_type = self.get_db_type()
@@ -554,8 +555,9 @@ class DatabaseManager:
                 """)
                 result = cursor.fetchone()
 
-                # FIX: Handle RealDictCursor returning dict-like object
-                if isinstance(result, dict):
+                if result is None:
+                    table_exists = False
+                elif isinstance(result, dict):
                     table_exists = result['exists']
                 else:
                     table_exists = result[0]
@@ -594,7 +596,7 @@ class DatabaseManager:
     def add_column_if_not_exists(self, cursor, table_name, column_name, column_type):
         """Safely add column if it doesn't exist"""
         try:
-            cursor.execute(f"""
+            cursor.execute("""
                 SELECT column_name 
                 FROM information_schema.columns 
                 WHERE table_name = %s AND column_name = %s
@@ -783,23 +785,6 @@ class DatabaseManager:
             except Exception as e:
                 print(f"⚠️ Index creation warning: {e}")
 
-    def add_column_if_not_exists(self, cursor, table_name, column_name, column_type):
-        """Safely add column if it doesn't exist"""
-        try:
-            cursor.execute(f"""
-                SELECT column_name 
-                FROM information_schema.columns 
-                WHERE table_name = %s AND column_name = %s
-            """, (table_name, column_name))
-
-            if not cursor.fetchone():
-                cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
-                print(f"✅ Added column {column_name} to {table_name}")
-            else:
-                print(f"✅ Column {column_name} already exists in {table_name}")
-        except Exception as e:
-            print(f"⚠️ Error adding column {column_name}: {e}")
-
     def create_sqlite_tables(self, cursor):
         """Create all SQLite tables with complete schema for development"""
 
@@ -968,20 +953,11 @@ class User(UserMixin):
         self.email = email
         self.full_name = full_name
         self.is_verified = is_verified
-        self._is_active = is_active  # Use private variable to avoid conflict
+        self.account_active = is_active
 
     def get_id(self):
         """Return the user ID as a string for Fla"""
         return str(self.id)
-
-    @property
-    def is_active(self):
-        """Override is_active property"""
-        return self._is_active
-
-    @is_active.setter
-    def is_active(self, value):
-        self._is_active = value
 
     def __repr__(self):
         return f'<User {self.email}>'
@@ -1007,6 +983,8 @@ class EmailNotifier:
             print("❌ Email settings not configured")
             return False
 
+        import socket
+
         try:
             msg = MIMEMultipart('related')
             msg['Subject'] = subject
@@ -1022,7 +1000,6 @@ class EmailNotifier:
                     msg.attach(attachment)
 
             # Send email with timeout
-            import socket
             original_timeout = socket.getdefaulttimeout()
             socket.setdefaulttimeout(self.timeout)
 
@@ -1044,7 +1021,7 @@ class EmailNotifier:
             print(f"❌ SMTP server disconnected while sending to {recipient}")
             return False
         except smtplib.SMTPConnectError:
-            print(f"❌ Could not connect to SMTP server")
+            print("❌ Could not connect to SMTP server")
             return False
         except socket.timeout:
             print(f"❌ Email sending timed out after {self.timeout} seconds")
@@ -1604,16 +1581,20 @@ class AmazonMonitor:
 
             if not product_info['title']:
                 # Try meta tags
+
+                # Try meta tags
                 meta_title = soup.find('meta', {'property': 'og:title'})
-                if meta_title and meta_title.get('content'):
-                    product_info['title'] = meta_title['content']
-                    print(f"📋 Found title in meta: {product_info['title'][:100]}...")
+                if meta_title and isinstance(meta_title, Tag):
+                    content = meta_title.get('content')
+                    if content:
+                        product_info['title'] = content
+                        print(f"📋 Found title in meta: {product_info['title'][:100]}...")
+                    else:
+                        product_info['title'] = 'Unknown Product'
+                        print("⚠️ Could not find product title")
                 else:
                     product_info['title'] = 'Unknown Product'
                     print("⚠️ Could not find product title")
-
-            # Look for bestseller badges
-            print("🔍 Searching for bestseller indicators...")
 
             # Check for bestseller badges
             badge_patterns = [
@@ -1624,7 +1605,15 @@ class AmazonMonitor:
                 'amazon\'s choice'
             ]
 
-            for element in soup.find_all(['span', 'div', 'a'], class_=lambda x: x and 'badge' in x.lower()):
+            def has_badge_class(x):
+                """Check if class contains 'badge'"""
+                if x is None:
+                    return False
+                if isinstance(x, list):
+                    return any('badge' in str(c).lower() for c in x)
+                return 'badge' in str(x).lower()
+
+            for element in soup.find_all(['span', 'div', 'a'], class_=has_badge_class):
                 text = element.get_text().strip().lower()
                 for pattern in badge_patterns:
                     if pattern in text:
@@ -1669,13 +1658,16 @@ class AmazonMonitor:
             if not product_info['rank']:
                 rank_elements = soup.find_all(text=re.compile(r'#\d+\s+in', re.I))
                 for elem in rank_elements[:5]:
-                    if elem and elem.strip():
-                        match = re.search(r'#([\d,]+)\s+in\s+([^(\n]+)', elem)
-                        if match:
-                            product_info['rank'] = match.group(1).replace(',', '')
-                            product_info['category'] = match.group(2).strip()
-                            print(f"📈 Found rank in element: #{product_info['rank']} in {product_info['category']}")
-                            break
+                    if elem:
+                        # elem is already a string (NavigableString), not a Tag
+                        text = str(elem).strip()
+                        if text:
+                            match = re.search(r'#([\d,]+)\s+in\s+([^(\n]+)', text)
+                            if match:
+                                product_info['rank'] = match.group(1).replace(',', '')
+                                product_info['category'] = match.group(2).strip()
+                                print(f"📈 Found rank in element: #{product_info['rank']} in {product_info['category']}")
+                                break
 
         except Exception as e:
             print(f"❌ Error extracting product info: {e}")
@@ -1797,7 +1789,6 @@ def initialize_app():
 # Initialize scheduler when module loads (for gunicorn)
 # This should work even if before_first_request doesn't exist
 print("🔧 Checking Flask version and initializing scheduler...")
-print(f"Flask version: {flask.__version__ if 'flask' in dir() else 'Unknown'}")
 
 def init_scheduler_background():
     """Initialize scheduler in background without blocking"""
@@ -1932,6 +1923,8 @@ def test_email_config():
             socket.setdefaulttimeout(10)
             server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=10)
             server.starttls()
+            if SMTP_USERNAME is None or SMTP_PASSWORD is None:
+                raise ValueError("SMTP_USERNAME and SMTP_PASSWORD must be set in environment variables")
             server.login(SMTP_USERNAME, SMTP_PASSWORD)
             server.quit()
 
@@ -1957,7 +1950,7 @@ def test_email_config():
             if result:
                 diagnostics.append(f"✅ Test email sent to {current_user.email}")
             else:
-                diagnostics.append(f"❌ Failed to send test email")
+                diagnostics.append("❌ Failed to send test email")
 
         except Exception as e:
             diagnostics.append(f"❌ Error: {str(e)}")
@@ -2139,7 +2132,7 @@ def scheduler_control():
     if schedule.jobs:
         try:
             next_run = schedule.jobs[0].next_run
-        except:
+        except Exception as e:
             pass
 
     html = f"""
@@ -2642,7 +2635,11 @@ def register():
                 ''', (email, password_hash, full_name, verification_token, token_expiry))
 
                 result = cursor.fetchone()
-                user_id = result['id'] if isinstance(result, dict) else result[0]
+                if result:
+                    user_id = result['id'] if isinstance(result, dict) else result[0]
+                else:
+                    # Handle the case where the result is None
+                    raise ValueError("No user found with the provided criteria.")
             else:
                 cursor.execute('''
                     INSERT INTO users (email, password_hash, full_name, verification_token, verification_token_expiry)
@@ -3225,10 +3222,10 @@ def resend_verification():
                 success = email_notifier.send_verification_email(email, verification_token)
 
                 if success:
-                    print(f"✅ Verification email sent successfully")
+                    print("✅ Verification email sent successfully")
                     flash('Verification email sent! Please check your inbox.', 'success')
                 else:
-                    print(f"❌ Failed to send verification email")
+                    print("❌ Failed to send verification email")
                     flash('Error sending email. Please try again later.', 'error')
             else:
                 flash('Email system not configured. Contact support for manual verification.', 'warning')
@@ -3259,12 +3256,20 @@ def debug_products():
 
         # Check products table
         cursor.execute('SELECT COUNT(*) FROM products')
-        total_products = cursor.fetchone()[0]
+        result = cursor.fetchone()
+        if result is not None:
+            total_products = result[0]
+        else:
+            total_products = 0
 
         # Check products for current user
         cursor.execute('SELECT COUNT(*) FROM products WHERE user_id = %s OR user_email = %s', 
                        (current_user.id, current_user.email))
-        user_products = cursor.fetchone()[0]
+        result = cursor.fetchone()
+        if result is not None:
+            user_products = result[0]
+        else:
+            user_products = 0
 
         # Get recent products
         cursor.execute('''
@@ -3332,7 +3337,8 @@ def persistence_test():
 
         # Count existing records
         cursor.execute('SELECT COUNT(*) FROM deployment_test')
-        count = cursor.fetchone()[0]
+        result = cursor.fetchone()
+        count = result[0] if result is not None else 0
 
         # Add new record
         cursor.execute('INSERT INTO deployment_test (deployment_count) VALUES (%s)', (count + 1,))
@@ -3778,7 +3784,7 @@ def emergency_stop():
 
             # Kill the scheduler thread if it exists
             global scheduler_thread
-            if 'scheduler_thread' in globals() and scheduler_thread.is_alive():
+            if 'scheduler_thread' in globals() and scheduler_thread is not None and scheduler_thread.is_alive():
                 # Note: Can't actually kill thread safely in Python, but we can set a flag
                 schedule.clear()  # Clear all scheduled jobs
 
@@ -3889,7 +3895,9 @@ def credit_leak_detector():
             ''', (check_threshold,))
 
         overdue = cursor.fetchone()
-        overdue_count = overdue['overdue_count'] if isinstance(overdue, dict) else overdue[0]
+        overdue_count = 0
+        if overdue is not None:
+            overdue_count = overdue['overdue_count'] if isinstance(overdue, dict) else overdue[0]
 
         # Build the HTML response
         html = f"""
@@ -4017,7 +4025,7 @@ def kill_scheduler():
             # Can't actually stop the thread, but clearing jobs should help
             pass
 
-        return f"""
+        return """
         <html>
         <body style="font-family: Arial, sans-serif; padding: 20px;">
             <h1>✅ Scheduler Killed</h1>
@@ -4036,7 +4044,7 @@ def kill_scheduler():
         """
 
     except Exception as e:
-        return f"Error: {str(e)}", 500
+        return "Error: {str(e)}", 500
 
 @app.route('/debug/db-connection')
 def debug_db_connection():
@@ -4114,7 +4122,7 @@ def test_email():
 @app.route('/')
 def index():
     """Landing page - properly handle authenticated users"""
-    print(f"🔍 INDEX: Route called")
+    print("🔍 INDEX: Route called")
 
     try:
         if current_user.is_authenticated:
@@ -4743,7 +4751,11 @@ def add_product():
                 datetime.now()
             ))
             result = cursor.fetchone()
-            product_id = result['id'] if isinstance(result, dict) else result[0]
+            if result:
+                product_id = result['id'] if isinstance(result, dict) else result[0]
+            else:
+                # Handle the case where result is None
+                raise ValueError("No product ID found in the query results.")
         else:
             cursor.execute('''
                 INSERT INTO products (user_id, user_email, product_url, product_title, 
@@ -4939,7 +4951,7 @@ def check_scrapingbee_usage():
                         <p><strong>Plan:</strong> {usage_data.get('plan', 'N/A')}</p>
                     </div>
 
-                    <p><strong>API Key (first 20 chars):</strong> {api_key[:20]}...</p>
+                    <p><strong>API Key (first 20 chars):</strong> {api_key[:20] + '...' if api_key else 'None'}</p>
 
                     <h3>Quick Actions</h3>
                     <ul>
@@ -4957,7 +4969,7 @@ def check_scrapingbee_usage():
                     <h2 class="error">❌ Invalid API Key</h2>
                     <p>The API key is not recognized by ScrapingBee.</p>
                     <p>Response: {response.text}</p>
-                    <p><strong>API Key (first 20 chars):</strong> {api_key[:20]}...</p>
+                    <p><strong>API Key (first 20 chars):</strong> {api_key[:20] + '...' if api_key else 'None'}</p>
                     <br>
                     <p>Please check your API key in your ScrapingBee dashboard and update it in settings.</p>
                     <a href="/settings">Go to Settings</a>
@@ -5353,7 +5365,7 @@ def dashboard_view():
 
             conn.close()
 
-            print(f"✅ DASHBOARD_VIEW: Rendering dashboard template")
+            print("✅ DASHBOARD_VIEW: Rendering dashboard template")
             print(f"   Products format: {type(products)}, Screenshots format: {type(screenshots)}")
 
             # Render the dashboard template with the correct data format
@@ -5810,7 +5822,10 @@ def update_api_key():
     try:
         # Encrypt the API key
         encrypted_key = api_encryption.encrypt(api_key)
-        print(f"🔐 Encrypted key length: {len(encrypted_key)}")
+        if encrypted_key is not None:
+            print(f"🔐 Encrypted key length: {len(encrypted_key)}")
+        else:
+            print("🔐 Encrypted key is None")
 
         # Update in database - FIXED for PostgreSQL
         if get_db_type() == 'postgresql':
@@ -5855,10 +5870,10 @@ def update_api_key():
                 print(f"✅ Verification: API key is in database (length: {len(saved_key)})")
                 flash('ScrapingBee API key saved successfully!', 'success')
             else:
-                print(f"❌ Verification failed: API key not found in database after save")
+                print("❌ Verification failed: API key not found in database after save")
                 flash('API key save verification failed. Please try again.', 'error')
         else:
-            print(f"❌ Could not verify saved API key")
+            print("❌ Could not verify saved API key")
             flash('API key saved but verification failed.', 'warning')
 
     except Exception as e:
@@ -5997,6 +6012,10 @@ def test_encryption():
     try:
         # Test encryption
         encrypted = api_encryption.encrypt(test_key)
+        if encrypted is not None:
+            encrypted_preview = encrypted[:50] + '...'
+        else:
+            encrypted_preview = '(Encryption failed, value is None)'
 
         # Test decryption
         decrypted = api_encryption.decrypt(encrypted)
@@ -6055,13 +6074,13 @@ def test_encryption():
 
             <h3>1. Basic Encryption Test</h3>
             <p><strong>Original:</strong> {test_key}</p>
-            <p><strong>Encrypted:</strong> {encrypted[:50]}...</p>
-            <p><strong>Encrypted Length:</strong> {len(encrypted)}</p>
+            <p><strong>Encrypted:</strong> {encrypted_preview}</p>
+            <p><strong>Encrypted Length:</strong> {len(encrypted_preview)}</p>
             <p><strong>Decrypted:</strong> {decrypted}</p>
             <p><strong>Match:</strong> {decrypted == test_key}</p>
 
             <h3>2. Database Save/Retrieve Test</h3>
-            <p><strong>Saved to DB:</strong> {encrypted[:50]}...</p>
+            <p><strong>Saved to DB:</strong> {encrypted_preview}</p>
             <p><strong>Retrieved from DB:</strong> {retrieved[:50] + '...' if retrieved else 'None'}</p>
             <p><strong>Retrieved Length:</strong> {len(retrieved) if retrieved else 0}</p>
             <p><strong>Values Match:</strong> {retrieved == encrypted if retrieved else False}</p>
@@ -6164,7 +6183,8 @@ def view_screenshot(screenshot_id):
 @app.route('/add_target_category', methods=['POST'])
 @login_required
 def add_target_category():
-    """Add a new target category to an existing product - FIXED"""
+    
+    conn = get_db()
     try:
         data = request.get_json()
         product_id = data.get('product_id')
@@ -6175,7 +6195,7 @@ def add_target_category():
         if not all([product_id, category_name]):
             return jsonify({'error': 'Missing required fields'}), 400
 
-        conn = get_db()
+        
         cursor = conn.cursor()
 
         # Verify product belongs to current authenticated user
@@ -6466,9 +6486,8 @@ def toggle_monitoring(product_id):
 @app.route('/delete_product/<int:product_id>')
 @login_required
 def delete_product(product_id):
-    """Delete a product - FIXED to use authenticated user"""
+    conn = get_db()
     try:
-        conn = get_db()
         cursor = conn.cursor()
 
         # Verify ownership using authenticated user
@@ -6577,6 +6596,7 @@ def check_user_products(user_id, limit=10):
             }
 
         for product_row in products:
+            product_id = None
             try:
                 # Extract product data
                 if isinstance(product_row, dict):
@@ -6713,7 +6733,11 @@ def check_user_products(user_id, limit=10):
                             cursor.execute('SELECT email FROM users WHERE id = ?', (user_id,))
 
                         user_email_row = cursor.fetchone()
-                        user_email = user_email_row['email'] if isinstance(user_email_row, dict) else user_email_row[0]
+                        if user_email_row:
+                            user_email = user_email_row['email'] if isinstance(user_email_row, dict) else user_email_row[0]
+                        else:
+                            print(f"📧 Failed to send email. User email not found for user_id: {user_id}")
+                            continue  # Skip sending emails as user email is not available
 
                         if email_notifier.is_configured():
                             product_info['achievement_reason'] = achievement_reason
