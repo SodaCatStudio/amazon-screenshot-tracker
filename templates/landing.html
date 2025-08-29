@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>[Beta] Amazon Screenshot Tracker - Capture Your Success Automatically</title>
+    <title>Amazon Screenshot Tracker - Capture Your Success Automatically</title>
     <meta name="description" content="Automatically capture screenshots when your Amazon products achieve bestseller status. Track rankings, set category goals, and get instant notifications.">
     <style>
         * {
@@ -377,7 +377,7 @@
     <!-- Navigation -->
     <nav>
         <div class="nav-container">
-            <a href="/" class="logo">🏆 Bestseller Monitor</a>
+            <a href="/" class="logo">🏆 Screenshot Tracker</a>
             <div class="nav-links">
                 <a href="{{ url_for('auth.login') }}" class="btn-login">Log In</a>
                 <a href="{{ url_for('auth.register') }}" class="btn-signup">Sign Up</a>
@@ -492,23 +492,35 @@
     <section class="pricing">
         <div class="container">
             <h2 class="section-title">Simple, Transparent Pricing</h2>
-            <p class="section-subtitle">Start free, upgrade when you need more</p>
+            <p class="section-subtitle">Choose the best plan for you</p>
 
             <div class="pricing-card">
-                <h3>Starter Plan</h3>
+                <h3>Author Plan</h3>
                 <div class="price">
-                    [Beta]
-                    <span class="price-period">forever</span>
+                    <span class="price-period">Monthly</span>
                 </div>
                 <ul class="pricing-features">
-                    <li>Monitor up to 10 products</li>
+                    <li>Monitor up to 2 products</li>
                     <li>Check every hour</li>
                     <li>Email notifications</li>
                     <li>Bestseller screenshots</li>
                     <li>Custom category tracking</li>
                     <li>30-day history</li>
                 </ul>
-                <a href="{{ url_for('auth.register') }}" class="btn btn-primary" style="width: 100%;">Get Started Free</a>
+
+                <h3>Publisher Plan</h3>
+                <div class="price">
+                    <span class="price-period">Monthly</span>
+                </div>
+                <ul class="pricing-features">
+                    <li>Monitor up to 5 products</li>
+                    <li>Check every hour</li>
+                    <li>Email notifications</li>
+                    <li>Bestseller screenshots</li>
+                    <li>Custom category tracking</li>
+                    <li>30-day history</li>
+                </ul>
+                <a href="{{ url_for('auth.register') }}" class="btn btn-primary" style="width: 100%;">Get Started</a>
             </div>
         </div>
     </section>
@@ -522,7 +534,7 @@
                 <a href="#">Contact</a>
                 <a href="#">FAQ</a>
             </div>
-            <p style="opacity: 0.6;">© 2024 Amazon Bestseller Monitor. Not affiliated with Amazon.</p>
+            <p style="opacity: 0.6;">© 2025 Screenshot Tracker. Not affiliated with Amazon.</p>
         </div>
     </footer>
 

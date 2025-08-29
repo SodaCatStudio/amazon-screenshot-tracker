@@ -8,7 +8,7 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from functools import wraps
 import secrets
-import flask
+import flask 
 import string
 import sqlite3
 import requests
@@ -30,6 +30,9 @@ import json
 import signal
 import sys
 import smtplib
+import boto3
+import paddle
+from botocore.exceptions import ClientError
 from flask_talisman import Talisman
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -946,6 +949,40 @@ class DatabaseManager:
 
         print("✅ All SQLite tables created with complete schema")
 
+    def add_subscription_columns(self):
+        """Add subscription fields if they don't exist"""
+        conn = get_db()
+        cursor = conn.cursor()
+
+        try:
+            if get_db_type() == 'postgresql':
+                cursor.execute("""
+                    ALTER TABLE users 
+                    ADD COLUMN IF NOT EXISTS subscription_tier VARCHAR(20) DEFAULT 'free',
+                    ADD COLUMN IF NOT EXISTS subscription_status VARCHAR(20) DEFAULT 'inactive',
+                    ADD COLUMN IF NOT EXISTS subscription_expires TIMESTAMP,
+                    ADD COLUMN IF NOT EXISTS paddle_subscription_id VARCHAR(100),
+                    ADD COLUMN IF NOT EXISTS paddle_customer_id VARCHAR(100),
+                    ADD COLUMN IF NOT EXISTS max_products INTEGER DEFAULT 0
+                """)
+            else:
+                # For SQLite, check if columns exist first
+                cursor.execute("PRAGMA table_info(users)")
+                existing_columns = [col[1] for col in cursor.fetchall()]
+
+                if 'subscription_tier' not in existing_columns:
+                    cursor.execute("ALTER TABLE users ADD COLUMN subscription_tier VARCHAR(20) DEFAULT 'free'")
+                if 'subscription_status' not in existing_columns:
+                    cursor.execute("ALTER TABLE users ADD COLUMN subscription_status VARCHAR(20) DEFAULT 'inactive'")
+                # ... repeat for other columns
+
+            conn.commit()
+            print("✅ Subscription columns added/verified")
+        except Exception as e:
+            print(f"⚠️ Error adding subscription columns: {e}")
+        finally:
+            conn.close()
+
 class User(UserMixin):
     """Enhanced User model with proper initialization"""
     def __init__(self, id, email, full_name=None, is_verified=False, is_active=True):
@@ -962,72 +999,245 @@ class User(UserMixin):
     def __repr__(self):
         return f'<User {self.email}>'
 
+class APIRateLimiter:
+    """Track and enforce per-user daily API usage limits"""
+    DAILY_LIMIT_PER_USER = 3000
+
+    @staticmethod
+    def get_user_usage_today(user_id):
+        """Get API calls made by a specific user today"""
+        conn = get_db()
+        cursor = conn.cursor()
+
+        today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+
+        try:
+            if get_db_type() == 'postgresql':
+                cursor.execute("""
+                    SELECT COUNT(*) FROM api_usage 
+                    WHERE user_id = %s AND called_at >= %s
+                """, (user_id, today_start))
+            else:
+                cursor.execute("""
+                    SELECT COUNT(*) FROM api_usage 
+                    WHERE user_id = ? AND called_at >= ?
+                """, (user_id, today_start))
+
+            result = cursor.fetchone()
+            return result[0] if result else 0
+        finally:
+            conn.close()
+
+    @staticmethod
+    def check_and_increment(user_id, endpoint='scrape'):
+        """Check if user is under their daily limit and record usage"""
+        conn = get_db()
+        cursor = conn.cursor()
+
+        try:
+            current_usage = APIRateLimiter.get_user_usage_today(user_id)
+
+            if current_usage >= APIRateLimiter.DAILY_LIMIT_PER_USER:
+                remaining_hours = 24 - datetime.now().hour
+                return False, f"You've reached your daily limit of {APIRateLimiter.DAILY_LIMIT_PER_USER} API calls. Resets in {remaining_hours} hours."
+
+            # Record the API call for this user
+            if get_db_type() == 'postgresql':
+                cursor.execute(
+                    "INSERT INTO api_usage (user_id, called_at, endpoint) VALUES (%s, %s, %s)",
+                    (user_id, datetime.now(), endpoint)
+                )
+            else:
+                cursor.execute(
+                    "INSERT INTO api_usage (user_id, called_at, endpoint) VALUES (?, ?, ?)",
+                    (user_id, datetime.now(), endpoint)
+                )
+
+            conn.commit()
+            return True, None
+        finally:
+            conn.close()
+
+# Create the api_usage table
+def create_api_usage_table():
+    """Create table to track API usage per user"""
+    conn = get_db()
+    cursor = conn.cursor()
+
+    if get_db_type() == 'postgresql':
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS api_usage (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                called_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                endpoint TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+        """)
+        # Add index for faster queries
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_api_usage_user_date 
+            ON api_usage(user_id, called_at)
+        """)
+    else:
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS api_usage (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                called_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                endpoint TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_api_usage_user_date 
+            ON api_usage(user_id, called_at)
+        """)
+
+    conn.commit()
+    conn.close()
+
+# Call during initialization
+create_api_usage_table()
+
 class EmailNotifier:
-    """Handle all email notifications for the application with timeout protection"""
+    """Email notifications using Amazon SES"""
     def __init__(self):
-        self.smtp_server = SMTP_SERVER
-        self.smtp_port = SMTP_PORT
-        self.username = SMTP_USERNAME
-        self.password = SMTP_PASSWORD
-        self.sender_email = SENDER_EMAIL
-        self.sender_name = SENDER_NAME
-        self.timeout = 10  # 10 second timeout for SMTP operations
+        self.use_ses = os.environ.get('USE_SES', 'false').lower() == 'true'
+
+        if self.use_ses:
+            # Amazon SES setup
+            self.ses_client = boto3.client(
+                'ses',
+                region_name=os.environ.get('AWS_REGION', 'us-east-1'),
+                aws_access_key_id=os.environ.get('AWS_ACCESS_KEY_ID'),
+                aws_secret_access_key=os.environ.get('AWS_SECRET_ACCESS_KEY')
+            )
+            self.sender_email = os.environ.get('SES_FROM_EMAIL', 'noreply@example.com')
+            self.sender_name = os.environ.get('SENDER_NAME', 'Amazon Screenshot Tracker')
+        else:
+            # Fallback to SMTP (for development)
+            self.smtp_server = os.environ.get('SMTP_SERVER')
+            self.smtp_port = int(os.environ.get('SMTP_PORT', 587))
+            self.username = os.environ.get('SMTP_USERNAME')
+            self.password = os.environ.get('SMTP_PASSWORD')
+            self.sender_email = os.environ.get('SENDER_EMAIL')
+            self.sender_name = os.environ.get('SENDER_NAME', 'Amazon Screenshot Tracker')
 
     def is_configured(self):
-        """Check if email settings are configured"""
-        return all([self.smtp_server, self.username, self.password])
+        """Check if email is configured"""
+        if self.use_ses:
+            return bool(os.environ.get('AWS_ACCESS_KEY_ID'))
+        else:
+            return all([self.smtp_server, self.username, self.password])
 
     def send_email(self, recipient, subject, html_content, attachments=None):
-        """Generic email sending method with timeout protection"""
+        """Send email via SES or SMTP"""
         if not self.is_configured():
-            print("❌ Email settings not configured")
+            print("Email not configured")
             return False
 
+        if self.use_ses:
+            return self._send_via_ses(recipient, subject, html_content, attachments)
+        else:
+            return self._send_via_smtp(recipient, subject, html_content, attachments)
+
+    def _send_via_ses(self, recipient, subject, html_content, attachments=None):
+        """Send email using Amazon SES"""
+        try:
+            # For emails without attachments (most cases)
+            if not attachments:
+                response = self.ses_client.send_email(
+                    Source=f'{self.sender_name} <{self.sender_email}>',
+                    Destination={'ToAddresses': [recipient]},
+                    Message={
+                        'Subject': {'Data': subject},
+                        'Body': {'Html': {'Data': html_content}}
+                    }
+                )
+                print(f"Email sent via SES: {response['MessageId']}")
+                return True
+
+            else:
+                # For achievement screenshots with attachments
+                from email.mime.multipart import MIMEMultipart
+                from email.mime.text import MIMEText
+                from email.mime.application import MIMEApplication
+
+                msg = MIMEMultipart()
+                msg['Subject'] = subject
+                msg['From'] = f'{self.sender_name} <{self.sender_email}>'
+                msg['To'] = recipient
+
+                # HTML body
+                msg.attach(MIMEText(html_content, 'html'))
+
+                # Add attachments
+                for attachment in attachments:
+                    msg.attach(attachment)
+
+                # Send raw email
+                response = self.ses_client.send_raw_email(
+                    Source=self.sender_email,
+                    Destinations=[recipient],
+                    RawMessage={'Data': msg.as_string()}
+                )
+                print(f"Email with attachment sent via SES: {response['MessageId']}")
+                return True
+
+        except ClientError as e:
+            error_code = e.response['Error']['Code']
+            error_message = e.response['Error']['Message']
+
+            if error_code == 'MessageRejected':
+                print(f"SES rejected message: {error_message}")
+            elif error_code == 'MailFromDomainNotVerified':
+                print(f"Domain not verified in SES: {error_message}")
+            elif error_code == 'ConfigurationSetDoesNotExist':
+                print(f"SES configuration issue: {error_message}")
+            else:
+                print(f"SES error {error_code}: {error_message}")
+
+            return False
+
+        except Exception as e:
+            print(f"Failed to send email via SES: {e}")
+            return False
+
+    def _send_via_smtp(self, recipient, subject, html_content, attachments=None):
+        """Original SMTP implementation for development"""
+        # Your existing SMTP code here
         import socket
+        #import smtplib
+        #from email.mime.multipart import MIMEMultipart
+        #from email.mime.text import MIMEText
 
         try:
             msg = MIMEMultipart('related')
             msg['Subject'] = subject
-            msg['From'] = formataddr((self.sender_name, self.sender_email or 'default@example.com'))
+            msg['From'] = f'{self.sender_name} <{self.sender_email}>'
             msg['To'] = recipient
-
-            # Attach HTML content
             msg.attach(MIMEText(html_content, 'html'))
 
-            # Add attachments if any
             if attachments:
                 for attachment in attachments:
                     msg.attach(attachment)
 
-            # Send email with timeout
-            original_timeout = socket.getdefaulttimeout()
-            socket.setdefaulttimeout(self.timeout)
+            if self.smtp_server is None:
+                raise ValueError("SMTP_SERVER must be set in environment variables")
+            # Proceed with establishing connection if server value is valid
+            with smtplib.SMTP(self.smtp_server, self.smtp_port, timeout=10) as server:
+                server.starttls()
+                if self.username is None or self.password is None:
+                    raise ValueError("SMTP_USERNAME and SMTP_PASSWORD must be set in environment variables")
+                server.login(self.username, self.password)
+                server.send_message(msg)
 
-            try:
-                with smtplib.SMTP(self.smtp_server, self.smtp_port, timeout=self.timeout) as server:
-                    server.starttls()
-                    if not self.username or not self.password:
-                        raise ValueError("SMTP username or password is not configured")
-                    server.login(self.username, self.password)
-                    server.send_message(msg)
+            print(f"Email sent via SMTP to {recipient}")
+            return True
 
-                print(f"✅ Email sent successfully to {recipient}")
-                return True
-
-            finally:
-                socket.setdefaulttimeout(original_timeout)
-
-        except smtplib.SMTPServerDisconnected:
-            print(f"❌ SMTP server disconnected while sending to {recipient}")
-            return False
-        except smtplib.SMTPConnectError:
-            print("❌ Could not connect to SMTP server")
-            return False
-        except socket.timeout:
-            print(f"❌ Email sending timed out after {self.timeout} seconds")
-            return False
         except Exception as e:
-            print(f"❌ Failed to send email: {e}")
+            print(f"SMTP error: {e}")
             return False
 
     def send_verification_email_async(self, email, token):
@@ -1407,52 +1617,35 @@ class APIKeyEncryption:
         return self.cipher.decrypt(encrypted_key.encode()).decode()
 
 class AmazonMonitor:
-    def __init__(self, api_key=None):
+    def __init__(self, api_key=None, user_id=None):
         self.api_key = api_key or SCRAPINGBEE_API_KEY
+        self.user_id = user_id  # Track which user is making the call
 
     @classmethod
     def for_user(cls, user_id):
-        """Create monitor instance with user's API key"""
-        conn = get_db()
-        cursor = conn.cursor()
+        """Create monitor instance for a specific user"""
+        if not SCRAPINGBEE_API_KEY:
+            print("❌ No global ScrapingBee API key configured")
+            return cls(None, user_id)
 
-        try:
-            if get_db_type() == 'postgresql':
-                cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = %s', (user_id,))
-            else:
-                cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = ?', (user_id,))
-
-            result = cursor.fetchone()
-
-            if result:
-                if isinstance(result, dict):
-                    encrypted_key = result.get('scrapingbee_api_key')
-                else:
-                    encrypted_key = result[0] if result else None
-            else:
-                encrypted_key = None
-
-            conn.close()
-
-            if encrypted_key:
-                try:
-                    decrypted_key = api_encryption.decrypt(encrypted_key)
-                    print(f"✅ Using user-specific API key for user {user_id}")
-                    return cls(decrypted_key)
-                except Exception as e:
-                    print(f"❌ Error decrypting API key for user {user_id}: {e}")
-
-            print(f"⚠️ No user-specific API key found for user {user_id}. Using system default.")
-            return cls()
-
-        except Exception as e:
-            print(f"❌ Error retrieving API key for user {user_id}: {e}")
-            if conn:
-                conn.close()
-            return cls()
+        print(f"✅ Using global API key for user {user_id}")
+        return cls(SCRAPINGBEE_API_KEY, user_id)
 
     def scrape_amazon_page(self, url):
-        """Use ScrapingBee to scrape Amazon page and take screenshot - FULLY FIXED"""
+        """Scrape with per-user rate limiting"""
+        # Check user's rate limit first
+        if self.user_id:
+            can_call, error_msg = APIRateLimiter.check_and_increment(self.user_id)
+            if not can_call:
+                print(f"❌ User {self.user_id} rate limit exceeded: {error_msg}")
+                return {
+                    'success': False, 
+                    'error': error_msg,
+                    'html': '',
+                    'screenshot': None
+                }
+        print("✅ API call allowed, proceeding with request")
+            
         if not self.api_key:
             print("❌ ScrapingBee API key not configured")
             return {'success': False, 'error': 'ScrapingBee API key not configured', 'html': '', 'screenshot': None}
@@ -1742,6 +1935,7 @@ class AmazonMonitor:
 
 # ============= INITIALIZE COMPONENTS =============
 db_manager = DatabaseManager()
+db_manager.add_subscription_columns()
 email_notifier = EmailNotifier()
 api_encryption = APIKeyEncryption()
 monitor = AmazonMonitor(SCRAPINGBEE_API_KEY)
@@ -2358,6 +2552,20 @@ def ensure_scheduler_endpoint():
 
     return html
 
+@app.route('/api/my_usage')
+@login_required
+def my_usage_stats():
+    """Check current user's API usage"""
+    usage_today = APIRateLimiter.get_user_usage_today(current_user.id)
+    remaining = APIRateLimiter.DAILY_LIMIT_PER_USER - usage_today
+
+    return jsonify({
+        'used_today': usage_today,
+        'daily_limit': APIRateLimiter.DAILY_LIMIT_PER_USER,
+        'remaining': remaining,
+        'percentage_used': round((usage_today / APIRateLimiter.DAILY_LIMIT_PER_USER) * 100, 1)
+    })
+
 @app.route('/csrf-test')
 def csrf_test():
     return """
@@ -2445,7 +2653,7 @@ def create_user_session(user_data, email):
             id=user_data['id'],
             email=user_data['email'] or email,
             full_name=user_data.get('full_name'),
-            is_verified=bool(user_data.get('is_verified', False)),
+           is_verified=bool(user_data.get('is_verified', False)),
             is_active=bool(user_data.get('is_active', True))
         )
     else:
@@ -2464,7 +2672,7 @@ def create_user_session(user_data, email):
 
 def validate_password(password):
     """Validate password meets security requirements"""
-    errors = []
+    errors = [] 
 
     if len(password) < PASSWORD_REQUIREMENTS['min_length']:
         errors.append(f"Password must be at least {PASSWORD_REQUIREMENTS['min_length']} characters")
@@ -2660,7 +2868,7 @@ def register():
                 ''', (user_id, verification_token))
 
             conn.commit()
-
+            
             # Send verification email
             if email_notifier.is_configured():
                 email_notifier.send_verification_email(email, verification_token)
@@ -4087,6 +4295,83 @@ def debug_db_connection():
     else:
         return f"Using SQLite (not PostgreSQL): {database_url}"
 
+@app.route('/payhip_webhook', methods=['POST'])
+@csrf.exempt  # Payhip won't send CSRF tokens
+def payhip_webhook():
+    """Handle Payhip payment notifications"""
+
+    # Verify webhook signature (Payhip should provide this)
+    webhook_secret = os.environ.get('PAYHIP_WEBHOOK_SECRET')
+
+    data = request.json
+
+    # Payhip typically sends: email, product_id, transaction_id, etc.
+    email = data.get('buyer_email', '').lower()
+    product_id = data.get('product_id')
+    transaction_id = data.get('transaction_id')
+
+    # Map Payhip product IDs to your tiers
+    tier_mapping = {
+        'your_payhip_author_product_id': ('author', 2),  # tier, max_products
+        'your_payhip_publisher_product_id': ('publisher', 5)
+    }
+
+    if product_id not in tier_mapping:
+        return jsonify({'error': 'Unknown product'}), 400
+
+    tier, max_products = tier_mapping[product_id]
+
+    conn = get_db()
+    cursor = conn.cursor()
+
+    try:
+        # Check if user exists
+        if get_db_type() == 'postgresql':
+            cursor.execute('SELECT id FROM users WHERE LOWER(email) = LOWER(%s)', (email,))
+        else:
+            cursor.execute('SELECT id FROM users WHERE LOWER(email) = LOWER(?)', (email,))
+
+        user = cursor.fetchone()
+
+        if user:
+            # Update existing user
+            if get_db_type() == 'postgresql':
+                cursor.execute("""
+                    UPDATE users 
+                    SET subscription_tier = %s,
+                        subscription_status = 'active',
+                        subscription_expires = %s,
+                        payhip_transaction_id = %s,
+                        max_products = %s
+                    WHERE LOWER(email) = LOWER(%s)
+                """, (tier, datetime.now() + timedelta(days=30), 
+                      transaction_id, max_products, email))
+        else:
+            # Create placeholder user (they'll set password on first login)
+            if get_db_type() == 'postgresql':
+                cursor.execute("""
+                    INSERT INTO users (email, password_hash, subscription_tier, 
+                                     subscription_status, subscription_expires,
+                                     payhip_transaction_id, max_products, is_verified)
+                    VALUES (%s, %s, %s, 'active', %s, %s, %s, true)
+                """, (email, 'pending_setup', tier, 
+                      datetime.now() + timedelta(days=30), 
+                      transaction_id, max_products))
+
+        conn.commit()
+
+        # Send welcome email
+        email_notifier.send_subscription_confirmation(email, tier)
+
+        return jsonify({'status': 'success'})
+
+    except Exception as e:
+        conn.rollback()
+        print(f"Payhip webhook error: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        conn.close()
+
 @app.route('/test-email')
 @login_required
 def test_email():
@@ -4660,37 +4945,47 @@ def add_product_form():
     return render_template('add_product.html')
 
 @app.route('/add_product', methods=['POST'])
-@limiter.limit("10 per minute")
+#@limiter.limit("10 per minute")
 @login_required
 def add_product():
-    """Fixed add_product with target categories and better error handling"""
     print(f"🔍 Adding product for user {current_user.email} (ID: {current_user.id})")
+    #MAX_PRODUCTS_PER_USER = 5
 
     conn = get_db()
     cursor = conn.cursor()
 
     try:
-        # Validate API key exists
+        # Get user's subscription info
         if get_db_type() == 'postgresql':
-            cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = %s', (current_user.id,))
-        else:
-            cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = ?', (current_user.id,))
+            cursor.execute("""
+                    SELECT subscription_tier, subscription_status, 
+                           subscription_expires, max_products
+                    FROM users WHERE id = %s
+                """, (current_user.id,))
 
-        result = cursor.fetchone()
+        user_data = cursor.fetchone()
 
-        if result:
-            if isinstance(result, dict):
-                api_key = result.get('scrapingbee_api_key')
-            else:
-                api_key = result[0] if result else None
-        else:
-            api_key = None
+        if not user_data or user_data['subscription_status'] != 'active':
+            flash('Please subscribe to add products. Visit payhip.com/yourstore', 'error')
+            return redirect(url_for('pricing'))
 
-        if not api_key:
-            flash('Please add your ScrapingBee API key in settings.', 'error')
-            conn.close()
-            return redirect(url_for('settings'))
+        if user_data['subscription_expires'] < datetime.now():
+            flash('Your subscription has expired. Please renew.', 'error')
+            return redirect(url_for('pricing'))
 
+        # Check product limit
+        max_products = user_data['max_products']
+
+        cursor.execute(
+            "SELECT COUNT(*) FROM products WHERE user_id = %s AND active = true",
+            (current_user.id,)
+        )
+        current_count = cursor.fetchone()[0]
+
+        if current_count >= max_products:
+            flash(f'You have reached your limit of {max_products} products. Upgrade to Publisher tier for more.', 'error')
+            return redirect(url_for('dashboard'))
+            
         url = request.form.get('url', '').strip()
         target_categories_input = request.form.get('target_categories', '').strip()
 
@@ -4703,7 +4998,7 @@ def add_product():
 
         # Scrape product
         try:
-            user_monitor = AmazonMonitor.for_user(current_user.id)
+            user_monitor = AmazonMonitor(SCRAPINGBEE_API_KEY)  # Use global key directly
             scrape_result = user_monitor.scrape_amazon_page(url)
         except Exception as scrape_error:
             print(f"❌ Scraping error: {scrape_error}")
@@ -4851,6 +5146,12 @@ def add_product():
         conn.close()
         return redirect(url_for('add_product_form'))
 
+@app.route('/pricing')
+def pricing():
+    return render_template('pricing.html', 
+                         author_price=30,  # Opening month price
+                         publisher_price=60)
+
 # Add route to reset rate limits (admin only)
 @app.route('/admin/reset_rate_limits')
 @login_required
@@ -4866,148 +5167,6 @@ def reset_rate_limits():
         return redirect(url_for('dashboard'))
     except Exception as e:
         return f"Error resetting rate limits: {str(e)}", 500
-
-@app.route('/check_scrapingbee_usage')
-@login_required
-def check_scrapingbee_usage():
-    """Check ScrapingBee API key validity and usage"""
-    conn = get_db()
-    cursor = conn.cursor()
-
-    try:
-        # Get user's API key
-        if get_db_type() == 'postgresql':
-            cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = %s', (current_user.id,))
-        else:
-            cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = ?', (current_user.id,))
-
-        result = cursor.fetchone()
-
-        if result:
-            if isinstance(result, dict):
-                encrypted_key = result.get('scrapingbee_api_key')
-            else:
-                encrypted_key = result[0] if result else None
-        else:
-            encrypted_key = None
-
-        conn.close()
-
-        if not encrypted_key:
-            return """
-            <html>
-            <body style="font-family: Arial, sans-serif; padding: 20px;">
-                <h2>No API Key Found</h2>
-                <p>Please add your ScrapingBee API key in settings first.</p>
-                <a href="/settings">Go to Settings</a>
-            </body>
-            </html>
-            """
-
-        # Decrypt the API key
-        try:
-            api_key = api_encryption.decrypt(encrypted_key)
-        except Exception as e:
-            return f"Error decrypting API key: {str(e)}", 500
-
-        # Test the API key with ScrapingBee's account endpoint
-        import requests
-
-        try:
-            # ScrapingBee account info endpoint
-            response = requests.get(
-                'https://app.scrapingbee.com/api/v1/usage',
-                params={'api_key': api_key},
-                timeout=10
-            )
-
-            if response.status_code == 200:
-                usage_data = response.json()
-
-                return f"""
-                <html>
-                <head>
-                    <style>
-                        body {{ font-family: Arial, sans-serif; padding: 20px; }}
-                        .success {{ color: green; }}
-                        .warning {{ color: orange; }}
-                        .error {{ color: red; }}
-                        .usage-box {{ 
-                            background: #f5f5f5; 
-                            padding: 20px; 
-                            border-radius: 8px; 
-                            margin: 20px 0;
-                        }}
-                    </style>
-                </head>
-                <body>
-                    <h2 class="success">✅ API Key is Valid!</h2>
-
-                    <div class="usage-box">
-                        <h3>ScrapingBee Usage</h3>
-                        <p><strong>API Credits Used:</strong> {usage_data.get('used_credits', 'N/A')}</p>
-                        <p><strong>Max API Credits:</strong> {usage_data.get('max_credits', 'N/A')}</p>
-                        <p><strong>Credits Remaining:</strong> {usage_data.get('max_credits', 0) - usage_data.get('used_credits', 0)}</p>
-                        <p><strong>Plan:</strong> {usage_data.get('plan', 'N/A')}</p>
-                    </div>
-
-                    <p><strong>API Key (first 20 chars):</strong> {api_key[:20] + '...' if api_key else 'None'}</p>
-
-                    <h3>Quick Actions</h3>
-                    <ul>
-                        <li><a href="/add_product_form">Add a Product</a></li>
-                        <li><a href="/dashboard">Back to Dashboard</a></li>
-                        <li><a href="/settings">Settings</a></li>
-                    </ul>
-                </body>
-                </html>
-                """
-            elif response.status_code == 401:
-                return f"""
-                <html>
-                <body style="font-family: Arial, sans-serif; padding: 20px;">
-                    <h2 class="error">❌ Invalid API Key</h2>
-                    <p>The API key is not recognized by ScrapingBee.</p>
-                    <p>Response: {response.text}</p>
-                    <p><strong>API Key (first 20 chars):</strong> {api_key[:20] + '...' if api_key else 'None'}</p>
-                    <br>
-                    <p>Please check your API key in your ScrapingBee dashboard and update it in settings.</p>
-                    <a href="/settings">Go to Settings</a>
-                </body>
-                </html>
-                """
-            elif response.status_code == 429:
-                return """
-                <html>
-                <body style="font-family: Arial, sans-serif; padding: 20px;">
-                    <h2 class="warning">⚠️ Rate Limited</h2>
-                    <p>You've exceeded your ScrapingBee API rate limit.</p>
-                    <p>Please wait a moment and try again.</p>
-                    <a href="/dashboard">Back to Dashboard</a>
-                </body>
-                </html>
-                """
-            else:
-                return f"""
-                <html>
-                <body style="font-family: Arial, sans-serif; padding: 20px;">
-                    <h2>API Check Result</h2>
-                    <p><strong>Status Code:</strong> {response.status_code}</p>
-                    <p><strong>Response:</strong> {response.text[:500]}</p>
-                    <a href="/dashboard">Back to Dashboard</a>
-                </body>
-                </html>
-                """
-
-        except requests.exceptions.Timeout:
-            return "ScrapingBee API check timed out", 504
-        except Exception as e:
-            return f"Error checking ScrapingBee API: {str(e)}", 500
-
-    except Exception as e:
-        if conn:
-            conn.close()
-        return f"Database error: {str(e)}", 500
 
 # Add a route to view baseline screenshots
 @app.route('/baseline_screenshot/<int:product_id>')
@@ -5248,7 +5407,7 @@ def dashboard():
     return dashboard_view()
 
 def dashboard_view():
-    """Dashboard view - FIXED to match template expectations"""
+    """Dashboard view - SIMPLIFIED without API key checks"""
     try:
         if not current_user.is_authenticated:
             print("❌ DASHBOARD_VIEW: User not authenticated")
@@ -5263,26 +5422,6 @@ def dashboard_view():
         cursor = conn.cursor()
 
         try:
-            # Check for API key
-            if get_db_type() == 'postgresql':
-                cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = %s', (user_id,))
-            else:
-                cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = ?', (user_id,))
-
-            result = cursor.fetchone()
-
-            if result:
-                if isinstance(result, dict):
-                    api_key_value = result.get('scrapingbee_api_key')
-                else:
-                    api_key_value = result[0] if result else None
-
-                has_api_key = bool(api_key_value)
-            else:
-                has_api_key = False
-
-            print(f"📊 DASHBOARD_VIEW: User has API key: {has_api_key}")
-
             # Get products
             if get_db_type() == 'postgresql':
                 cursor.execute('''
@@ -5372,8 +5511,7 @@ def dashboard_view():
             return render_template('dashboard.html',
                                  email=user_email,
                                  products=products,
-                                 screenshots=screenshots,
-                                 has_api_key=has_api_key)
+                                 screenshots=screenshots)
 
         except Exception as e:
             print(f"❌ DASHBOARD_VIEW: Database error: {e}")
@@ -5767,241 +5905,8 @@ def debug_all_screenshots():
 @app.route('/settings')
 @login_required
 def settings():
-    """User settings page - FIXED for PostgreSQL"""
-    conn = get_db()
-    cursor = conn.cursor()
-
-    try:
-        if get_db_type() == 'postgresql':
-            cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = %s', (current_user.id,))
-        else:
-            cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = ?', (current_user.id,))
-
-        result = cursor.fetchone()
-
-        # Fixed: Handle dict/tuple properly
-        if result:
-            if isinstance(result, dict):
-                api_key_value = result.get('scrapingbee_api_key')
-            else:
-                api_key_value = result[0] if result else None
-        else:
-            api_key_value = None
-
-        has_api_key = bool(api_key_value)
-
-        print(f"⚙️ Settings page - User has API key: {has_api_key}")
-
-    finally:
-        conn.close()
-
-    return render_template('settings.html', user=current_user, has_api_key=has_api_key)
-
-@app.route('/update_api_key', methods=['POST'])
-@login_required
-def update_api_key():
-    """Update user's ScrapingBee API key - FIXED for PostgreSQL"""
-    api_key = request.form.get('api_key', '').strip()
-
-    if not api_key:
-        flash('API key cannot be empty', 'error')
-        return redirect(url_for('settings'))
-
-    # Basic validation of API key
-    if len(api_key) < 20:
-        flash('API key seems too short. Please check your ScrapingBee dashboard.', 'error')
-        return redirect(url_for('settings'))
-
-    print(f"🔑 Attempting to save API key for user {current_user.email} (ID: {current_user.id})")
-    print(f"🔑 API key length: {len(api_key)}, starts with: {api_key[:10]}...")
-
-    # Get database connection
-    conn = get_db()
-    cursor = conn.cursor()
-
-    try:
-        # Encrypt the API key
-        encrypted_key = api_encryption.encrypt(api_key)
-        if encrypted_key is not None:
-            print(f"🔐 Encrypted key length: {len(encrypted_key)}")
-        else:
-            print("🔐 Encrypted key is None")
-
-        # Update in database - FIXED for PostgreSQL
-        if get_db_type() == 'postgresql':
-            cursor.execute('''
-                UPDATE users 
-                SET scrapingbee_api_key = %s 
-                WHERE id = %s
-            ''', (encrypted_key, current_user.id))
-        else:
-            cursor.execute('''
-                UPDATE users 
-                SET scrapingbee_api_key = ? 
-                WHERE id = ?
-            ''', (encrypted_key, current_user.id))
-
-        # Check if update was successful
-        if cursor.rowcount == 0:
-            print(f"❌ No rows updated for user ID {current_user.id}")
-            flash('Failed to save API key. User not found.', 'error')
-            conn.rollback()
-            conn.close()
-            return redirect(url_for('settings'))
-
-        # Commit the transaction
-        conn.commit()
-        print(f"✅ API key saved to database (affected rows: {cursor.rowcount})")
-
-        # Verify it was actually saved
-        if get_db_type() == 'postgresql':
-            cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = %s', (current_user.id,))
-        else:
-            cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = ?', (current_user.id,))
-
-        result = cursor.fetchone()
-        if result:
-            if isinstance(result, dict):
-                saved_key = result.get('scrapingbee_api_key')
-            else:
-                saved_key = result[0] if result else None
-
-            if saved_key:
-                print(f"✅ Verification: API key is in database (length: {len(saved_key)})")
-                flash('ScrapingBee API key saved successfully!', 'success')
-            else:
-                print("❌ Verification failed: API key not found in database after save")
-                flash('API key save verification failed. Please try again.', 'error')
-        else:
-            print("❌ Could not verify saved API key")
-            flash('API key saved but verification failed.', 'warning')
-
-    except Exception as e:
-        print(f"❌ Error saving API key: {e}")
-        import traceback
-        traceback.print_exc()
-        conn.rollback()
-        flash('Error saving API key. Please try again.', 'error')
-    finally:
-        conn.close()
-
-    return redirect(url_for('settings'))
-
-@app.route('/test_api_key_save', methods=['GET', 'POST'])
-@login_required
-def test_api_key_save():
-    """Test route to debug API key saving"""
-    if request.method == 'POST':
-        test_key = request.form.get('test_key', 'TEST_KEY_123456789012345678901234567890')
-
-        conn = get_db()
-        cursor = conn.cursor()
-
-        try:
-            # Try to save directly without encryption first
-            if get_db_type() == 'postgresql':
-                cursor.execute('''
-                    UPDATE users 
-                    SET scrapingbee_api_key = %s 
-                    WHERE id = %s
-                ''', (test_key, current_user.id))
-            else:
-                cursor.execute('''
-                    UPDATE users 
-                    SET scrapingbee_api_key = ? 
-                    WHERE id = ?
-                ''', (test_key, current_user.id))
-
-            conn.commit()
-
-            # Check if it saved
-            if get_db_type() == 'postgresql':
-                cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = %s', (current_user.id,))
-            else:
-                cursor.execute('SELECT scrapingbee_api_key FROM users WHERE id = ?', (current_user.id,))
-
-            result = cursor.fetchone()
-
-            if result:
-                if isinstance(result, dict):
-                    saved_value = result.get('scrapingbee_api_key')
-                else:
-                    saved_value = result[0] if result else None
-            else:
-                saved_value = None
-
-            conn.close()
-
-            return f"""
-            <html>
-            <body style="font-family: monospace; padding: 20px;">
-                <h2>API Key Save Test - Result</h2>
-                <p><strong>Attempted to save:</strong> {test_key}</p>
-                <p><strong>Rows affected:</strong> {cursor.rowcount}</p>
-                <p><strong>Retrieved value:</strong> {saved_value}</p>
-                <p><strong>Save successful:</strong> {saved_value == test_key}</p>
-                <br>
-                <a href="/test_api_key_save">Try Again</a> | 
-                <a href="/check_api_key">Check API Key</a> | 
-                <a href="/settings">Go to Settings</a>
-            </body>
-            </html>
-            """
-
-        except Exception as e:
-            conn.rollback()
-            conn.close()
-            return f"Error: {str(e)}", 500
-
-    # GET request - show form
-    return """
-    <html>
-    <body style="font-family: monospace; padding: 20px;">
-        <h2>Test API Key Saving</h2>
-        <p>This will test saving a value directly to the database.</p>
-        <form method="POST">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <input type="text" name="test_key" value="TEST_KEY_123456789012345678901234567890" size="50">
-            <button type="submit">Save Test Key</button>
-        </form>
-        <br>
-        <p><a href="/check_api_key">Check Current API Key</a></p>
-    </body>
-    </html>
-    """
-
-@app.route('/clear_api_key')
-@login_required
-def clear_api_key():
-    """Clear the API key for debugging"""
-    conn = get_db()
-    cursor = conn.cursor()
-
-    try:
-        if get_db_type() == 'postgresql':
-            cursor.execute('''
-                UPDATE users 
-                SET scrapingbee_api_key = NULL 
-                WHERE id = %s
-            ''', (current_user.id,))
-        else:
-            cursor.execute('''
-                UPDATE users 
-                SET scrapingbee_api_key = NULL 
-                WHERE id = ?
-            ''', (current_user.id,))
-
-        conn.commit()
-        conn.close()
-
-        flash('API key cleared. Please add a new one.', 'info')
-        return redirect(url_for('settings'))
-
-    except Exception as e:
-        conn.rollback()
-        conn.close()
-        flash(f'Error clearing API key: {str(e)}', 'error')
-        return redirect(url_for('settings'))
+    """Simple account settings page"""
+    return render_template('account_settings.html', user=current_user)
 
 @app.route('/test_encryption')
 @login_required

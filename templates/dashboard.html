@@ -643,10 +643,6 @@
                     🤖 Auto-Monitoring Active
                 </span>
 
-                <a href="{{ url_for('settings') }}" class="btn btn-info">
-                    ⚙️ Settings
-                </a>
-
                 <button onclick="showFeedbackModal()" class="btn btn-secondary">
                     💬 Send Feedback
                 </button>
@@ -657,18 +653,6 @@
             </div>
         </div>
 
-        <!-- Show warning if no API key is configured -->
-        {% if not has_api_key %}
-        <div class="api-warning">
-            <div>
-                <strong>⚠️ ScrapingBee API Key Required</strong><br>
-                You need to add your ScrapingBee API key before you can monitor products.
-            </div>
-            <a href="{{ url_for('settings') }}">Configure API Key</a>
-        </div>
-        {% endif %}
-
-        DASHBOARD_TIMER_WIDGET = """
         <div class="next-check-widget" style="background: white; padding: 20px; border-radius: 10px; margin-bottom: 20px;">
             <h3>⏰ Next Check Times</h3>
             <div id="next-check-list" style="margin-top: 15px;">
@@ -1157,6 +1141,34 @@
                 });
             }
         });
+
+        // Add to dashboard JavaScript
+        function loadUsageStats() {
+            fetch('/api/my_usage')
+                .then(response => response.json())
+                .then(data => {
+                    const usageHtml = `
+                        <div style="background: white; padding: 15optimization: px; border-radius: 8px; margin-bottom: 20px;">
+                            <h4>📊 Your API Usage Today</h4>
+                            <div style="margin: 10px 0;">
+                                <strong>${data.used_today}</strong> / ${data.daily_limit} calls used
+                            </div>
+                            <div style="background: #e0e0e0; height: 20px; border-radius: 10px;">
+                                <div style="background: ${data.percentage_used > 90 ? '#ff9900' : '#28a745'}; 
+                                            width: ${data.percentage_used}%; 
+                                            height: 100%; 
+                                            border-radius: 10px;">
+                                </div>
+                            </div>
+                            <small>${data.remaining} calls remaining today</small>
+                        </div>
+                    `;
+                    document.getElementById('usage-stats').innerHTML = usageHtml;
+                });
+        }
+
+        // Load on page load
+        document.addEventListener('DOMContentLoaded', loadUsageStats);
 
         function loadNextCheckTimes() {
             fetch('/api/next_check_times')
