@@ -1,0 +1,52 @@
+<!-- templates/pricing.html -->
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Pricing - Screenshot Tracker</title>
+    <script src="https://cdn.paddle.com/paddle/paddle.js"></script>
+    <script>
+        Paddle.Setup({ 
+            vendor: {{ paddle_vendor_id }},
+            eventCallback: function(data) {
+                if (data.event === "Checkout.Complete") {
+                    // Redirect to success page
+                    window.location.href = '/subscription_success';
+                }
+            }
+        });
+    </script>
+</head>
+<body>
+    <div class="pricing-cards">
+        <div class="card">
+            <h2>Author</h2>
+            <p class="price">$30/month</p>
+            <p class="original-price">Normally $40</p>
+            <ul>
+                <li>Track 2 products</li>
+                <li>Hourly monitoring</li>
+                <li>Email notifications</li>
+            </ul>
+            <button onclick="Paddle.Checkout.open({ 
+                product: {{ paddle_author_product_id }},
+                email: '{{ current_user.email if current_user.is_authenticated else '' }}'
+            })">Subscribe</button>
+        </div>
+
+        <div class="card">
+            <h2>Publisher</h2>
+            <p class="price">$60/month</p>
+            <p class="original-price">Normally $80</p>
+            <ul>
+                <li>Track 5 products</li>
+                <li>Hourly monitoring</li>
+                <li>Priority support</li>
+            </ul>
+            <button onclick="Paddle.Checkout.open({ 
+                product: {{ paddle_publisher_product_id }},
+                email: '{{ current_user.email if current_user.is_authenticated else '' }}'
+            })">Subscribe</button>
+        </div>
+    </div>
+</body>
+</html>

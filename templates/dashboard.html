@@ -643,10 +643,6 @@
                     🤖 Auto-Monitoring Active
                 </span>
 
-                <button onclick="showFeedbackModal()" class="btn btn-secondary">
-                    💬 Send Feedback
-                </button>
-
                 <a href="{{ url_for('auth.logout') }}" class="btn btn-danger">
                     🚪 Logout
                 </a>
@@ -816,83 +812,13 @@
         </div>
     </div>
 
-    <!-- Feedback Modal -->
-    <div id="feedbackModal" class="modal" style="display: none;">
-        <div class="modal-content" style="max-width: 600px; max-height: 90vh; overflow-y: auto; margin: 5vh auto;">
-            <span class="close" onclick="closeFeedbackModal()" style="position: sticky; top: 0; float: right; background: white; padding: 5px; z-index: 1001;">&times;</span>
-            <h2>📝 Beta Feedback</h2>
-            <p>Help us improve Amazon Rank Tracker!</p>
-
-            <form id="feedbackForm" method="POST" action="{{ url_for('send_feedback') }}">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-
-                <div style="margin-bottom: 15px;">
-                    <label>How would you rate your experience? (1-10)</label>
-                    <select name="rating" required style="width: 100%; padding: 10px; margin-top: 5px;">
-                        <option value="">Select a rating</option>
-                        <option value="10">10 - Excellent!</option>
-                        <option value="9">9 - Very Good</option>
-                        <option value="8">8 - Good</option>
-                        <option value="7">7 - Pretty Good</option>
-                        <option value="6">6 - Okay</option>
-                        <option value="5">5 - Average</option>
-                        <option value="4">4 - Below Average</option>
-                        <option value="3">3 - Poor</option>
-                        <option value="2">2 - Very Poor</option>
-                        <option value="1">1 - Terrible</option>
-                    </select>
-                </div>
-
-                <div style="margin-bottom: 15px;">
-                    <label>What do you love about the app?</label>
-                    <textarea name="love" rows="3" 
-                              placeholder="Tell us what's working well..."
-                              style="width: 100%; padding: 10px; margin-top: 5px;"></textarea>
-                </div>
-
-                <div style="margin-bottom: 15px;">
-                    <label>What could be improved?</label>
-                    <textarea name="improve" rows="3" required
-                              placeholder="What would make this better?"
-                              style="width: 100%; padding: 10px; margin-top: 5px;"></textarea>
-                </div>
-
-                <div style="margin-bottom: 15px;">
-                    <label>Any bugs or issues?</label>
-                    <textarea name="bugs" rows="3"
-                              placeholder="Describe any problems you encountered..."
-                              style="width: 100%; padding: 10px; margin-top: 5px;"></textarea>
-                </div>
-
-                <div style="margin-bottom: 15px;">
-                    <label>Would you pay for this service?</label>
-                    <select name="would_pay" required style="width: 100%; padding: 10px; margin-top: 5px;">
-                        <option value="">Select an option</option>
-                        <option value="yes_now">Yes, I'd pay right now!</option>
-                        <option value="yes_improved">Yes, after some improvements</option>
-                        <option value="maybe">Maybe, depends on price</option>
-                        <option value="no">No, I wouldn't pay</option>
-                    </select>
-                </div>
-
-                <div style="margin-bottom: 15px;">
-                    <label>If yes, how much per month?</label>
-                    <select name="price_point" style="width: 100%; padding: 10px; margin-top: 5px;">
-                        <option value="">Select a price</option>
-                        <option value="5">$5/month</option>
-                        <option value="10">$10/month</option>
-                        <option value="15">$15/month</option>
-                        <option value="20">$20/month</option>
-                        <option value="25+">$25+/month</option>
-                    </select>
-                </div>
-
-                <button type="submit" class="btn btn-primary" style="width: 100%; margin-bottom: 10px;">
-                    Send Feedback
-                </button>
-            </form>
-        </div>
-    </div>
+    <!-- Footer -->
+    <footer style="margin-top: 50px; padding: 20px; text-align: center; color: #666;">
+        <a href="/terms">Terms of Service</a> | 
+        <a href="/privacy">Privacy Policy</a> | 
+        <a href="/refunds">Refund Policy</a>
+        <p>© 2025 Screenshot Tracker. Not affiliated with Amazon.com, Inc.</p>
+    </footer>
 
     <script>
         // Store email globally for use in functions
@@ -1007,14 +933,6 @@
             document.getElementById('addCategoryForm').reset();
         }
 
-        function showFeedbackModal() {
-            document.getElementById('feedbackModal').style.display = 'block';
-        }
-
-        function closeFeedbackModal() {
-            document.getElementById('feedbackModal').style.display = 'none';
-            document.getElementById('feedbackForm').reset();
-        }
 
         // Handle closing modals when clicking outside - COMBINED handler for all modals
         window.onclick = function(event) {
@@ -1022,12 +940,6 @@
             const categoryModal = document.getElementById('categoryModal');
             if (event.target == categoryModal) {
                 closeModal();
-            }
-
-            // Handle feedback modal
-            const feedbackModal = document.getElementById('feedbackModal');
-            if (event.target == feedbackModal) {
-                closeFeedbackModal();
             }
 
             // Handle comparison modal
