@@ -12,6 +12,7 @@ import flask
 import string
 import sqlite3
 import requests
+import resend
 from bs4 import BeautifulSoup, Tag
 from bs4.element import NavigableString
 import base64
@@ -111,6 +112,7 @@ SMTP_USERNAME = os.environ.get('SMTP_USERNAME')
 SMTP_PASSWORD = os.environ.get('SMTP_PASSWORD')
 SENDER_EMAIL = os.environ.get('SENDER_EMAIL', SMTP_USERNAME)
 SENDER_NAME = os.environ.get('SENDER_NAME', 'Amazon Screenshot Tracker')
+resend.api_key = os.environ.get('RESEND_API_KEY')
 
 # ScrapingBee configuration - using environment variables for security
 SCRAPINGBEE_API_KEY = os.environ.get('SCRAPINGBEE_SECRET_KEY')
@@ -1102,10 +1104,15 @@ def create_api_usage_table():
 create_api_usage_table()
 
 class EmailNotifier:
-    """Email notifications using Amazon SES"""
+    """Email notifications using Resend"""
     def __init__(self):
+        self.use_resend = os.environ.get('USE_RESEND', 'false').lower() == 'true'
         self.use_ses = os.environ.get('USE_SES', 'false').lower() == 'true'
 
+        if self.use_resend:
+            resend.api_key = os.environ.get('RESEND_API_KEY')
+            self.sender_email = 'noreply@screenshottracker.com'
+        
         if self.use_ses:
             # Amazon SES setup
             self.ses_client = boto3.client(
@@ -1132,13 +1139,37 @@ class EmailNotifier:
         else:
             return all([self.smtp_server, self.username, self.password])
 
+    def _send_via_resend(self, recipient, subject, html_content, attachments=None):
+        try:
+            if not attachments:
+                response = resend.Emails.send({
+                    "from": "Screenshot Tracker <noreply@screenshottracker.com>",
+                    "to": recipient,
+                    "subject": subject,
+                    "html": html_content
+                })
+            else:
+                # Handle attachments
+                response = resend.Emails.send({
+                    "from": "Screenshot Tracker <noreply@screenshottracker.com>",
+                    "to": recipient,
+                    "subject": subject,
+                    "html": html_content,
+                    "attachments": attachments
+                })
+            return response is not None
+        except Exception as e:
+            print(f"Resend error: {e}")
+            return False
+
     def send_email(self, recipient, subject, html_content, attachments=None):
-        """Send email via SES or SMTP"""
         if not self.is_configured():
             print("Email not configured")
             return False
 
-        if self.use_ses:
+        if self.use_resend:
+            return self._send_via_resend(recipient, subject, html_content, attachments)
+        elif self.use_ses:
             return self._send_via_ses(recipient, subject, html_content, attachments)
         else:
             return self._send_via_smtp(recipient, subject, html_content, attachments)
@@ -2789,6 +2820,7 @@ def create_enhanced_user_tables():
 
 # Authentication routes with best practices
 @auth.route('/register', methods=['GET', 'POST'])
+@limiter.limit("5 per hour")
 def register():
     """User registration with validation - FIXED for PostgreSQL"""
     if current_user.is_authenticated:
