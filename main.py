@@ -2820,7 +2820,7 @@ def create_enhanced_user_tables():
 
 # Authentication routes with best practices
 @auth.route('/register', methods=['GET', 'POST'])
-@limiter.limit("5 per hour")
+#@limiter.limit("5 per hour")
 def register():
     """User registration with validation - FIXED for PostgreSQL"""
     if current_user.is_authenticated:
