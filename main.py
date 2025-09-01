@@ -11,8 +11,8 @@ import secrets
 import flask 
 import string
 import sqlite3
-import requests
 import resend
+import requests
 from bs4 import BeautifulSoup, Tag
 from bs4.element import NavigableString
 import base64
@@ -1110,6 +1110,7 @@ class EmailNotifier:
         self.use_ses = os.environ.get('USE_SES', 'false').lower() == 'true'
 
         if self.use_resend:
+            import resend
             resend.api_key = os.environ.get('RESEND_API_KEY')
             self.sender_email = 'noreply@screenshottracker.com'
         
@@ -1349,7 +1350,7 @@ class EmailNotifier:
 
                 <p>Hi there!</p>
 
-                <p>Thanks for joining our beta! Please verify your email address to start monitoring your Amazon products and capturing those valuable ranking screenshots.</p>
+                <p>Thanks for joining! Please verify your email address to start monitoring your Amazon products and capturing those valuable ranking screenshots.</p>
 
                 <div style="text-align: center;">
                     <a href="{verification_link}" class="button">Verify Email Address</a>
@@ -1373,7 +1374,7 @@ class EmailNotifier:
 
         return self.send_email(
             email,
-            "[Beta] Verify Your Email - Amazon Screenshot Tracker",
+            "Verify Your Email - Amazon Screenshot Tracker",
             html_content
         )
 
@@ -1382,7 +1383,7 @@ class EmailNotifier:
         return """
         <div style="margin-top: 40px; padding-top: 20px; border-top: 2px solid #eee;">
             <div style="text-align: center; color: #666; font-size: 14px;">
-                <p><strong>Amazon Screenshot Tracker</strong> - Currently in Beta 🚀</p>
+                <p><strong>Amazon Screenshot Tracker</strong></p>
                 <p style="font-size: 12px; margin: 10px 0;">
                     This is an automated notification. Please do not reply to this email.
                 </p>
@@ -1495,7 +1496,7 @@ class EmailNotifier:
 
         return self.send_email(
             email,
-            "[Beta] Password Reset - Amazon Screenshot Tracker",
+            "Password Reset - Amazon Screenshot Tracker",
             html_content
         )
 
@@ -1570,7 +1571,7 @@ class EmailNotifier:
         </head>
         <body>
             <div class="header">
-                <h1>🏆 [Beta] Achievement Unlocked!</h1>
+                <h1>🏆 Achievement Unlocked!</h1>
             </div>
             <div class="content">
                 <p>Congratulations! Your product has {achievement_text}!</p>
@@ -1625,7 +1626,7 @@ class EmailNotifier:
 
         return self.send_email(
             recipient_email,
-            f"[Beta] 🏆 Achievement: {product_info['title'][:50]}...",
+            f"🏆 Achievement: {product_info['title'][:50]}...",
             html_content,
             attachments
         )
