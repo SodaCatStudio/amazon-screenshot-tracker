@@ -42,3 +42,5 @@ gunicorn==21.2.0
 psycopg2-binary==2.9.9
 secure-smtplib==0.1.1
 boto3==1.40.19
+botocore
+resend

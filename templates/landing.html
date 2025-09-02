@@ -512,39 +512,177 @@
     <!-- Pricing -->
     <section class="pricing">
         <div class="container">
-            <h2 class="section-title">Simple, Transparent Pricing</h2>
-            <p class="section-subtitle">Choose the best plan for you</p>
+            <h2 class="section-title">Choose Your Plan</h2>
+            <p class="section-subtitle">Flexible pricing to fit your needs</p>
 
-            <div class="pricing-card">
-                <h3>Author Plan</h3>
-                <div class="price">
-                    <span class="price-period">$30 Monthly</span>
+            <div class="pricing-container">
+                <div class="pricing-tier">
+                    <h3>Author</h3>
+                    <p class="tier-subtitle">Perfect for individual authors</p>
+                    <ul class="tier-features">
+                        <li>Track up to 2 products</li>
+                        <li>Hourly monitoring</li>
+                        <li>Email notifications</li>
+                        <li>Bestseller screenshots</li>
+                    </ul>
+                    <div class="price-options">
+                        <div class="price-option">
+                            <span class="price">$14.99</span>
+                            <span class="period">weekly</span>
+                        </div>
+                        <div class="price-option featured">
+                            <span class="price">$29.99</span>
+                            <span class="period">monthly</span>
+                            <span class="badge">Most Popular</span>
+                        </div>
+                        <div class="price-option">
+                            <span class="price">$299.99</span>
+                            <span class="period">annually</span>
+                            <span class="savings">Save $60!</span>
+                        </div>
+                    </div>
                 </div>
-                <ul class="pricing-features">
-                    <li>Monitor up to 2 products</li>
-                    <li>Check every hour</li>
-                    <li>Email notifications</li>
-                    <li>Bestseller screenshots</li>
-                    <li>Custom category tracking</li>
-                    <li>30-day history</li>
-                </ul>
 
-                <h3>Publisher Plan</h3>
-                <div class="price">
-                    <span class="price-period">$50 Monthly</span>
+                <div class="pricing-tier">
+                    <h3>Publisher</h3>
+                    <p class="tier-subtitle">For publishers and agencies</p>
+                    <ul class="tier-features">
+                        <li>Track up to 5 products</li>
+                        <li>Hourly monitoring</li>
+                        <li>Priority email notifications</li>
+                        <li>All bestseller screenshots</li>
+                    </ul>
+                    <div class="price-options">
+                        <div class="price-option">
+                            <span class="price">$29.99</span>
+                            <span class="period">weekly</span>
+                        </div>
+                        <div class="price-option featured">
+                            <span class="price">$59.99</span>
+                            <span class="period">monthly</span>
+                            <span class="badge">Most Popular</span>
+                        </div>
+                        <div class="price-option">
+                            <span class="price">$599.99</span>
+                            <span class="period">annually</span>
+                            <span class="savings">Save $120!</span>
+                        </div>
+                    </div>
                 </div>
-                <ul class="pricing-features">
-                    <li>Monitor up to 5 products</li>
-                    <li>Check every hour</li>
-                    <li>Email notifications</li>
-                    <li>Bestseller screenshots</li>
-                    <li>Custom category tracking</li>
-                    <li>30-day history</li>
-                </ul>
-                <a href="{{ url_for('auth.register') }}" class="btn btn-primary" style="width: 100%;">Get Started</a>
+            </div>
+
+            <div style="text-align: center; margin-top: 40px;">
+                <a href="{{ url_for('auth.register') }}" class="btn btn-primary">Get Started</a>
             </div>
         </div>
     </section>
+
+    <style>
+    .pricing-container {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+        gap: 40px;
+        margin-top: 50px;
+    }
+
+    .pricing-tier {
+        background: white;
+        border-radius: 10px;
+        padding: 40px;
+        box-shadow: 0 2px 20px rgba(0,0,0,0.08);
+        border: 2px solid transparent;
+        transition: all 0.3s;
+    }
+
+    .pricing-tier:hover {
+        border-color: #ff9900;
+        transform: translateY(-5px);
+    }
+
+    .tier-subtitle {
+        color: #666;
+        margin-bottom: 20px;
+    }
+
+    .tier-features {
+        list-style: none;
+        padding: 20px 0;
+        border-bottom: 1px solid #eee;
+        margin-bottom: 30px;
+    }
+
+    .tier-features li {
+        padding: 8px 0;
+        color: #666;
+    }
+
+    .tier-features li:before {
+        content: "✓";
+        color: #28a745;
+        font-weight: bold;
+        margin-right: 10px;
+    }
+
+    .price-options {
+        display: flex;
+        flex-direction: column;
+        gap: 15px;
+    }
+
+    .price-option {
+        padding: 15px;
+        background: #f8f9fa;
+        border-radius: 8px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        position: relative;
+    }
+
+    .price-option.featured {
+        background: linear-gradient(135deg, #ff9900 0%, #ff7700 100%);
+        color: white;
+    }
+
+    .price-option .price {
+        font-size: 24px;
+        font-weight: bold;
+    }
+
+    .price-option .period {
+        color: #666;
+    }
+
+    .price-option.featured .period {
+        color: white;
+        opacity: 0.9;
+    }
+
+    .badge {
+        position: absolute;
+        top: -10px;
+        right: 20px;
+        background: #28a745;
+        color: white;
+        padding: 4px 12px;
+        border-radius: 20px;
+        font-size: 12px;
+    }
+
+    .savings {
+        background: #28a745;
+        color: white;
+        padding: 4px 12px;
+        border-radius: 20px;
+        font-size: 12px;
+    }
+
+    @media (max-width: 768px) {
+        .pricing-container {
+            grid-template-columns: 1fr;
+        }
+    }
+    </style>
 
     <!-- Footer -->
     <footer>
