@@ -23,25 +23,3 @@ externalPort = 80
 expertMode = true
 
 [workflows]
-runButton = "Project"
-
-[[workflows.workflow]]
-name = "Project"
-mode = "parallel"
-author = "agent"
-
-[[workflows.workflow.tasks]]
-task = "workflow.run"
-args = "Flask Server"
-
-[[workflows.workflow]]
-name = "Flask Server"
-author = "agent"
-
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "python main.py"
-waitForPort = 5000
-
-[workflows.workflow.metadata]
-outputType = "webview"
