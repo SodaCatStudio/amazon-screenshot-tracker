@@ -298,5 +298,52 @@
             </div>
         </div>
     </div>
+
+    <!-- Footer -->
+    <footer>
+        <div class="footer-links">
+            <a href="/terms">Terms</a>
+            <a href="/privacy">Privacy</a>
+            <a href="/refunds">Refunds</a>
+        </div>
+        <p style="opacity: 0.6;">© 2025 Screenshot Tracker</p>
+    </footer>
+
+    <script>
+        async function subscribe(priceId) {
+            // Show loading state
+            event.target.disabled = true;
+            event.target.textContent = 'Loading...';
+
+            try {
+                const response = await fetch('/create_checkout', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-CSRFToken': '{{ csrf_token() }}'
+                    },
+                    body: JSON.stringify({
+                        price_id: priceId
+                    })
+                });
+
+                const data = await response.json();
+
+                if (data.url) {
+                    // Redirect to Stripe Checkout
+                    window.location.href = data.url;
+                } else {
+                    alert('Error creating checkout session. Please try again.');
+                    event.target.disabled = false;
+                    event.target.textContent = 'Subscribe';
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                alert('Something went wrong. Please try again.');
+                event.target.disabled = false;
+                event.target.textContent = 'Subscribe';
+            }
+        }
+    </script>
 </body>
 </html>

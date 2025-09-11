@@ -105,6 +105,7 @@ scheduler_initialize = False
 scheduler_thread = None
 scheduler_running = False
 scheduler_lock = threading.Lock()
+stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 
 # ============= CONFIGURATION VARIABLES =============
 # Password requirements
@@ -5272,12 +5273,15 @@ def add_product():
 
 @app.route('/pricing')
 def pricing():
-    """Pricing page with Paddle checkout"""
+    """Pricing page with Stripe price IDs"""
     return render_template('pricing.html',
-                         paddle_vendor_id=os.environ.get('PADDLE_VENDOR_ID'),
-                         author_plan_id=os.environ.get('PADDLE_AUTHOR_PLAN_ID'),
-                         publisher_plan_id=os.environ.get('PADDLE_PUBLISHER_PLAN_ID'),
-                         is_sandbox=os.environ.get('PADDLE_SANDBOX', 'false'))
+        author_weekly_price_id=os.environ.get('STRIPE_AUTHOR_WEEKLY_PRICE'),
+        author_monthly_price_id=os.environ.get('STRIPE_AUTHOR_MONTHLY_PRICE'),
+        author_yearly_price_id=os.environ.get('STRIPE_AUTHOR_YEARLY_PRICE'),
+        publisher_weekly_price_id=os.environ.get('STRIPE_PUBLISHER_WEEKLY_PRICE'),
+        publisher_monthly_price_id=os.environ.get('STRIPE_PUBLISHER_MONTHLY_PRICE'),
+        publisher_yearly_price_id=os.environ.get('STRIPE_PUBLISHER_YEARLY_PRICE')
+    )
 
 # Add route to reset rate limits (admin only)
 @app.route('/admin/reset_rate_limits')
@@ -6840,6 +6844,90 @@ def create_checkout():
     )
 
     return jsonify({'url': session.url})
+
+@app.route('/stripe_webhook', methods=['POST'])
+@csrf.exempt
+def stripe_webhook():
+    """Handle Stripe subscription events"""
+    payload = request.get_data(as_text=True)
+    sig_header = request.headers.get('Stripe-Signature')
+    webhook_secret = os.environ.get('STRIPE_WEBHOOK_SECRET')
+
+    # Validate required parameters
+    if not sig_header:
+        return 'Missing Stripe-Signature header', 400
+    if not webhook_secret:
+        return 'Webhook secret not configured', 400
+
+    try:
+        event = stripe.Webhook.construct_event(
+            payload, sig_header, webhook_secret
+        )
+    except ValueError:
+        return 'Invalid payload', 400
+    except stripe.error.SignatureVerificationError:
+        return 'Invalid signature', 400
+
+    conn = get_db()
+    cursor = conn.cursor()
+
+    try:
+        if event['type'] == 'customer.subscription.created':
+            subscription = event['data']['object']
+            email = subscription['customer_email']
+            price_id = subscription['items']['data'][0]['price']['id']
+
+            # Map price IDs to tiers
+            tier_map = {
+                os.environ.get('STRIPE_AUTHOR_WEEKLY_PRICE'): ('author', 2, 7),
+                os.environ.get('STRIPE_AUTHOR_MONTHLY_PRICE'): ('author', 2, 30),
+                os.environ.get('STRIPE_AUTHOR_YEARLY_PRICE'): ('author', 2, 365),
+                os.environ.get('STRIPE_PUBLISHER_WEEKLY_PRICE'): ('publisher', 5, 7),
+                os.environ.get('STRIPE_PUBLISHER_MONTHLY_PRICE'): ('publisher', 5, 30),
+                os.environ.get('STRIPE_PUBLISHER_YEARLY_PRICE'): ('publisher', 5, 365),
+            }
+
+            if price_id in tier_map:
+                tier, max_products, days = tier_map[price_id]
+
+                # Update user
+                if get_db_type() == 'postgresql':
+                    cursor.execute("""
+                        INSERT INTO users (email, password_hash, subscription_tier,
+                                         subscription_status, subscription_expires,
+                                         stripe_customer_id, stripe_subscription_id,
+                                         max_products, is_verified)
+                        VALUES (%s, %s, %s, 'active', %s, %s, %s, %s, true)
+                        ON CONFLICT (email) DO UPDATE SET
+                            subscription_tier = EXCLUDED.subscription_tier,
+                            subscription_status = 'active',
+                            subscription_expires = EXCLUDED.subscription_expires,
+                            stripe_subscription_id = EXCLUDED.stripe_subscription_id,
+                            max_products = EXCLUDED.max_products
+                    """, (email, 'PENDING_SETUP', tier, 
+                          datetime.now() + timedelta(days=days),
+                          subscription['customer'], subscription['id'], 
+                          max_products))
+
+        elif event['type'] == 'customer.subscription.deleted':
+            subscription = event['data']['object']
+
+            if get_db_type() == 'postgresql':
+                cursor.execute("""
+                    UPDATE users 
+                    SET subscription_status = 'cancelled'
+                    WHERE stripe_subscription_id = %s
+                """, (subscription['id'],))
+
+        conn.commit()
+        return '', 200
+
+    except Exception as e:
+        conn.rollback()
+        print(f"Stripe webhook error: {e}")
+        return str(e), 500
+    finally:
+        conn.close()
 
 @app.route('/api/next_check_times')
 @login_required
