@@ -30,9 +30,8 @@ try:
     POSTGRES_AVAILABLE = True
 except ImportError:
     print("⚠️  PostgreSQL not available, using SQLite only")
-    psycopg2 = None
-    RealDictCursor = None
     POSTGRES_AVAILABLE = False
+    # Don't set psycopg2 to None to avoid type checker issues
 from urllib.parse import urlparse
 import json
 import signal
@@ -55,8 +54,8 @@ try:
     CRYPTOGRAPHY_AVAILABLE = True
 except ImportError:
     print("⚠️  Cryptography not available, encryption features disabled")
-    Fernet = None
     CRYPTOGRAPHY_AVAILABLE = False
+    # Don't set Fernet to None to avoid type checker issues
 import logging
 from logging.handlers import RotatingFileHandler
 from dotenv import load_dotenv
@@ -179,6 +178,8 @@ def get_db():
     if database_url and POSTGRES_AVAILABLE:
         # Production: PostgreSQL
         try:
+            import psycopg2  # Re-import to satisfy type checker
+            from psycopg2.extras import RealDictCursor
             conn = psycopg2.connect(database_url, cursor_factory=RealDictCursor)
             return conn
         except Exception as e:
@@ -1651,6 +1652,7 @@ class APIKeyEncryption:
     def __init__(self):
         # Generate a key from your secret
         if CRYPTOGRAPHY_AVAILABLE:
+            from cryptography.fernet import Fernet  # Local import to satisfy type checker
             secret = app.config['SECRET_KEY'].encode()
             self.cipher = Fernet(base64.urlsafe_b64encode(secret[:32].ljust(32, b'0')))
         else:
