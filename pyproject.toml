@@ -10,4 +10,7 @@ dependencies = [
     "requests==2.32.3",
     "schedule==1.2.2",
     "scrapingbee==2.0.1",
+    "stripe==5.5.0",
+    "psycopg2-binary==2.9.10",
+    "cryptography==45.0.7",
 ]
