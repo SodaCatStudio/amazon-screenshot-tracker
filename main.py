@@ -24,8 +24,15 @@ import schedule
 import re
 import os
 import atexit # For graceful shutdown
-import psycopg2
-from psycopg2.extras import RealDictCursor
+try:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+    POSTGRES_AVAILABLE = True
+except ImportError:
+    print("⚠️  PostgreSQL not available, using SQLite only")
+    psycopg2 = None
+    RealDictCursor = None
+    POSTGRES_AVAILABLE = False
 from urllib.parse import urlparse
 import json
 import signal
@@ -33,6 +40,7 @@ import sys
 import smtplib
 import boto3
 import hashlib
+import stripe
 from collections import OrderedDict
 from botocore.exceptions import ClientError
 from flask_talisman import Talisman
@@ -42,7 +50,13 @@ from email.mime.image import MIMEImage
 from email.utils import formataddr
 from flask_wtf import FlaskForm
 from flask_wtf.csrf import CSRFProtect, CSRFError
-from cryptography.fernet import Fernet
+try:
+    from cryptography.fernet import Fernet
+    CRYPTOGRAPHY_AVAILABLE = True
+except ImportError:
+    print("⚠️  Cryptography not available, encryption features disabled")
+    Fernet = None
+    CRYPTOGRAPHY_AVAILABLE = False
 import logging
 from logging.handlers import RotatingFileHandler
 from dotenv import load_dotenv
@@ -162,7 +176,7 @@ def get_db():
     """Get database connection - PostgreSQL in production, SQLite in development"""
     database_url = os.environ.get('DATABASE_URL')
 
-    if database_url:
+    if database_url and POSTGRES_AVAILABLE:
         # Production: PostgreSQL
         try:
             conn = psycopg2.connect(database_url, cursor_factory=RealDictCursor)
@@ -172,13 +186,15 @@ def get_db():
             raise
     else:
         # Development: SQLite
+        if database_url and not POSTGRES_AVAILABLE:
+            print("⚠️  DATABASE_URL set but PostgreSQL not available, falling back to SQLite")
         conn = sqlite3.connect('amazon_monitor.db')
         conn.row_factory = sqlite3.Row
         return conn
 
 def get_db_type():
     """Determine if using PostgreSQL or SQLite"""
-    return 'postgresql' if os.environ.get('DATABASE_URL') else 'sqlite'
+    return 'postgresql' if os.environ.get('DATABASE_URL') and POSTGRES_AVAILABLE else 'sqlite'
 
 # ============= SCHEDULER FUNCTIONS =============
 def ensure_scheduler_running():
@@ -540,7 +556,7 @@ class DatabaseManager:
 
     def get_db_type(self):
         """Determine if using PostgreSQL or SQLite"""
-        return 'postgresql' if os.environ.get('DATABASE_URL') else 'sqlite'
+        return 'postgresql' if os.environ.get('DATABASE_URL') and POSTGRES_AVAILABLE else 'sqlite'
 
     def init_db_if_needed(self):
         """Only create tables if they don't exist - preserve data"""
@@ -1634,19 +1650,28 @@ class EmailNotifier:
 class APIKeyEncryption:
     def __init__(self):
         # Generate a key from your secret
-        secret = app.config['SECRET_KEY'].encode()
-        self.cipher = Fernet(base64.urlsafe_b64encode(secret[:32].ljust(32, b'0')))
+        if CRYPTOGRAPHY_AVAILABLE:
+            secret = app.config['SECRET_KEY'].encode()
+            self.cipher = Fernet(base64.urlsafe_b64encode(secret[:32].ljust(32, b'0')))
+        else:
+            print("⚠️  API key encryption disabled (cryptography not available)")
+            self.cipher = None
 
     def encrypt(self, api_key):
         """Encrypt API key before storing"""
         if not api_key:
             return None
+        if not self.cipher:
+            print("⚠️  Storing API key in plain text (encryption disabled)")
+            return api_key  # Store in plain text if encryption not available
         return self.cipher.encrypt(api_key.encode()).decode()
 
     def decrypt(self, encrypted_key):
         """Decrypt API key for use"""
         if not encrypted_key:
             return None
+        if not self.cipher:
+            return encrypted_key  # Return as-is if encryption not available
         return self.cipher.decrypt(encrypted_key.encode()).decode()
 
 class AmazonMonitor:
@@ -6796,6 +6821,23 @@ def check_user_products(user_id, limit=10):
         if conn:
             conn.close()
         raise
+
+@app.route('/create_checkout', methods=['POST'])
+@login_required
+def create_checkout():
+    data = request.get_json()
+    price_id = data.get('price_id')
+
+    session = stripe.checkout.Session.create(
+        payment_method_types=['card'],
+        line_items=[{'price': price_id, 'quantity': 1}],
+        mode='subscription',
+        success_url='https://screenshottracker.com/success?session_id={CHECKOUT_SESSION_ID}',
+        cancel_url='https://screenshottracker.com/pricing',
+        customer_email=current_user.email
+    )
+
+    return jsonify({'url': session.url})
 
 @app.route('/api/next_check_times')
 @login_required
