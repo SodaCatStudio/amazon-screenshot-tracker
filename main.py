@@ -6890,11 +6890,8 @@ def stripe_webhook():
         )
     except ValueError:
         return 'Invalid payload', 400
-    except Exception as e:
-        if 'SignatureVerificationError' in str(type(e)):
-            return 'Invalid signature', 400
-        else:
-            return 'Webhook error', 400
+    except stripe.error.SignatureVerificationError:
+        return 'Invalid signature', 400
 
     conn = get_db()
     cursor = conn.cursor()
