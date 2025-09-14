@@ -3540,6 +3540,60 @@ def resend_verification():
 
     return render_template('auth/resend_verification.html')
 
+@auth.route('/complete-registration', methods=['GET', 'POST'])
+def complete_registration():
+    email = request.args.get('email', '').lower()
+    token = request.args.get('token')
+
+    if request.method == 'GET':
+        # Show password setup form
+        return render_template('complete_registration.html', email=email, token=token)
+
+    if request.method == 'POST':
+        password = request.form.get('password')
+        full_name = request.form.get('full_name')
+        
+        # Validate required fields
+        if not password:
+            flash('Password is required', 'error')
+            return render_template('complete_registration.html', email=email, token=token)
+
+        # Verify user has active subscription
+        conn = get_db()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT id, subscription_status 
+            FROM users 
+            WHERE LOWER(email) = LOWER(%s) 
+            AND password_hash = 'PENDING_SETUP'
+        """, (email,))
+
+        user = cursor.fetchone()
+
+        if not user or user[1] != 'active':
+            flash('Invalid or expired registration link', 'error')
+            return redirect(url_for('auth.login'))
+
+        # Update user with password
+        password_hash = generate_password_hash(password)
+
+        cursor.execute("""
+            UPDATE users 
+            SET password_hash = %s,
+                full_name = %s,
+                is_verified = true
+            WHERE id = %s
+        """, (password_hash, full_name, user[0]))
+
+        conn.commit()
+
+        flash('Registration complete! You can now log in.', 'success')
+        return redirect(url_for('auth.login'))
+    
+    # Fallback return (should never reach here due to methods=['GET', 'POST'])
+    return redirect(url_for('auth.login'))
+
 # ============= REGISTER BLUEPRINTS =============
 app.register_blueprint(auth, url_prefix='/auth')
 
@@ -6890,8 +6944,11 @@ def stripe_webhook():
         )
     except ValueError:
         return 'Invalid payload', 400
-    except stripe.error.SignatureVerificationError:
-        return 'Invalid signature', 400
+    except Exception as e:
+        if 'SignatureVerificationError' in str(type(e)):
+            return 'Invalid signature', 400
+        else:
+            return 'Webhook error', 400
 
     conn = get_db()
     cursor = conn.cursor()
