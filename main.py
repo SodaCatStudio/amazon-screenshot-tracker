@@ -6891,11 +6891,9 @@ def stripe_webhook():
     except ValueError:
         return 'Invalid payload', 400
     except Exception as e:
-        # Handle Stripe signature verification errors
         if 'SignatureVerificationError' in str(type(e)):
             return 'Invalid signature', 400
         else:
-            print(f"Unexpected Stripe error: {e}")
             return 'Webhook error', 400
 
     conn = get_db()
