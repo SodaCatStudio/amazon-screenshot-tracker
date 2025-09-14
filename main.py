@@ -2849,9 +2849,34 @@ def create_enhanced_user_tables():
 
 # Authentication routes with best practices
 @auth.route('/register', methods=['GET', 'POST'])
-#@limiter.limit("5 per hour")
+@limiter.limit("5 per hour")
 def register():
-    """User registration with validation - FIXED for PostgreSQL"""
+    if request.method == 'POST':
+        email = request.form.get('email', '').lower()
+
+        # Check if user has paid via Stripe
+        conn = get_db()
+        cursor = conn.cursor()
+
+        if get_db_type() == 'postgresql':
+            cursor.execute("""
+                SELECT subscription_status, subscription_tier 
+                FROM users 
+                WHERE LOWER(email) = LOWER(%s)
+            """, (email,))
+        else:
+            cursor.execute("""
+                SELECT subscription_status, subscription_tier 
+                FROM users 
+                WHERE LOWER(email) = LOWER(?)
+            """, (email,))
+
+        user_data = cursor.fetchone()
+
+        if not user_data or user_data[0] != 'active':
+            flash('Please purchase a subscription first before creating an account.', 'error')
+            return redirect(url_for('pricing'))
+    """User registration with validation"""
     if current_user.is_authenticated:
         return redirect(url_for('dashboard'))
 
@@ -6877,44 +6902,71 @@ def stripe_webhook():
     cursor = conn.cursor()
 
     try:
-        if event['type'] == 'customer.subscription.created':
-            subscription = event['data']['object']
-            email = subscription['customer_email']
+        if event['type'] == 'checkout.session.completed':
+            session = event['data']['object']
+            email = session['customer_email']
+            subscription_id = session['subscription']
+
+            # Get subscription details
+            subscription = stripe.Subscription.retrieve(subscription_id)
             price_id = subscription['items']['data'][0]['price']['id']
 
             # Map price IDs to tiers
             tier_map = {
-                os.environ.get('STRIPE_AUTHOR_WEEKLY_PRICE'): ('author', 2, 7),
-                os.environ.get('STRIPE_AUTHOR_MONTHLY_PRICE'): ('author', 2, 30),
-                os.environ.get('STRIPE_AUTHOR_YEARLY_PRICE'): ('author', 2, 365),
-                os.environ.get('STRIPE_PUBLISHER_WEEKLY_PRICE'): ('publisher', 5, 7),
-                os.environ.get('STRIPE_PUBLISHER_MONTHLY_PRICE'): ('publisher', 5, 30),
-                os.environ.get('STRIPE_PUBLISHER_YEARLY_PRICE'): ('publisher', 5, 365),
+                os.environ.get('STRIPE_AUTHOR_WEEKLY_PRICE'): ('author', 2),
+                os.environ.get('STRIPE_AUTHOR_MONTHLY_PRICE'): ('author', 2),
+                os.environ.get('STRIPE_AUTHOR_YEARLY_PRICE'): ('author', 2),
+                os.environ.get('STRIPE_PUBLISHER_WEEKLY_PRICE'): ('publisher', 5),
+                os.environ.get('STRIPE_PUBLISHER_MONTHLY_PRICE'): ('publisher', 5),
+                os.environ.get('STRIPE_PUBLISHER_YEARLY_PRICE'): ('publisher', 5),
             }
 
-            if price_id in tier_map:
-                tier, max_products, days = tier_map[price_id]
+            tier, max_products = tier_map.get(price_id, ('author', 2))
 
-                # Update user
-                if get_db_type() == 'postgresql':
-                    cursor.execute("""
-                        INSERT INTO users (email, password_hash, subscription_tier,
-                                         subscription_status, subscription_expires,
-                                         stripe_customer_id, stripe_subscription_id,
-                                         max_products, is_verified)
-                        VALUES (%s, %s, %s, 'active', %s, %s, %s, %s, true)
-                        ON CONFLICT (email) DO UPDATE SET
-                            subscription_tier = EXCLUDED.subscription_tier,
-                            subscription_status = 'active',
-                            subscription_expires = EXCLUDED.subscription_expires,
-                            stripe_subscription_id = EXCLUDED.stripe_subscription_id,
-                            max_products = EXCLUDED.max_products
-                    """, (email, 'PENDING_SETUP', tier, 
-                          datetime.now() + timedelta(days=days),
-                          subscription['customer'], subscription['id'], 
-                          max_products))
+            # CREATE/UPDATE USER HERE
+            if get_db_type() == 'postgresql':
+                cursor.execute("""
+                    INSERT INTO users (
+                        email, 
+                        password_hash,
+                        subscription_status,
+                        subscription_tier,
+                        stripe_subscription_id,
+                        stripe_customer_id,
+                        max_products,
+                        is_verified,
+                        subscription_expires
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (email) DO UPDATE SET
+                        subscription_status = 'active',
+                        subscription_tier = EXCLUDED.subscription_tier,
+                        stripe_subscription_id = EXCLUDED.stripe_subscription_id,
+                        stripe_customer_id = EXCLUDED.stripe_customer_id,
+                        max_products = EXCLUDED.max_products
+                """, (
+                    email,
+                    'PENDING_SETUP',
+                    'active',
+                    tier,
+                    subscription_id,
+                    session['customer'],
+                    max_products,
+                    False,
+                    datetime.now() + timedelta(days=30)
+                ))
+
+            # Send registration email
+            registration_token = secrets.token_urlsafe(32)
+            cursor.execute("""
+                UPDATE users SET verification_token = %s 
+                WHERE email = %s
+            """, (registration_token, email))
+
+            # Send email with setup link
+            # email_notifier.send_setup_link(email, registration_token)
 
         elif event['type'] == 'customer.subscription.deleted':
+            # Handle cancellation
             subscription = event['data']['object']
 
             if get_db_type() == 'postgresql':
@@ -6928,10 +6980,12 @@ def stripe_webhook():
         return '', 200
 
     except Exception as e:
+        # This is where exception handling starts
         conn.rollback()
         print(f"Stripe webhook error: {e}")
         return str(e), 500
     finally:
+        # This always runs to close the connection
         conn.close()
 
 @app.route('/api/next_check_times')
