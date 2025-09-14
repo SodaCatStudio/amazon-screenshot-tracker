@@ -76,6 +76,7 @@ app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
 app.config['REMEMBER_COOKIE_DURATION'] = timedelta(days=14)
 app.config['REMEMBER_COOKIE_SECURE'] = True
 app.config['REMEMBER_COOKIE_HTTPONLY'] = True
+app.config['DEBUG'] = False
 
 # ============= INITIALIZE EXTENSIONS =============
 login_manager = LoginManager()
@@ -3013,6 +3014,7 @@ def login_success():
     """
 
 @auth.route('/login', methods=['GET', 'POST'])
+@limiter.limit("10 per hour per ip")
 def login():
     """User login with improved verification handling"""
     if current_user.is_authenticated:
@@ -6908,6 +6910,7 @@ def check_user_products(user_id, limit=10):
         raise
 
 @app.route('/create_checkout', methods=['POST'])
+@limiter.limit("5 per hour per ip")
 @login_required
 def create_checkout():
     data = request.get_json()
