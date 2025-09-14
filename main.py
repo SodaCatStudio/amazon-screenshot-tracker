@@ -6876,27 +6876,15 @@ def stripe_webhook():
     """Handle Stripe subscription events"""
     payload = request.get_data(as_text=True)
     sig_header = request.headers.get('Stripe-Signature')
-    webhook_secret = os.environ.get('STRIPE_WEBHOOK_SECRET')
-
-    # Validate required parameters
-    if not sig_header:
-        return 'Missing Stripe-Signature header', 400
-    if not webhook_secret:
-        return 'Webhook secret not configured', 400
 
     try:
         event = stripe.Webhook.construct_event(
-            payload, sig_header, webhook_secret
+            payload, sig_header, os.environ.get('STRIPE_WEBHOOK_SECRET')
         )
     except ValueError:
         return 'Invalid payload', 400
-    except Exception as e:
-        # Handle Stripe signature verification errors
-        if 'SignatureVerificationError' in str(type(e)):
-            return 'Invalid signature', 400
-        else:
-            print(f"Unexpected Stripe error: {e}")
-            return 'Webhook error', 400
+    except stripe.error.SignatureVerificationError:
+        return 'Invalid signature', 400
 
     conn = get_db()
     cursor = conn.cursor()
