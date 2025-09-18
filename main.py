@@ -2848,6 +2848,69 @@ def create_enhanced_user_tables():
     conn.commit()
     conn.close()
 
+@auth.route('/setup-account', methods=['GET', 'POST'])
+def setup_account():
+    email = request.args.get('email')
+    token = request.args.get('token')
+
+    if request.method == 'POST':
+        password = request.form.get('password')
+        full_name = request.form.get('full_name')
+
+        # Validate password exists
+        if not password:
+            flash('Password is required', 'error')
+            return render_template('setup_account.html', email=email)
+
+        conn = get_db()
+        cursor = conn.cursor()
+
+        # Verify token and email match
+        if get_db_type() == 'postgresql':
+            cursor.execute("""
+                SELECT id FROM users 
+                WHERE email = %s AND verification_token = %s 
+                AND password_hash = 'PENDING_SETUP'
+            """, (email, token))
+        else:
+            cursor.execute("""
+                SELECT id FROM users 
+                WHERE email = ? AND verification_token = ? 
+                AND password_hash = 'PENDING_SETUP'
+            """, (email, token))
+
+        user = cursor.fetchone()
+        if not user:
+            flash('Invalid or expired setup link', 'error')
+            conn.close()
+            return redirect(url_for('auth.login'))
+
+        # Now password is guaranteed to be a string
+        password_hash = generate_password_hash(password)
+
+        if get_db_type() == 'postgresql':
+            cursor.execute("""
+                UPDATE users 
+                SET password_hash = %s, full_name = %s, 
+                    is_verified = true, verification_token = NULL
+                WHERE id = %s
+            """, (password_hash, full_name or '', user[0]))
+        else:
+            cursor.execute("""
+                UPDATE users 
+                SET password_hash = ?, full_name = ?, 
+                    is_verified = 1, verification_token = NULL
+                WHERE id = ?
+            """, (password_hash, full_name or '', user[0]))
+
+        conn.commit()
+        conn.close()
+
+        flash('Account setup complete! You can now log in.', 'success')
+        return redirect(url_for('auth.login'))
+
+    return render_template('setup_account.html', email=email)
+
 # Authentication routes with best practices
 @auth.route('/register', methods=['GET', 'POST'])
 @limiter.limit("5 per hour")
@@ -7035,7 +7098,8 @@ def stripe_webhook():
             if get_db_type() == 'postgresql':
                 cursor.execute("""
                     UPDATE users 
-                    SET subscription_status = 'cancelled'
+                    SET subscription_status = 'cancelled',
+                        max_products = 0  # This prevents adding products
                     WHERE stripe_subscription_id = %s
                 """, (subscription['id'],))
 
@@ -7050,6 +7114,17 @@ def stripe_webhook():
     finally:
         # This always runs to close the connection
         conn.close()
+
+@app.route('/success')
+def subscription_success():
+    """Page after successful payment"""
+    return render_template('success.html', 
+        message="Payment successful! Check your email to complete setup.")
+
+@app.route('/cancel')
+def subscription_cancel():
+    """Page if user cancels payment"""
+    return redirect(url_for('pricing'))
 
 @app.route('/api/next_check_times')
 @login_required

@@ -19,7 +19,6 @@
             background-color: #f5f5f5;
         }
 
-        /* Navigation - same as landing page */
         nav {
             background-color: #232f3e;
             padding: 15px 0;
@@ -255,20 +254,20 @@
                 <div class="plan-card">
                     <h3>Weekly</h3>
                     <div class="price">$14.99</div>
-                    <button onclick="subscribe('{{ author_weekly_price_id }}')">Subscribe</button>
+                    <button onclick="subscribe('{{ author_weekly_price_id }}', this)">Subscribe</button>
                 </div>
 
                 <div class="plan-card featured">
                     <h3>Monthly</h3>
                     <div class="price">$29.99</div>
-                    <button onclick="subscribe('{{ author_monthly_price_id }}')">Subscribe</button>
+                    <button onclick="subscribe('{{ author_monthly_price_id }}', this)">Subscribe</button>
                 </div>
 
                 <div class="plan-card">
                     <h3>Annual</h3>
                     <div class="price">$299.99</div>
                     <p class="savings">Save $60!</p>
-                    <button onclick="subscribe('{{ author_annual_price_id }}')">Subscribe</button>
+                    <button onclick="subscribe('{{ author_annual_price_id }}', this)">Subscribe</button>
                 </div>
             </div>
 
@@ -280,20 +279,20 @@
                 <div class="plan-card">
                     <h3>Weekly</h3>
                     <div class="price">$29.99</div>
-                    <button onclick="subscribe('{{ publisher_weekly_price_id }}')">Subscribe</button>
+                    <button onclick="subscribe('{{ publisher_weekly_price_id }}', this)">Subscribe</button>
                 </div>
 
                 <div class="plan-card featured">
                     <h3>Monthly</h3>
                     <div class="price">$59.99</div>
-                    <button onclick="subscribe('{{ publisher_monthly_price_id }}')">Subscribe</button>
+                    <button onclick="subscribe('{{ publisher_monthly_price_id }}', this)">Subscribe</button>
                 </div>
 
                 <div class="plan-card">
                     <h3>Annual</h3>
                     <div class="price">$599.99</div>
                     <p class="savings">Save $120!</p>
-                    <button onclick="subscribe('{{ publisher_annual_price_id }}')">Subscribe</button>
+                    <button onclick="subscribe('{{ publisher_annual_price_id }}', this)">Subscribe</button>
                 </div>
             </div>
         </div>
@@ -310,10 +309,13 @@
     </footer>
 
     <script>
-        async function subscribe(priceId) {
+        async function subscribe(priceId, button) {
+            // Store original text
+            const originalText = button.textContent;
+            
             // Show loading state
-            event.target.disabled = true;
-            event.target.textContent = 'Loading...';
+            button.disabled = true;
+            button.textContent = 'Loading...';
 
             try {
                 const response = await fetch('/create_checkout', {
@@ -334,14 +336,14 @@
                     window.location.href = data.url;
                 } else {
                     alert('Error creating checkout session. Please try again.');
-                    event.target.disabled = false;
-                    event.target.textContent = 'Subscribe';
+                    button.disabled = false;
+                    button.textContent = originalText;
                 }
             } catch (error) {
                 console.error('Error:', error);
                 alert('Something went wrong. Please try again.');
-                event.target.disabled = false;
-                event.target.textContent = 'Subscribe';
+                button.disabled = false;
+                button.textContent = originalText;
             }
         }
     </script>
