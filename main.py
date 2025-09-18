@@ -6911,7 +6911,6 @@ def check_user_products(user_id, limit=10):
 
 @app.route('/create_checkout', methods=['POST'])
 @limiter.limit("5 per hour per ip")
-@login_required
 def create_checkout():
     data = request.get_json()
     price_id = data.get('price_id')
