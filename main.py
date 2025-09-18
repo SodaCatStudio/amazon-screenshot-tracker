@@ -6915,16 +6915,25 @@ def create_checkout():
     data = request.get_json()
     price_id = data.get('price_id')
 
-    session = stripe.checkout.Session.create(
-        payment_method_types=['card'],
-        line_items=[{'price': price_id, 'quantity': 1}],
-        mode='subscription',
-        success_url='https://screenshottracker.com/success?session_id={CHECKOUT_SESSION_ID}',
-        cancel_url='https://screenshottracker.com/pricing',
-        customer_email=current_user.email
-    )
+    try:
+        # Build session parameters
+        session_params = {
+            'payment_method_types': ['card'],
+            'line_items': [{'price': price_id, 'quantity': 1}],
+            'mode': 'subscription',
+            'success_url': 'https://screenshottracker.com/success?session_id={CHECKOUT_SESSION_ID}',
+            'cancel_url': 'https://screenshottracker.com/pricing'
+        }
 
-    return jsonify({'url': session.url})
+        # Only add email if user is logged in
+        if current_user.is_authenticated:
+            session_params['customer_email'] = current_user.email
+
+        session = stripe.checkout.Session.create(**session_params)
+        return jsonify({'url': session.url})
+    except Exception as e:
+        print(f"Stripe error: {e}")
+        return jsonify({'error': str(e)}), 400
 
 @app.route('/stripe_webhook', methods=['POST'])
 @csrf.exempt
