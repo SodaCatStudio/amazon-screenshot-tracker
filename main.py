@@ -22,6 +22,7 @@ try:
 except ImportError:
     print("⚠️  PIL not available, image processing disabled")
     PIL_AVAILABLE = False
+    Image = None  # Explicitly set to None for type checker
 import io
 from datetime import datetime, timedelta
 import threading
@@ -7043,7 +7044,7 @@ def process_achievement_screenshot(screenshot_data, product_id, user_id, achieve
     """Process full screenshot into badge and rank sections"""
     try:
         # Check if PIL is available
-        if not PIL_AVAILABLE:
+        if not PIL_AVAILABLE or Image is None:
             print("⚠️  PIL not available, skipping screenshot processing")
             return {
                 'full': None,
@@ -7051,10 +7052,7 @@ def process_achievement_screenshot(screenshot_data, product_id, user_id, achieve
                 'rank': None
             }
         
-        # Load screenshot  
-        if not PIL_AVAILABLE:
-            return {'full': None, 'badge': None, 'rank': None}
-            
+        # Load screenshot (Image is guaranteed to be available here)
         img = Image.open(io.BytesIO(screenshot_data))
         width, height = img.size
 
