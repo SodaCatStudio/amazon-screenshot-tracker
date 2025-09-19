@@ -16,6 +16,12 @@ import requests
 from bs4 import BeautifulSoup, Tag
 from bs4.element import NavigableString
 import base64
+try:
+    from PIL import Image
+    PIL_AVAILABLE = True
+except ImportError:
+    print("⚠️  PIL not available, image processing disabled")
+    PIL_AVAILABLE = False
 import io
 from datetime import datetime, timedelta
 import threading
@@ -132,6 +138,9 @@ resend.api_key = os.environ.get('RESEND_API_KEY')
 # ScrapingBee configuration - using environment variables for security
 SCRAPINGBEE_API_KEY = os.environ.get('SCRAPINGBEE_SECRET_KEY')
 SCRAPINGBEE_URL = 'https://app.scrapingbee.com/api/v1/'
+SCREENSHOT_DIR = os.path.join(os.path.dirname(__file__), 'screenshots')
+if not os.path.exists(SCREENSHOT_DIR):
+    os.makedirs(SCREENSHOT_DIR)
 
 # Validate that the API key is available
 if not SCRAPINGBEE_API_KEY:
@@ -371,147 +380,31 @@ def check_due_products():
 
         # Process each product
         for product in due_products:
-            product_id = None
-            try:
-                # Extract product data
-                if isinstance(product, dict):
-                    product_id = product['product_id']
-                    url = product['product_url']
-                    title = product['product_title']
-                    user_id = product['user_id']
-                    user_email = product['email']
-                    previous_rank = int(product['current_rank']) if product['current_rank'] else 999999
-                    was_bestseller = product['is_bestseller']
-                    last_checked = product['last_checked']
-                else:
-                    product_id = product[0]
-                    url = product[1]
-                    title = product[2]
-                    previous_rank = int(product[3]) if product[3] else 999999
-                    was_bestseller = product[5]
-                    last_checked = product[6]
-                    user_id = product[8]
-                    user_email = product[9]
+            # Extract product data
+            if isinstance(product, dict):
+                product_id = product['product_id']
+                url = product['product_url']
+                title = product['product_title']
+                user_id = product['user_id']
+                category = product['current_category']
+            else:
+                product_id = product[0]
+                url = product[1]
+                title = product[2]
+                user_id = product[8]
+                category = product[4]
 
-                if last_checked:
-                    time_since = current_time - datetime.fromisoformat(str(last_checked))
-                    minutes_since = int(time_since.total_seconds() / 60)
-                    print(f"  📦 Checking: {title[:40]}... (last: {minutes_since}min ago)")
-                else:
-                    print(f"  📦 Checking: {title[:40]}... (first check)")
+            # Use the new check_single_product function
+            success = check_single_product(
+                product_id, url, user_id, title, category, None
+            )
 
-                # Create monitor for this user
-                user_monitor = AmazonMonitor.for_user(user_id)
+            if success:
+                products_checked += 1
 
-                if not user_monitor.api_key:
-                    print(f"    ⚠️ No API key for user {user_id}, skipping")
-                    continue
+            time.sleep(2)  # Rate limiting between products
 
-                # Scrape the product
-                scrape_result = user_monitor.scrape_amazon_page(url)
-
-                if scrape_result.get('success'):
-                    product_info = user_monitor.extract_product_info(scrape_result.get('html', ''))
-
-                    current_rank = int(product_info['rank']) if product_info.get('rank') else None
-                    is_bestseller_now = product_info.get('is_bestseller', False)
-
-                    update_time = datetime.now()
-
-                    # Update product in database
-                    if get_db_type() == 'postgresql':
-                        cursor.execute('''
-                            UPDATE products 
-                            SET current_rank = %s, 
-                                current_category = %s,
-                                is_bestseller = %s, 
-                                last_checked = %s
-                            WHERE id = %s
-                        ''', (
-                            product_info.get('rank'),
-                            product_info.get('category'),
-                            is_bestseller_now,
-                            update_time,
-                            product_id
-                        ))
-                    else:
-                        cursor.execute('''
-                            UPDATE products 
-                            SET current_rank = ?, 
-                                current_category = ?,
-                                is_bestseller = ?, 
-                                last_checked = ?
-                            WHERE id = ?
-                        ''', (
-                            product_info.get('rank'),
-                            product_info.get('category'),
-                            is_bestseller_now,
-                            update_time,
-                            product_id
-                        ))
-
-                    # Check for achievements
-                    achievement_triggered = False
-                    achievement_reason = ""
-
-                    if is_bestseller_now and not was_bestseller:
-                        achievement_triggered = True
-                        achievement_reason = "🏆 New Bestseller!"
-                    elif current_rank:
-                        if current_rank == 1 and previous_rank != 1:
-                            achievement_triggered = True
-                            achievement_reason = "🥇 Reached #1!"
-                        elif current_rank <= 10 and previous_rank > 10:
-                            achievement_triggered = True
-                            achievement_reason = f"🎯 Top 10! (#{current_rank})"
-
-                    if achievement_triggered:
-                        print(f"    🎉 ACHIEVEMENT: {achievement_reason}")
-
-                        if scrape_result.get('screenshot'):
-                            # Save achievement screenshot
-                            if get_db_type() == 'postgresql':
-                                cursor.execute('''
-                                    INSERT INTO bestseller_screenshots 
-                                    (product_id, screenshot_data, rank_achieved, category, achieved_at)
-                                    VALUES (%s, %s, %s, %s, %s)
-                                ''', (product_id, scrape_result['screenshot'], 
-                                      product_info.get('rank'), 
-                                      f"{product_info.get('category', '')} - {achievement_reason}", 
-                                      update_time))
-                            else:
-                                cursor.execute('''
-                                    INSERT INTO bestseller_screenshots 
-                                    (product_id, screenshot_data, rank_achieved, category, achieved_at)
-                                    VALUES (?, ?, ?, ?, ?)
-                                ''', (product_id, scrape_result['screenshot'], 
-                                      product_info.get('rank'), 
-                                      f"{product_info.get('category', '')} - {achievement_reason}", 
-                                      update_time))
-
-                            # Send notification if configured
-                            if email_notifier.is_configured():
-                                product_info['title'] = title
-                                product_info['achievement_reason'] = achievement_reason
-                                email_notifier.send_bestseller_notification(
-                                    user_email, product_info, 
-                                    scrape_result['screenshot'], achievement_reason
-                                )
-                    else:
-                        print(f"    ✅ Rank: {current_rank or 'N/A'}")
-
-                    conn.commit()
-                    products_checked += 1
-
-                else:
-                    print(f"    ❌ Scrape failed: {scrape_result.get('error', 'Unknown')}")
-
-                time.sleep(2)
-
-            except Exception as e:
-                print(f"    ❌ Error checking product {product_id}: {e}")
-                continue
-
+        # Close connection and return success count
         conn.close()
         return products_checked
 
@@ -769,6 +662,14 @@ class DatabaseManager:
                 expires_at TIMESTAMP,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
+        ''')
+
+        cursor.execute('''
+            ALTER TABLE products 
+            ADD COLUMN IF NOT EXISTS last_rank INTEGER,
+            ADD COLUMN IF NOT EXISTS has_bestseller_badge BOOLEAN DEFAULT FALSE,
+            ADD COLUMN IF NOT EXISTS baseline_rank INTEGER,
+            ADD COLUMN IF NOT EXISTS last_achievement_date TIMESTAMP
         ''')
 
         # Feedback table
@@ -1693,106 +1594,91 @@ class AmazonMonitor:
         print(f"✅ Using global API key for user {user_id}")
         return cls(SCRAPINGBEE_API_KEY, user_id)
 
-    def scrape_amazon_page(self, url):
-        """Scrape with per-user rate limiting"""
-        # Check user's rate limit first
+    def scrape_amazon_page(self, url, need_screenshot=True):
+        """Scrape Amazon page - optionally with screenshot
+
+        Args:
+            url: Amazon product URL
+            need_screenshot: If False, saves 15 credits by skipping screenshot
+
+        Returns:
+            dict with success, error, html, and screenshot data
+        """
+        # Rate limiting check
         if self.user_id:
             can_call, error_msg = APIRateLimiter.check_and_increment(self.user_id)
             if not can_call:
-                print(f"❌ User {self.user_id} rate limit exceeded: {error_msg}")
+                print(f"❌ Rate limit exceeded: {error_msg}")
                 return {
                     'success': False, 
                     'error': error_msg,
                     'html': '',
                     'screenshot': None
                 }
-        print("✅ API call allowed, proceeding with request")
-            
+
         if not self.api_key:
             print("❌ ScrapingBee API key not configured")
-            return {'success': False, 'error': 'ScrapingBee API key not configured', 'html': '', 'screenshot': None}
+            return {'success': False, 'error': 'API key not configured', 'html': '', 'screenshot': None}
+
+        # Build parameters
+        params = {
+            'api_key': self.api_key,
+            'url': url,
+            'premium_proxy': 'true',
+            'country_code': 'us',
+            'window_width': 1920,
+            'window_height': 1080,
+            'wait': 3000,
+            'wait_for': '#detailBulletsWrapper_feature_div,#prodDetails,#detail-bullets_feature_div',
+            'scroll': 'true'
+        }
+
+        # Only add screenshot params if needed (saves 15 credits when False)
+        if need_screenshot:
+            params['screenshot'] = 'true'
+            params['screenshot_full_page'] = 'true'
+            print("📸 Taking full-page screenshot...")
+        else:
+            print("📊 HTML-only check (no screenshot)...")
 
         try:
-            print(f"🔄 Starting ScrapingBee request for: {url}")
-            print(f"🔑 Using API key: {self.api_key[:10]}...")
+            response = requests.get('https://app.scrapingbee.com/api/v1/', params=params, timeout=60)
 
-            # Use json_response to get both HTML and screenshot
-            params = {
-                'api_key': self.api_key,
-                'url': url,
-                'render_js': 'true',  # Required for screenshots
-                'screenshot': 'true',  # Enable screenshot
-                'json_response': 'true',  # Get JSON response with both HTML and screenshot
-                'screenshot_full_page': 'false',
-                'wait': '3000',
-                'premium_proxy': 'true',
-                'country_code': 'us',
+            if response.status_code != 200:
+                error_msg = f'ScrapingBee returned status {response.status_code}'
+                print(f"❌ {error_msg}")
+                return {
+                    'success': False,
+                    'error': error_msg,
+                    'html': '',
+                    'screenshot': None
+                }
+
+            print("✅ Successfully scraped Amazon page")
+
+            return {
+                'success': True,
+                'error': None,
+                'html': response.text,
+                'screenshot': response.content if need_screenshot and response.headers.get('Content-Type', '').startswith('image/') else None
             }
 
-            print("📤 Making request to ScrapingBee with screenshot enabled...")
-            response = requests.get(SCRAPINGBEE_URL, params=params, timeout=60)
-
-            print(f"📥 ScrapingBee response status: {response.status_code}")
-
-            if response.status_code == 200:
-                print("✅ ScrapingBee request successful")
-
-                try:
-                    # With json_response=true, we get a JSON object
-                    response_data = response.json()
-
-                    html_content = response_data.get('body', '')
-                    screenshot_data = response_data.get('screenshot', '')
-
-                    print(f"📄 HTML content length: {len(html_content) if html_content else 0} characters")
-                    print(f"📸 Screenshot data present: {'Yes' if screenshot_data else 'No'}")
-
-                    if screenshot_data:
-                        print(f"📸 Screenshot size: {len(screenshot_data)} characters")
-                        # The screenshot is already base64 encoded
-                        if not screenshot_data.startswith('data:'):
-                            # Ensure it's just the base64 data, no data URI prefix
-                            screenshot_data = screenshot_data.replace('data:image/png;base64,', '')
-
-                    return {
-                        'html': html_content or '',
-                        'screenshot': screenshot_data if screenshot_data else None,
-                        'success': True
-                    }
-
-                except json.JSONDecodeError as e:
-                    print(f"⚠️ JSON decode error, trying alternative method: {e}")
-                    # Fallback to non-JSON response
-                    return {
-                        'html': response.text,
-                        'screenshot': response.headers.get('Spb-Screenshot'),
-                        'success': True
-                    }
-
-            else:
-                error_msg = f'HTTP {response.status_code}: {response.text[:500]}'
-                print(f"❌ ScrapingBee error: {error_msg}")
-
-                # Check for specific errors
-                if response.status_code == 401:
-                    error_msg = "Invalid API key. Please check your ScrapingBee API key."
-                elif response.status_code == 429:
-                    error_msg = "Rate limit reached. Please wait and try again."
-                elif response.status_code == 402:
-                    error_msg = "Insufficient credits. Please check your ScrapingBee account."
-
-                return {'success': False, 'error': error_msg, 'html': '', 'screenshot': None}
-
         except requests.exceptions.Timeout:
-            error_msg = 'ScrapingBee request timed out (60s)'
-            print(f"⏰ {error_msg}")
-            return {'success': False, 'error': error_msg, 'html': '', 'screenshot': None}
+            print("❌ Request timed out after 60 seconds")
+            return {
+                'success': False,
+                'error': 'Request timed out',
+                'html': '',
+                'screenshot': None
+            }
         except Exception as e:
-            error_msg = f'ScrapingBee request failed: {str(e)}'
-            print(f"💥 {error_msg}")
-            import traceback
-            traceback.print_exc()
-            return {'success': False, 'error': error_msg, 'html': '', 'screenshot': None}
+            print(f"❌ Error during scraping: {str(e)}")
+            return {
+                'success': False,
+                'error': str(e),
+                'html': '',
+                'screenshot': None
+            }
 
     def extract_product_info(self, html):
         """Extract product ranking and bestseller info from Amazon HTML - FIXED"""
@@ -7153,6 +7039,80 @@ def manual_check_product(product_id):
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+def process_achievement_screenshot(screenshot_data, product_id, user_id, achievement_type):
+    """Process full screenshot into badge and rank sections"""
+    try:
+        # Check if PIL is available
+        if not PIL_AVAILABLE:
+            print("⚠️  PIL not available, skipping screenshot processing")
+            return {
+                'full': None,
+                'badge': None,
+                'rank': None
+            }
+        
+        # Load screenshot  
+        if not PIL_AVAILABLE:
+            return {'full': None, 'badge': None, 'rank': None}
+            
+        img = Image.open(io.BytesIO(screenshot_data))
+        width, height = img.size
+
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+
+        # Save full screenshot first (for reference)
+        full_filename = f'screenshot_{product_id}_full_{timestamp}.png'
+        full_path = os.path.join(SCREENSHOT_DIR, full_filename)
+        img.save(full_path)
+        print(f"💾 Saved full screenshot: {full_filename}")
+
+        # Create badge section (top 1200px)
+        badge_section = img.crop((0, 0, width, min(1200, height)))
+        badge_filename = f'screenshot_{product_id}_badge_{timestamp}.png'
+        badge_path = os.path.join(SCREENSHOT_DIR, badge_filename)
+        badge_section.save(badge_path)
+        print(f"💾 Saved badge section: {badge_filename}")
+
+        # Create rank section (from 1800px to end, max 1500px height)
+        if height > 1800:
+            rank_start = 1800
+            rank_end = min(rank_start + 1500, height)
+            rank_section = img.crop((0, rank_start, width, rank_end))
+            rank_filename = f'screenshot_{product_id}_rank_{timestamp}.png'
+            rank_path = os.path.join(SCREENSHOT_DIR, rank_filename)
+            rank_section.save(rank_path)
+            print(f"💾 Saved rank section: {rank_filename}")
+        else:
+            rank_filename = None
+
+        return {
+            'full': full_filename,
+            'badge': badge_filename,
+            'rank': rank_filename
+        }
+
+    except Exception as e:
+        print(f"Error processing screenshot: {e}")
+        return None
+
+def save_screenshot(screenshot_data, product_id, user_id, screenshot_type='badge'):
+    """Save screenshot with type identifier"""
+    if not screenshot_data:
+        return None
+
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    filename = f'screenshot_{product_id}_{screenshot_type}_{timestamp}.png'
+    filepath = os.path.join(SCREENSHOT_DIR, filename)
+
+    try:
+        with open(filepath, 'wb') as f:
+            f.write(screenshot_data)
+        print(f"💾 Saved {screenshot_type} screenshot: {filename}")
+        return filename
+    except Exception as e:
+        print(f"❌ Failed to save screenshot: {e}")
+        return None
+
 def check_specific_product(user_id, product_id):
     """Check a specific product"""
     conn = get_db()
@@ -7248,6 +7208,225 @@ def check_specific_product(user_id, product_id):
         if conn:
             conn.close()
         raise
+
+def check_single_product(product_id, url, user_id, product_title, category, target_rank):
+    """Check single product with two-call strategy"""
+    monitor = AmazonMonitor.for_user(user_id)
+
+    conn = get_db()
+    cursor = conn.cursor()
+
+    try:
+        # Get previous state
+        if get_db_type() == 'postgresql':
+            cursor.execute("""
+                SELECT last_rank, has_bestseller_badge, baseline_rank,
+                       last_achievement_date
+                FROM products WHERE id = %s
+            """, (product_id,))
+        else:
+            cursor.execute("""
+                SELECT last_rank, has_bestseller_badge, baseline_rank,
+                       last_achievement_date
+                FROM products WHERE id = ?
+            """, (product_id,))
+
+        prev_data = cursor.fetchone()
+        if not prev_data:
+            print(f"Product {product_id} not found")
+            return False
+
+        prev_rank = prev_data[0]
+        had_badge = prev_data[1] if prev_data[1] else False
+        baseline_rank = prev_data[2]
+        last_achievement = prev_data[3]
+
+        # FIRST CALL - HTML only (10 credits)
+        print(f"📊 Checking product: {product_title}")
+        result = monitor.scrape_amazon_page(url, need_screenshot=False)
+
+        if not result['success']:
+            print(f"❌ Failed to scrape: {result['error']}")
+            return False
+
+        product_info = monitor.extract_product_info(result['html'])
+        current_rank = int(product_info['rank']) if product_info['rank'] else None
+
+        # Determine if achievement occurred
+        achievements = []
+
+        # Check for new bestseller badge
+        if product_info['is_bestseller'] and not had_badge:
+            achievements.append('bestseller_badge')
+            print(f"🏆 New bestseller badge detected!")
+
+        # Check for rank improvement from baseline
+        if current_rank and baseline_rank:
+            if current_rank < baseline_rank * 0.8:  # 20% improvement
+                achievements.append('rank_improved')
+                print(f"📈 Significant rank improvement: #{baseline_rank} → #{current_rank}")
+
+        # Check if hit target rank
+        if current_rank and target_rank and current_rank <= target_rank:
+            # Don't trigger if we already captured this recently
+            if not last_achievement or (datetime.now() - last_achievement).days > 1:
+                achievements.append('target_reached')
+                print(f"🎯 Target rank reached: #{current_rank}")
+
+        # SECOND CALL - With screenshot if achievement detected (25 credits)
+        screenshot_files = None
+        if achievements:
+            print(f"🎯 Achievements detected! Capturing screenshot...")
+            screenshot_result = monitor.scrape_amazon_page(url, need_screenshot=True)
+
+            if screenshot_result['success'] and screenshot_result['screenshot']:
+                # Process the screenshot into sections
+                screenshot_files = process_achievement_screenshot(
+                    screenshot_result['screenshot'],
+                    product_id,
+                    user_id,
+                    achievements[0]
+                )
+
+                if screenshot_files:
+                    # Save achievement records
+                    for achievement_type in achievements:
+                        description = {
+                            'bestseller_badge': f"Achieved Bestseller Badge in {category or 'Books'}",
+                            'rank_improved': f"Rank improved to #{current_rank} from #{baseline_rank}",
+                            'target_reached': f"Reached target rank #{current_rank}"
+                        }.get(achievement_type, "Achievement unlocked")
+
+                        # Save with appropriate screenshot
+                        screenshot_to_use = screenshot_files['badge'] if 'badge' in achievement_type else screenshot_files['rank']
+
+                        save_achievement(
+                            product_id,
+                            user_id,
+                            achievement_type,
+                            screenshot_to_use or screenshot_files['full'],
+                            description
+                        )
+
+                    # Send email with both screenshots
+                    send_achievement_email_with_sections(
+                        user_id, 
+                        product_title, 
+                        achievements,
+                        screenshot_files
+                    )
+
+        # Update product status
+        if get_db_type() == 'postgresql':
+            cursor.execute("""
+                UPDATE products 
+                SET last_rank = %s,
+                    has_bestseller_badge = %s,
+                    last_checked = %s,
+                    last_achievement_date = %s
+                WHERE id = %s
+            """, (
+                current_rank, 
+                product_info['is_bestseller'], 
+                datetime.now(),
+                datetime.now() if achievements else last_achievement,
+                product_id
+            ))
+
+        conn.commit()
+        print(f"✅ Product check complete. Credits used: {10 if not achievements else 35}")
+        return True
+
+    except Exception as e:
+        conn.rollback()
+        print(f"❌ Error checking product: {e}")
+        return False
+    finally:
+        conn.close()
+
+def save_achievement(product_id, user_id, achievement_type, screenshot_filename, description):
+    """Save achievement record to database"""
+    conn = get_db()
+    cursor = conn.cursor()
+
+    try:
+        if get_db_type() == 'postgresql':
+            cursor.execute("""
+                INSERT INTO bestseller_screenshots 
+                (product_id, screenshot_data, rank_achieved, category, achieved_at)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (product_id, screenshot_filename, None, description, datetime.now()))
+        else:
+            cursor.execute("""
+                INSERT INTO bestseller_screenshots 
+                (product_id, screenshot_data, rank_achieved, category, achieved_at)
+                VALUES (?, ?, ?, ?, ?)
+            """, (product_id, screenshot_filename, None, description, datetime.now()))
+
+        conn.commit()
+        print(f"✅ Achievement saved: {achievement_type}")
+    except Exception as e:
+        print(f"❌ Error saving achievement: {e}")
+        conn.rollback()
+    finally:
+        conn.close()
+
+def send_achievement_email_with_sections(user_id, product_title, achievements, screenshot_files):
+    """Send email with both screenshot sections"""
+    # Get user email
+    conn = get_db()
+    cursor = conn.cursor()
+
+    if get_db_type() == 'postgresql':
+        cursor.execute("SELECT email FROM users WHERE id = %s", (user_id,))
+    else:
+        cursor.execute("SELECT email FROM users WHERE id = ?", (user_id,))
+
+    user = cursor.fetchone()
+    conn.close()
+
+    if not user:
+        return
+
+    email = user[0] if isinstance(user, tuple) else user['email']
+
+    # Build email content
+    achievement_text = ", ".join([
+        {
+            'bestseller_badge': 'Bestseller Badge',
+            'rank_improved': 'Rank Improvement',
+            'target_reached': 'Target Rank Reached'
+        }.get(a, a) for a in achievements
+    ])
+
+    html_content = f"""
+    <h2>🎉 Achievement Unlocked!</h2>
+    <p>Your product <strong>{product_title}</strong> has achieved: {achievement_text}</p>
+
+    <h3>Product Badge Area:</h3>
+    <p>Screenshot showing the product image and any bestseller badges</p>
+
+    <h3>Ranking Details:</h3>
+    <p>Screenshot showing the Best Sellers Rank in product details</p>
+
+    <p>View your dashboard for more details!</p>
+    """
+
+    # Attach both screenshots if available
+    attachments = []
+    if screenshot_files:
+        for key in ['badge', 'rank']:
+            if screenshot_files.get(key):
+                filepath = os.path.join(SCREENSHOT_DIR, screenshot_files[key])
+                if os.path.exists(filepath):
+                    with open(filepath, 'rb') as f:
+                        img_data = f.read()
+                        img = MIMEImage(img_data)
+                        img.add_header('Content-Disposition', 'attachment', 
+                                     filename=screenshot_files[key])
+                        attachments.append(img)
+
+    email_notifier.send_email(email, f"Achievement: {product_title}", html_content, attachments)
 
 def init_scheduler_if_needed():
     """Initialize scheduler only if enabled and not already running"""
