@@ -665,14 +665,6 @@ class DatabaseManager:
             )
         ''')
 
-        cursor.execute('''
-            ALTER TABLE products 
-            ADD COLUMN IF NOT EXISTS last_rank INTEGER,
-            ADD COLUMN IF NOT EXISTS has_bestseller_badge BOOLEAN DEFAULT FALSE,
-            ADD COLUMN IF NOT EXISTS baseline_rank INTEGER,
-            ADD COLUMN IF NOT EXISTS last_achievement_date TIMESTAMP
-        ''')
-
         # Feedback table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS feedback (
@@ -711,6 +703,46 @@ class DatabaseManager:
                 cursor.execute(index_query)
             except Exception as e:
                 print(f"⚠️ Index creation warning: {e}")
+
+    def add_achievement_tracking_columns(self):
+        """Add columns needed for two-call strategy"""
+        conn = get_db()
+        cursor = conn.cursor()
+
+        try:
+            if get_db_type() == 'postgresql':
+                cursor.execute("""
+                    ALTER TABLE products 
+                    ADD COLUMN IF NOT EXISTS last_rank INTEGER,
+                    ADD COLUMN IF NOT EXISTS has_bestseller_badge BOOLEAN DEFAULT FALSE,
+                    ADD COLUMN IF NOT EXISTS baseline_rank INTEGER,
+                    ADD COLUMN IF NOT EXISTS last_achievement_date TIMESTAMP
+                """)
+            else:
+                # SQLite - add columns one by one
+                columns_to_add = [
+                    ('last_rank', 'INTEGER'),
+                    ('has_bestseller_badge', 'BOOLEAN DEFAULT 0'),
+                    ('baseline_rank', 'INTEGER'),
+                    ('last_achievement_date', 'TIMESTAMP')
+                ]
+
+                for column_name, column_type in columns_to_add:
+                    try:
+                        cursor.execute(f"ALTER TABLE products ADD COLUMN {column_name} {column_type}")
+                        print(f"✅ Added column {column_name}")
+                    except Exception as e:
+                        if 'duplicate column' in str(e).lower():
+                            print(f"✅ Column {column_name} already exists")
+                        else:
+                            print(f"⚠️ Error adding column {column_name}: {e}")
+
+            conn.commit()
+            print("✅ Achievement tracking columns added/verified")
+        except Exception as e:
+            print(f"⚠️ Error adding achievement columns: {e}")
+        finally:
+            conn.close()
 
     def create_sqlite_tables(self, cursor):
         """Create all SQLite tables with complete schema for development"""
@@ -1885,6 +1917,7 @@ class AmazonMonitor:
 # ============= INITIALIZE COMPONENTS =============
 db_manager = DatabaseManager()
 db_manager.add_subscription_columns()
+db_manager.add_achievement_tracking_columns()
 email_notifier = EmailNotifier()
 api_encryption = APIKeyEncryption()
 monitor = AmazonMonitor(SCRAPINGBEE_API_KEY)
@@ -6974,7 +7007,7 @@ def get_next_check_times():
 
 @app.route('/check_product/<int:product_id>')
 @login_required
-@limiter.limit("20 per hour")  # More lenient for single products
+@limiter.limit("20 per hour")
 def manual_check_product(product_id):
     """Check a single product manually"""
     try:
@@ -6994,8 +7027,9 @@ def manual_check_product(product_id):
             ''', (product_id,))
 
         result = cursor.fetchone()
+        conn.close()
+        
         if not result:
-            conn.close()
             return jsonify({'error': 'Product not found'}), 404
 
         owner_id = result['user_id'] if isinstance(result, dict) else result[0]
@@ -7004,38 +7038,12 @@ def manual_check_product(product_id):
             conn.close()
             return jsonify({'error': 'Unauthorized'}), 403
 
-        conn.close()
+        success = check_single_product(product_id=product_id)
 
-        # Check just this one product
-        conn = get_db()
-        cursor = conn.cursor()
-
-        if get_db_type() == 'postgresql':
-            cursor.execute('''
-                UPDATE products 
-                SET active = true 
-                WHERE id = %s
-            ''', (product_id,))
+        if success:
+            return jsonify({'status': 'success', 'message': 'Product checked successfully'})
         else:
-            cursor.execute('''
-                UPDATE products 
-                SET active = 1 
-                WHERE id = ?
-            ''', (product_id,))
-
-        conn.commit()
-        conn.close()
-
-        # Use the check_user_products function but with a specific product
-        result = check_specific_product(current_user.id, product_id)
-
-        return jsonify({
-            'status': 'success',
-            'rank': result.get('rank'),
-            'category': result.get('category'),
-            'is_bestseller': result.get('is_bestseller'),
-            'achievement': result.get('achievement')
-        })
+            return jsonify({'error': 'Failed to check product'}), 500
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -7207,37 +7215,110 @@ def check_specific_product(user_id, product_id):
             conn.close()
         raise
 
-def check_single_product(product_id, url, user_id, product_title, category, target_rank):
+def check_single_product(product_id, url=None, user_id=None, product_title=None, category=None, target_rank=None):
     """Check single product with two-call strategy"""
-    monitor = AmazonMonitor.for_user(user_id)
-
     conn = get_db()
     cursor = conn.cursor()
 
     try:
-        # Get previous state
+        # If only product_id provided, fetch the details
+        if not url or not user_id:
+            if get_db_type() == 'postgresql':
+                cursor.execute("""
+                    SELECT product_url, user_id, product_title, current_category, 
+                           current_rank, is_bestseller
+                    FROM products WHERE id = %s
+                """, (product_id,))
+            else:
+                cursor.execute("""
+                    SELECT product_url, user_id, product_title, current_category,
+                           current_rank, is_bestseller  
+                    FROM products WHERE id = ?
+                """, (product_id,))
+
+            product_data = cursor.fetchone()
+            if not product_data:
+                conn.close()
+                return False
+
+            if isinstance(product_data, dict):
+                url = url or product_data['product_url']
+                user_id = user_id or product_data['user_id']
+                product_title = product_title or product_data['product_title']
+                category = category or product_data['current_category']
+                previous_rank = product_data.get('current_rank')
+                was_bestseller = product_data.get('is_bestseller', False)
+            else:
+                url = url or product_data[0]
+                user_id = user_id or product_data[1]
+                product_title = product_title or product_data[2]
+                category = category or product_data[3]
+                previous_rank = product_data[4] if len(product_data) > 4 else None
+                was_bestseller = product_data[5] if len(product_data) > 5 else False
+
+        monitor = AmazonMonitor.for_user(user_id)
+
+        # Get previous state (with safe defaults for missing columns)
         if get_db_type() == 'postgresql':
             cursor.execute("""
-                SELECT last_rank, has_bestseller_badge, baseline_rank,
-                       last_achievement_date
+                SELECT 
+                    COALESCE(last_rank, current_rank) as last_rank,
+                    COALESCE(has_bestseller_badge, is_bestseller, FALSE) as has_bestseller_badge,
+                    baseline_rank,
+                    last_achievement_date
                 FROM products WHERE id = %s
             """, (product_id,))
         else:
             cursor.execute("""
-                SELECT last_rank, has_bestseller_badge, baseline_rank,
-                       last_achievement_date
+                SELECT 
+                    COALESCE(last_rank, current_rank) as last_rank,
+                    COALESCE(has_bestseller_badge, is_bestseller, 0) as has_bestseller_badge,
+                    baseline_rank,
+                    last_achievement_date
                 FROM products WHERE id = ?
             """, (product_id,))
 
         prev_data = cursor.fetchone()
         if not prev_data:
             print(f"Product {product_id} not found")
+            conn.close()
             return False
 
-        prev_rank = prev_data[0]
-        had_badge = prev_data[1] if prev_data[1] else False
-        baseline_rank = prev_data[2]
-        last_achievement = prev_data[3]
+        # Handle both dict and tuple with safe defaults
+        if isinstance(prev_data, dict):
+            prev_rank = prev_data.get('last_rank')
+            had_badge = bool(prev_data.get('has_bestseller_badge', False))
+            baseline_rank = prev_data.get('baseline_rank')
+            last_achievement = prev_data.get('last_achievement_date')
+        else:
+            prev_rank = prev_data[0] if prev_data[0] is not None else None
+            had_badge = bool(prev_data[1]) if prev_data[1] is not None else False
+            baseline_rank = prev_data[2] if len(prev_data) > 2 else None
+            last_achievement = prev_data[3] if len(prev_data) > 3 else None
+
+        # Convert rank strings to integers safely
+        if prev_rank and isinstance(prev_rank, str):
+            try:
+                prev_rank = int(prev_rank)
+            except ValueError:
+                prev_rank = None
+
+        if baseline_rank and isinstance(baseline_rank, str):
+            try:
+                baseline_rank = int(baseline_rank)
+            except ValueError:
+                baseline_rank = None
+
+        # Set baseline if this is the first check
+        if baseline_rank is None and prev_rank:
+            baseline_rank = prev_rank
+            if get_db_type() == 'postgresql':
+                cursor.execute("UPDATE products SET baseline_rank = %s WHERE id = %s", 
+                             (baseline_rank, product_id))
+            else:
+                cursor.execute("UPDATE products SET baseline_rank = ? WHERE id = ?", 
+                             (baseline_rank, product_id))
+            conn.commit()
 
         # FIRST CALL - HTML only (10 credits)
         print(f"📊 Checking product: {product_title}")
@@ -7245,6 +7326,7 @@ def check_single_product(product_id, url, user_id, product_title, category, targ
 
         if not result['success']:
             print(f"❌ Failed to scrape: {result['error']}")
+            conn.close()
             return False
 
         product_info = monitor.extract_product_info(result['html'])
@@ -7256,7 +7338,7 @@ def check_single_product(product_id, url, user_id, product_title, category, targ
         # Check for new bestseller badge
         if product_info['is_bestseller'] and not had_badge:
             achievements.append('bestseller_badge')
-            print(f"🏆 New bestseller badge detected!")
+            print("🏆 New bestseller badge detected!")
 
         # Check for rank improvement from baseline
         if current_rank and baseline_rank:
