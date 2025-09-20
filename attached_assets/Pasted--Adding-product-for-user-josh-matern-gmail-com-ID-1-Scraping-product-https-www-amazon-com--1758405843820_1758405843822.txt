@@ -1,0 +1,34 @@
+ Adding product for user josh.matern@gmail.com (ID: 1)
+📦 Scraping product: https://www.amazon.com/Eldritch-Eating-Woods-Keri-Lake/dp/B0FQPF2YN6/ref=zg_bsnr_g_books_d_sccl_27/134-1164223-4599522?psc=1
+📸 Taking full-page screenshot...
+🔍 Making ScrapingBee request with 11 parameters
+✅ Successfully scraped Amazon page
+🔍 Starting HTML parsing...
+🔍 Searching for title in HTML (length: 2895913 chars)
+🔍 Selector 1: Looking for <span> with {'id': 'productTitle'} - Not found
+🔍 Selector 2: Looking for <h1> with {'id': 'title'} - Not found
+🔍 Selector 3: Looking for <h1> with {'class': 'a-size-large'} - Not found
+🔍 Selector 4: Looking for <span> with {'class': 'a-size-large product-title-word-break'} - Not found
+🔍 Selector 5: Looking for <h1> with {'class': 'a-size-large a-spacing-none'} - Not found
+🔍 Selector 6: Looking for <span> with {'class': 'a-size-large'} - Not found
+🔍 Selector 7: Looking for <h1> with {'data-automation-id': 'title'} - Not found
+🔍 Selector 8: Looking for <span> with {'class': 'product-title'} - Not found
+🔍 Selector 9: Looking for <h1> - Not found
+🔍 Selector 10: Looking for <title> - Not found
+⚠️ Could not find product title with any selector
+🔍 Page has 0 span tags
+🔍 Page has 0 h1 tags
+🔍 Sample span IDs: []
+IHDR��f�sRGB��� IDATx���y\
+                          ��gw�����"�n��H%J�;��#D��!G$!��B�J*��Cn�K�[�}������v|�������g��yfv[��g>A@L�F�a
+*����m<�EpI�7~LBH�Id?k~qq�P�O�CCw�{D��                                                                  ġ   ��O�0`��g�h�0( 
+                 @?]p�ƮY�DVF���u����^���l>ԣ
+                                           Zܪ�:tmS{faé�yѯʇj
+                                                           �'�
+                                                              h@?M06�>~x�0�4���!�?�������X
+🔍 Searching for ranking information...
+📊 Final product info: Title='Unknown Product...', Rank=None, Category=
+📋 Product info extracted: {'title': 'Unknown Product', 'rank': None, 'category': '', 'is_bestseller': False, 'bestseller_categories': []}
+✅ Product saved with ID: 15
+📸 Saving baseline screenshot (length: 3067688)
+✅ Baseline screenshot saved

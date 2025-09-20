@@ -1662,17 +1662,16 @@ class AmazonMonitor:
             print("❌ ScrapingBee API key not configured")
             return {'success': False, 'error': 'API key not configured', 'html': '', 'screenshot': None}
 
-        # Build parameters (ensure all values are strings for ScrapingBee)
+        # Build parameters with better stealth to avoid Amazon bot detection
         params = {
             'api_key': self.api_key,
             'url': url,
             'premium_proxy': 'true',
             'country_code': 'us',
-            'window_width': '1920',
-            'window_height': '1080', 
-            'wait': '3000',  # Wait for JavaScript to render
-            'render_js': 'true',  # Enable JavaScript rendering - critical for Amazon
-            'block_resources': 'false'  # Don't block any resources
+            'stealth_proxy': 'true',  # Use stealth proxy to avoid detection
+            'session_id': '12345',  # Maintain session consistency
+            'wait': '2000',  # Shorter wait to seem more human-like
+            'render_js': 'true'  # JavaScript rendering still needed
         }
 
         # Only add screenshot params if needed (saves 15 credits when False)
@@ -1821,6 +1820,14 @@ class AmazonMonitor:
                 # Debug: Show first 500 chars of content
                 content_preview = soup.get_text()[:500].replace('\n', ' ').strip()
                 print(f"🔍 Content preview: {content_preview}")
+                
+                # Check for specific Amazon bot detection indicators
+                if 'sorry' in page_text_lower and 'automated' in page_text_lower:
+                    print("🚫 Amazon bot detection: 'Sorry, automated requests detected'")
+                elif 'captcha' in page_text_lower:
+                    print("🚫 Amazon served a CAPTCHA page")
+                elif 'blocked' in page_text_lower:
+                    print("🚫 Request appears to be blocked by Amazon")
                 
                 product_info['title'] = 'Unknown Product'
 
