@@ -2261,6 +2261,31 @@ def manual_verify():
 
     return render_template_string(html)
 
+# Add this temporary admin route to fix your account:
+@app.route('/admin/fix_subscription/<email>')
+@login_required
+def fix_subscription(email):
+
+    conn = get_db()
+    cursor = conn.cursor()
+
+    # Manually activate the subscription
+    if get_db_type() == 'postgresql':
+        cursor.execute("""
+            UPDATE users 
+            SET subscription_status = 'active',
+                subscription_tier = 'author',  # or 'publisher'
+                max_products = 2,  # or 5 for publisher
+                is_verified = true,
+                subscription_expires = %s
+            WHERE email = %s
+        """, (datetime.now() + timedelta(days=30), email))
+
+    conn.commit()
+    conn.close()
+
+    return f"Fixed subscription for {email}"
+
 @app.route('/scheduler_health')
 def scheduler_health():
     """Separate endpoint to check scheduler health"""
