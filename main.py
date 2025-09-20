@@ -6881,7 +6881,36 @@ def stripe_webhook():
             """, (registration_token, email))
 
             # Send email with setup link
-            # email_notifier.send_setup_link(email, registration_token)
+            if email_notifier.is_configured():
+                setup_link = f"https://screenshottracker.com/auth/setup-account?email={email}&token={registration_token}"
+
+                html_content = f"""
+                <!DOCTYPE html>
+                <html>
+                <body>
+                    <h2>Welcome to Screenshot Tracker!</h2>
+                    <p>Your subscription is active. Please complete your account setup:</p>
+
+                    <p><a href="{setup_link}" style="background: #ff9900; color: white; padding: 12px 30px; 
+                          text-decoration: none; border-radius: 5px; display: inline-block;">
+                        Set Your Password
+                    </a></p>
+
+                    <p>Or copy this link: {setup_link}</p>
+
+                    <p>This link expires in 24 hours.</p>
+                </body>
+                </html>
+                """
+
+                email_notifier.send_email(
+                    email,
+                    "Complete Your Screenshot Tracker Setup",
+                    html_content
+                )
+                print(f"✅ Setup email sent to {email}")
+            else:
+                print(f"❌ Email system not configured - cannot send setup email to {email}")
 
         elif event['type'] == 'customer.subscription.deleted':
             # Handle cancellation
