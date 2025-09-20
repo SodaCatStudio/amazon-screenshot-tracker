@@ -5066,7 +5066,20 @@ def add_product():
             )
 
         count_result = cursor.fetchone()
-        current_count = count_result[0] if count_result else 0
+        print(f"🔍 DEBUG: count_result = {count_result}, type = {type(count_result)}")
+        
+        # Handle different types of database return values
+        if count_result is None:
+            current_count = 0
+        elif isinstance(count_result, (list, tuple)) and len(count_result) > 0:
+            current_count = count_result[0] if count_result[0] is not None else 0
+        elif isinstance(count_result, dict) and 'count' in count_result:
+            current_count = count_result['count']
+        else:
+            print(f"⚠️ Unexpected count_result format: {count_result}")
+            current_count = 0
+            
+        print(f"🔍 DEBUG: current_count = {current_count}")
 
         if current_count >= max_products:
             flash(f'You have reached your limit of {max_products} products. Upgrade to Publisher tier for more.', 'error')
