@@ -1653,16 +1653,16 @@ class AmazonMonitor:
             print("❌ ScrapingBee API key not configured")
             return {'success': False, 'error': 'API key not configured', 'html': '', 'screenshot': None}
 
-        # Build parameters
+        # Build parameters (ensure all values are strings for ScrapingBee)
         params = {
             'api_key': self.api_key,
             'url': url,
             'premium_proxy': 'true',
             'country_code': 'us',
-            'window_width': 1920,
-            'window_height': 1080,
-            'wait': 3000,
-            'wait_for': '#detailBulletsWrapper_feature_div,#prodDetails,#detail-bullets_feature_div',
+            'window_width': '1920',
+            'window_height': '1080', 
+            'wait': '3000',
+            'wait_for': '#detailBulletsWrapper_feature_div',
             'scroll': 'true'
         }
 
@@ -5066,7 +5066,6 @@ def add_product():
             )
 
         count_result = cursor.fetchone()
-        print(f"🔍 DEBUG: count_result = {count_result}, type = {type(count_result)}")
         
         # Handle different types of database return values
         if count_result is None:
@@ -5078,8 +5077,6 @@ def add_product():
         else:
             print(f"⚠️ Unexpected count_result format: {count_result}")
             current_count = 0
-            
-        print(f"🔍 DEBUG: current_count = {current_count}")
 
         if current_count >= max_products:
             flash(f'You have reached your limit of {max_products} products. Upgrade to Publisher tier for more.', 'error')
