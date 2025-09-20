@@ -1662,8 +1662,7 @@ class AmazonMonitor:
             'window_width': '1920',
             'window_height': '1080', 
             'wait': '3000',
-            'wait_for': '#detailBulletsWrapper_feature_div',
-            'scroll': 'true'
+            'wait_for': '#detailBulletsWrapper_feature_div'
         }
 
         # Only add screenshot params if needed (saves 15 credits when False)
