@@ -1670,8 +1670,7 @@ class AmazonMonitor:
             'country_code': 'us',
             'window_width': '1920',
             'window_height': '1080', 
-            'wait': '3000',
-            'wait_for': '#detailBulletsWrapper_feature_div'
+            'wait': '2000'  # Reduced wait time to prevent timeouts
         }
 
         # Only add screenshot params if needed (saves 15 credits when False)
@@ -1684,7 +1683,7 @@ class AmazonMonitor:
 
         try:
             print(f"🔍 Making ScrapingBee request with {len(params)} parameters")
-            response = requests.get('https://app.scrapingbee.com/api/v1/', params=params, timeout=60)
+            response = requests.get('https://app.scrapingbee.com/api/v1/', params=params, timeout=30)
 
             if response.status_code != 200:
                 error_msg = f'ScrapingBee returned status {response.status_code}'
@@ -1794,7 +1793,7 @@ class AmazonMonitor:
                 
                 for tag, attrs in meta_selectors:
                     meta_element = soup.find(tag, attrs)
-                    if meta_element:
+                    if meta_element and hasattr(meta_element, 'get'):
                         content = meta_element.get('content')
                         if content and len(content) > 5:
                             product_info['title'] = content
