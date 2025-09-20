@@ -980,7 +980,16 @@ class APIRateLimiter:
                 """, (user_id, today_start))
 
             result = cursor.fetchone()
-            return result[0] if result else 0
+            # Handle different types of database return values
+            if result is None:
+                return 0
+            elif isinstance(result, (list, tuple)) and len(result) > 0:
+                return result[0] if result[0] is not None else 0
+            elif isinstance(result, dict) and 'count' in result:
+                return result['count']
+            else:
+                print(f"⚠️ Unexpected result format in get_user_usage_today: {result}")
+                return 0
         finally:
             conn.close()
 
@@ -1744,37 +1753,61 @@ class AmazonMonitor:
         try:
             print("🔍 Starting HTML parsing...")
 
-            # Extract title - multiple methods
+            # Extract title - multiple methods with more selectors
             title_selectors = [
                 ('span', {'id': 'productTitle'}),
                 ('h1', {'id': 'title'}),
                 ('h1', {'class': 'a-size-large'}),
-                ('span', {'class': 'a-size-large product-title-word-break'})
+                ('span', {'class': 'a-size-large product-title-word-break'}),
+                ('h1', {'class': 'a-size-large a-spacing-none'}),
+                ('span', {'class': 'a-size-large'}),
+                ('h1', {'data-automation-id': 'title'}),
+                ('span', {'class': 'product-title'}),
+                ('h1'),  # Fallback to any h1
+                ('title')  # HTML title tag
             ]
 
-            for tag, attrs in title_selectors:
-                title_element = soup.find(tag, attrs)
+            print(f"🔍 Searching for title in HTML (length: {len(html)} chars)")
+            
+            for i, (tag, attrs) in enumerate(title_selectors):
+                if attrs:
+                    title_element = soup.find(tag, attrs)
+                    print(f"🔍 Selector {i+1}: Looking for <{tag}> with {attrs} - {'Found' if title_element else 'Not found'}")
+                else:
+                    title_element = soup.find(tag)
+                    print(f"🔍 Selector {i+1}: Looking for <{tag}> - {'Found' if title_element else 'Not found'}")
+                    
                 if title_element:
-                    product_info['title'] = ' '.join(title_element.stripped_strings)
-                    print(f"📋 Found title: {product_info['title'][:100]}...")
-                    break
+                    title_text = ' '.join(title_element.stripped_strings)
+                    if title_text and len(title_text) > 5:  # Ensure meaningful title
+                        product_info['title'] = title_text
+                        print(f"📋 Found title with selector {i+1}: {product_info['title'][:100]}...")
+                        break
 
             if not product_info['title']:
-                # Try meta tags
+                # Try meta tags as fallback
+                meta_selectors = [
+                    ('meta', {'property': 'og:title'}),
+                    ('meta', {'name': 'title'}),
+                    ('meta', {'property': 'twitter:title'})
+                ]
+                
+                for tag, attrs in meta_selectors:
+                    meta_element = soup.find(tag, attrs)
+                    if meta_element:
+                        content = meta_element.get('content')
+                        if content and len(content) > 5:
+                            product_info['title'] = content
+                            print(f"📋 Found title in meta tag: {product_info['title'][:100]}...")
+                            break
 
-                # Try meta tags
-                meta_title = soup.find('meta', {'property': 'og:title'})
-                if meta_title and isinstance(meta_title, Tag):
-                    content = meta_title.get('content')
-                    if content:
-                        product_info['title'] = content
-                        print(f"📋 Found title in meta: {product_info['title'][:100]}...")
-                    else:
-                        product_info['title'] = 'Unknown Product'
-                        print("⚠️ Could not find product title")
-                else:
-                    product_info['title'] = 'Unknown Product'
-                    print("⚠️ Could not find product title")
+            if not product_info['title']:
+                # Final fallback - log some debugging info
+                print("⚠️ Could not find product title with any selector")
+                print(f"🔍 Page has {len(soup.find_all('span'))} span tags")
+                print(f"🔍 Page has {len(soup.find_all('h1'))} h1 tags") 
+                print(f"🔍 Sample span IDs: {[s.get('id') for s in soup.find_all('span') if s.get('id')][:5]}")
+                product_info['title'] = 'Unknown Product'
 
             # Check for bestseller badges
             badge_patterns = [
