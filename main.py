@@ -1670,7 +1670,9 @@ class AmazonMonitor:
             'country_code': 'us',
             'window_width': '1920',
             'window_height': '1080', 
-            'wait': '2000'  # Reduced wait time to prevent timeouts
+            'wait': '3000',  # Wait for JavaScript to render
+            'render_js': 'true',  # Enable JavaScript rendering - critical for Amazon
+            'block_resources': 'false'  # Don't block any resources
         }
 
         # Only add screenshot params if needed (saves 15 credits when False)
@@ -1806,6 +1808,20 @@ class AmazonMonitor:
                 print(f"🔍 Page has {len(soup.find_all('span'))} span tags")
                 print(f"🔍 Page has {len(soup.find_all('h1'))} h1 tags") 
                 print(f"🔍 Sample span IDs: {[s.get('id') for s in soup.find_all('span') if s.get('id')][:5]}")
+                
+                # Check if this looks like a bot detection or JavaScript page
+                page_text_lower = soup.get_text().lower()
+                if 'javascript' in page_text_lower and 'disabled' in page_text_lower:
+                    print("🤖 Detected JavaScript disabled message - bot detection likely")
+                elif 'robot' in page_text_lower or 'automation' in page_text_lower:
+                    print("🤖 Detected robot/automation detection")
+                elif len(soup.get_text().strip()) < 1000:
+                    print("⚠️ Very little text content - likely redirect or error page")
+                
+                # Debug: Show first 500 chars of content
+                content_preview = soup.get_text()[:500].replace('\n', ' ').strip()
+                print(f"🔍 Content preview: {content_preview}")
+                
                 product_info['title'] = 'Unknown Product'
 
             # Check for bestseller badges
