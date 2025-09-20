@@ -1763,8 +1763,8 @@ class AmazonMonitor:
                 ('span', {'class': 'a-size-large'}),
                 ('h1', {'data-automation-id': 'title'}),
                 ('span', {'class': 'product-title'}),
-                ('h1'),  # Fallback to any h1
-                ('title')  # HTML title tag
+                ('h1', {}),  # Fallback to any h1
+                ('title', {})  # HTML title tag
             ]
 
             print(f"🔍 Searching for title in HTML (length: {len(html)} chars)")
