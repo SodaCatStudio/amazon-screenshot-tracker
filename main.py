@@ -1675,14 +1675,21 @@ class AmazonMonitor:
             print("📊 HTML-only check (no screenshot)...")
 
         try:
+            print(f"🔍 Making ScrapingBee request with {len(params)} parameters")
             response = requests.get('https://app.scrapingbee.com/api/v1/', params=params, timeout=60)
 
             if response.status_code != 200:
                 error_msg = f'ScrapingBee returned status {response.status_code}'
                 print(f"❌ {error_msg}")
+                print(f"❌ ScrapingBee error response: {response.text[:500]}")
+                try:
+                    error_json = response.json()
+                    print(f"❌ ScrapingBee error details: {error_json}")
+                except:
+                    pass
                 return {
                     'success': False,
-                    'error': error_msg,
+                    'error': f"{error_msg}: {response.text}",
                     'html': '',
                     'screenshot': None
                 }
