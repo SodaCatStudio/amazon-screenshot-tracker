@@ -1662,6 +1662,85 @@ class AmazonMonitor:
             print("❌ ScrapingBee API key not configured")
             return {'success': False, 'error': 'API key not configured', 'html': '', 'screenshot': None}
 
+        html_params = {
+            'api_key': self.api_key,
+            'url': url,
+            'premium_proxy': 'true',
+            'country_code': 'us',
+            'window_width': 1920,
+            'window_height': 1080,
+            'wait': 3000,
+            'wait_for': '#productTitle',
+            'js_scenario': json.dumps({
+                "instructions": [
+                    {"wait": 2000}
+                ]
+            })
+        }
+
+        try:
+            print("📊 Fetching HTML content...")
+            html_response = requests.get('https://app.scrapingbee.com/api/v1/', params=html_params, timeout=60)
+
+            if html_response.status_code != 200:
+                print(f"❌ Failed to get HTML: {html_response.status_code}")
+                return {
+                    'success': False,
+                    'error': f'ScrapingBee HTML error: {html_response.status_code}',
+                    'html': '',
+                    'screenshot': None
+                }
+
+            html_content = html_response.text
+            print(f"✅ Got HTML content ({len(html_content)} chars)")
+
+            # Check if we actually got HTML
+            if 'DOCTYPE' not in html_content[:500] and '<html' not in html_content[:500]:
+                print("⚠️ Response doesn't look like HTML")
+                print(f"First 200 chars: {html_content[:200]}")
+
+            screenshot_data = None
+
+            # If screenshot needed, make second call
+            if need_screenshot:
+                print("📸 Fetching screenshot...")
+                screenshot_params = {
+                    'api_key': self.api_key,
+                    'url': url,
+                    'premium_proxy': 'true',
+                    'country_code': 'us',
+                    'screenshot': 'true',
+                    'screenshot_full_page': 'true',
+                    'window_width': 1920,
+                    'window_height': 1080,
+                    'wait': 3000
+                }
+
+                screenshot_response = requests.get('https://app.scrapingbee.com/api/v1/', 
+                                                  params=screenshot_params, timeout=60)
+
+                if screenshot_response.status_code == 200:
+                    screenshot_data = screenshot_response.content
+                    print(f"✅ Got screenshot ({len(screenshot_data)} bytes)")
+                else:
+                    print(f"⚠️ Screenshot failed: {screenshot_response.status_code}")
+
+            return {
+                'success': True,
+                'error': None,
+                'html': html_content,
+                'screenshot': screenshot_data
+            }
+
+        except Exception as e:
+            print(f"❌ Error during scraping: {str(e)}")
+            return {
+                'success': False,
+                'error': str(e),
+                'html': '',
+                'screenshot': None
+            }
+
         params = {
             'api_key': self.api_key,
             'url': url,
