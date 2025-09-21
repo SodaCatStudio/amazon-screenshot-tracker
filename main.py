@@ -1828,7 +1828,7 @@ class AmazonMonitor:
                 print("⚠️ Could not find product title with any selector")
                 print(f"🔍 Page has {len(soup.find_all('span'))} span tags")
                 print(f"🔍 Page has {len(soup.find_all('h1'))} h1 tags") 
-                print(f"🔍 Sample span IDs: {[s.get('id') for s in soup.find_all('span') if s.get('id')][:5]}")
+                
                 
                 # Check if this looks like a bot detection or JavaScript page
                 page_text_lower = soup.get_text().lower()
