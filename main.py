@@ -1803,11 +1803,12 @@ class AmazonMonitor:
                 ]
                 
                 for tag, attrs in meta_selectors:
-                    # Use specific approach for meta tags to satisfy type checker
+                    # Use specific approach for meta tags to avoid parameter conflicts
                     if 'property' in attrs:
                         meta_element = soup.find(tag, property=attrs['property'])
                     elif 'name' in attrs:
-                        meta_element = soup.find(tag, name=attrs['name'])
+                        # Use attrs parameter for 'name' attribute to avoid conflict with BeautifulSoup's name parameter
+                        meta_element = soup.find(tag, attrs={'name': attrs['name']})  # type: ignore
                     else:
                         meta_element = soup.find(tag)
                     if meta_element and hasattr(meta_element, 'get'):
