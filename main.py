@@ -4776,6 +4776,8 @@ def capture_baseline(product_id):
             return f"Scraping failed: {scrape_result.get('error')}", 500
 
         if scrape_result.get('screenshot'):
+            # Convert to base64 before storing
+            screenshot_base64 = base64.b64encode(scrape_result['screenshot']).decode('utf-8')
             # Extract product info
             product_info = user_monitor.extract_product_info(scrape_result['html'])
 
@@ -4790,7 +4792,7 @@ def capture_baseline(product_id):
                     initial_rank = EXCLUDED.initial_rank,
                     initial_category = EXCLUDED.initial_category,
                     captured_at = EXCLUDED.captured_at
-                ''', (product_id, scrape_result['screenshot'], 
+                ''', (product_id, screenshot_base64, 
                       product_info.get('rank'), product_info.get('category'), 
                       datetime.now()))
             else:
@@ -5360,7 +5362,12 @@ def add_product():
 
         # Save baseline screenshot if available
         if scrape_result.get('screenshot'):
-            print(f"📸 Saving baseline screenshot (length: {len(scrape_result['screenshot'])})")
+            print(f"📸 Processing baseline screenshot (length: {len(scrape_result['screenshot'])})")
+
+            # Convert binary screenshot to base64 for database storage
+            import base64
+            screenshot_base64 = base64.b64encode(scrape_result['screenshot']).decode('utf-8')
+            print(f"📸 Converted to base64 (length: {len(screenshot_base64)})")
 
             if get_db_type() == 'postgresql':
                 cursor.execute('''
@@ -5370,17 +5377,17 @@ def add_product():
                     ON CONFLICT (product_id) DO UPDATE SET
                     screenshot_data = EXCLUDED.screenshot_data,
                     captured_at = EXCLUDED.captured_at
-                ''', (product_id, scrape_result['screenshot'], product_info.get('rank'),
+                ''', (product_id, screenshot_base64, product_info.get('rank'),
                       product_info.get('category'), datetime.now()))
             else:
                 cursor.execute('''
                     INSERT OR REPLACE INTO baseline_screenshots 
                     (product_id, screenshot_data, initial_rank, initial_category, captured_at)
                     VALUES (?, ?, ?, ?, ?)
-                ''', (product_id, scrape_result['screenshot'], product_info.get('rank'),
+                ''', (product_id, screenshot_base64, product_info.get('rank'),
                       product_info.get('category'), datetime.now()))
 
-            print("✅ Baseline screenshot saved")
+            print("✅ Baseline screenshot saved as base64")
         else:
             print("⚠️ No screenshot data to save")
 
