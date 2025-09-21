@@ -1812,12 +1812,16 @@ class AmazonMonitor:
                     else:
                         meta_element = soup.find(tag)
                     if meta_element:
-                        # Use proper BeautifulSoup attribute access
-                        content = meta_element.attrs.get('content')
-                        if content and len(content) > 5:
-                            product_info['title'] = content
-                            print(f"📋 Found title in meta tag: {product_info['title'][:100]}...")
-                            break
+                        # Use safe attribute access for BeautifulSoup elements
+                        try:
+                            content = meta_element.get('content')  # type: ignore
+                            if content and len(content) > 5:
+                                product_info['title'] = content
+                                print(f"📋 Found title in meta tag: {product_info['title'][:100]}...")
+                                break
+                        except (AttributeError, TypeError):
+                            # Fallback for different BeautifulSoup element types
+                            continue
 
             if not product_info['title']:
                 # Final fallback - log some debugging info
