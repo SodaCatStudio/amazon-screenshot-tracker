@@ -1773,7 +1773,7 @@ class AmazonMonitor:
             
             for i, (tag, attrs) in enumerate(title_selectors):
                 if attrs:
-                    title_element = soup.find(tag, **attrs)  # Unpack attrs as keyword arguments
+                    title_element = soup.find(tag, attrs=attrs)  # Pass attrs dictionary correctly
                     print(f"🔍 Selector {i+1}: Looking for <{tag}> with {attrs} - {'Found' if title_element else 'Not found'}")
                 else:
                     title_element = soup.find(tag)
@@ -1795,7 +1795,7 @@ class AmazonMonitor:
                 ]
                 
                 for tag, attrs in meta_selectors:
-                    meta_element = soup.find(tag, **attrs)  # Unpack attrs as keyword arguments
+                    meta_element = soup.find(tag, attrs=attrs)  # Pass attrs dictionary correctly
                     if meta_element and hasattr(meta_element, 'get'):
                         content = meta_element.get('content')
                         if content and len(content) > 5:
