@@ -1662,23 +1662,25 @@ class AmazonMonitor:
             print("❌ ScrapingBee API key not configured")
             return {'success': False, 'error': 'API key not configured', 'html': '', 'screenshot': None}
 
-        # Build parameters with better stealth to avoid Amazon bot detection
         params = {
             'api_key': self.api_key,
             'url': url,
             'premium_proxy': 'true',
             'country_code': 'us',
-            'stealth_proxy': 'true',  # Use stealth proxy to avoid detection
-            'session_id': '12345',  # Maintain session consistency
-            'wait': '2000',  # Shorter wait to seem more human-like
-            'render_js': 'true'  # JavaScript rendering still needed
+            'window_width': 1920,
+            'window_height': 1080,
+            'wait': 3000,
+            'wait_for': '#detailBulletsWrapper_feature_div,#prodDetails,#detail-bullets_feature_div',
+            'return_page_source': 'true',  # Add this to ensure HTML is returned
         }
 
-        # Only add screenshot params if needed (saves 15 credits when False)
         if need_screenshot:
             params['screenshot'] = 'true'
             params['screenshot_full_page'] = 'true'
-            print("📸 Taking full-page screenshot...")
+            # Use extract_rules to get both HTML and screenshot
+            params['extract_rules'] = json.dumps({
+                "html": "body",  # Extract full HTML
+            })
         else:
             print("📊 HTML-only check (no screenshot)...")
 
@@ -1771,7 +1773,7 @@ class AmazonMonitor:
             
             for i, (tag, attrs) in enumerate(title_selectors):
                 if attrs:
-                    title_element = soup.find(tag, attrs)
+                    title_element = soup.find(tag, **attrs)  # Unpack attrs as keyword arguments
                     print(f"🔍 Selector {i+1}: Looking for <{tag}> with {attrs} - {'Found' if title_element else 'Not found'}")
                 else:
                     title_element = soup.find(tag)
@@ -1793,7 +1795,7 @@ class AmazonMonitor:
                 ]
                 
                 for tag, attrs in meta_selectors:
-                    meta_element = soup.find(tag, attrs)
+                    meta_element = soup.find(tag, **attrs)  # Unpack attrs as keyword arguments
                     if meta_element and hasattr(meta_element, 'get'):
                         content = meta_element.get('content')
                         if content and len(content) > 5:
