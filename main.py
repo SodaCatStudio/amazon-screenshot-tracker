@@ -5423,6 +5423,107 @@ def pricing():
         publisher_yearly_price_id=os.environ.get('STRIPE_PUBLISHER_YEARLY_PRICE')
     )
 
+@app.route('/cancel_subscription', methods=['GET', 'POST'])
+@login_required
+def cancel_subscription():
+    """Cancel subscription page with password confirmation"""
+    if request.method == 'POST':
+        password = request.form.get('password')
+
+        if not password:
+            flash('Please enter your password to confirm cancellation', 'error')
+            return render_template('cancel_subscription.html')
+
+        # Verify password
+        conn = get_db()
+        cursor = conn.cursor()
+
+        if get_db_type() == 'postgresql':
+            cursor.execute('SELECT password_hash, stripe_subscription_id FROM users WHERE id = %s', (current_user.id,))
+        else:
+            cursor.execute('SELECT password_hash, stripe_subscription_id FROM users WHERE id = ?', (current_user.id,))
+
+        user_data = cursor.fetchone()
+
+        if not user_data:
+            conn.close()
+            flash('User not found', 'error')
+            return redirect(url_for('dashboard'))
+
+        password_hash = user_data[0] if isinstance(user_data, tuple) else user_data['password_hash']
+        subscription_id = user_data[1] if isinstance(user_data, tuple) else user_data['stripe_subscription_id']
+
+        if not check_password_hash(password_hash, password):
+            conn.close()
+            flash('Incorrect password', 'error')
+            return render_template('cancel_subscription.html')
+
+        # Cancel in Stripe
+        try:
+            if subscription_id:
+                stripe.Subscription.delete(subscription_id)
+                print(f"✅ Cancelled Stripe subscription {subscription_id}")
+
+            # Update database
+            if get_db_type() == 'postgresql':
+                cursor.execute("""
+                    UPDATE users 
+                    SET subscription_status = 'cancelled',
+                        max_products = 0
+                    WHERE id = %s
+                """, (current_user.id,))
+            else:
+                cursor.execute("""
+                    UPDATE users 
+                    SET subscription_status = 'cancelled',
+                        max_products = 0
+                    WHERE id = ?
+                """, (current_user.id,))
+
+            conn.commit()
+            conn.close()
+
+            # Send cancellation email
+            if email_notifier.is_configured():
+                send_cancellation_email(current_user.email)
+
+            flash('Your subscription has been cancelled. You will not be charged again.', 'success')
+            return redirect(url_for('dashboard'))
+
+        except Exception as e:
+            conn.close()
+            print(f"❌ Error cancelling subscription: {e}")
+            flash('Error cancelling subscription. Please contact support.', 'error')
+            return render_template('cancel_subscription.html')
+
+    # GET request - show cancellation form
+    return render_template('cancel_subscription.html')
+
+def send_cancellation_email(email):
+    """Send cancellation confirmation email"""
+    html_content = """
+    <!DOCTYPE html>
+    <html>
+    <body>
+        <h2>Subscription Cancelled</h2>
+        <p>Your Screenshot Tracker subscription has been cancelled.</p>
+        <p>You will not be charged again, but you can continue using the service until the end of your current billing period.</p>
+
+        <h3>Refund Policy</h3>
+        <p>If you cancelled within 7 days of your initial purchase, you may be eligible for a refund. 
+        Please email support@screenshottracker.com with your account email and reason for cancellation.</p>
+
+        <p>We're sorry to see you go! If there's anything we could have done better, please let us know.</p>
+    </body>
+    </html>
+    """
+
+    email_notifier.send_email(
+        email,
+        "Subscription Cancelled - Screenshot Tracker",
+        html_content
+    )
+
 # Add route to reset rate limits (admin only)
 @app.route('/admin/reset_rate_limits')
 @login_required
@@ -7128,16 +7229,57 @@ def stripe_webhook():
                     WHERE stripe_subscription_id = %s
                 """, (subscription['id'],))
 
+        elif event['type'] == 'invoice.payment_succeeded':
+        # This fires on successful renewal
+            invoice = event['data']['object']
+            subscription_id = invoice['subscription']
+
+            if invoice['billing_reason'] == 'subscription_cycle':
+                if get_db_type() == 'postgresql':
+                    cursor.execute("""
+                        UPDATE users 
+                        SET subscription_expires = %s,
+                            subscription_status = 'active'
+                        WHERE stripe_subscription_id = %s
+                    """, (datetime.now() + timedelta(days=30), subscription_id))
+                else:
+                    cursor.execute("""
+                        UPDATE users 
+                        SET subscription_expires = ?,
+                            subscription_status = 'active'
+                        WHERE stripe_subscription_id = ?
+                    """, (datetime.now() + timedelta(days=30), subscription_id))
+
+                print(f"✅ Subscription renewed: {subscription_id}")
+
+        elif event['type'] == 'invoice.payment_failed':
+            # Handle failed payment
+            invoice = event['data']['object']
+            subscription_id = invoice['subscription']
+
+            if get_db_type() == 'postgresql':
+                cursor.execute("""
+                    UPDATE users 
+                    SET subscription_status = 'past_due'
+                    WHERE stripe_subscription_id = %s
+                """, (subscription_id,))
+            else:
+                cursor.execute("""
+                    UPDATE users 
+                    SET subscription_status = 'past_due'
+                    WHERE stripe_subscription_id = ?
+                """, (subscription_id,))
+
+            print(f"⚠️ Payment failed for subscription: {subscription_id}")
+
         conn.commit()
         return '', 200
 
     except Exception as e:
-        # This is where exception handling starts
         conn.rollback()
         print(f"Stripe webhook error: {e}")
         return str(e), 500
     finally:
-        # This always runs to close the connection
         conn.close()
 
 @app.route('/success')
@@ -7150,6 +7292,93 @@ def subscription_success():
 def subscription_cancel():
     """Page if user cancels payment"""
     return redirect(url_for('pricing'))
+
+@app.route('/change_subscription', methods=['GET', 'POST'])
+@login_required
+def change_subscription():
+    """Change subscription tier"""
+    conn = get_db()
+    cursor = conn.cursor()
+
+    # Get current subscription
+    if get_db_type() == 'postgresql':
+        cursor.execute("""
+            SELECT stripe_subscription_id, subscription_tier 
+            FROM users WHERE id = %s
+        """, (current_user.id,))
+    else:
+        cursor.execute("""
+            SELECT stripe_subscription_id, subscription_tier 
+            FROM users WHERE id = ?
+        """, (current_user.id,))
+
+    user_data = cursor.fetchone()
+    conn.close()
+
+    if not user_data:
+        flash('No active subscription found', 'error')
+        return redirect(url_for('pricing'))
+
+    current_subscription_id = user_data[0] if isinstance(user_data, tuple) else user_data['stripe_subscription_id']
+    current_tier = user_data[1] if isinstance(user_data, tuple) else user_data['subscription_tier']
+
+    if request.method == 'POST':
+        new_price_id = request.form.get('price_id')
+
+        try:
+            # Get the subscription from Stripe
+            subscription = stripe.Subscription.retrieve(current_subscription_id)
+
+            # Update the subscription with the new price
+            stripe.Subscription.modify(
+                current_subscription_id,
+                items=[{
+                    'id': subscription['items']['data'][0]['id'],
+                    'price': new_price_id,
+                }],
+                proration_behavior='always_invoice',  # Charge/credit immediately
+            )
+
+            # Update database
+            tier_map = {
+                os.environ.get('STRIPE_AUTHOR_WEEKLY_PRICE'): ('author', 2),
+                os.environ.get('STRIPE_AUTHOR_MONTHLY_PRICE'): ('author', 2),
+                os.environ.get('STRIPE_AUTHOR_YEARLY_PRICE'): ('author', 2),
+                os.environ.get('STRIPE_PUBLISHER_WEEKLY_PRICE'): ('publisher', 5),
+                os.environ.get('STRIPE_PUBLISHER_MONTHLY_PRICE'): ('publisher', 5),
+                os.environ.get('STRIPE_PUBLISHER_YEARLY_PRICE'): ('publisher', 5),
+            }
+
+            new_tier, new_max_products = tier_map.get(new_price_id, ('author', 2))
+
+            conn = get_db()
+            cursor = conn.cursor()
+
+            if get_db_type() == 'postgresql':
+                cursor.execute("""
+                    UPDATE users 
+                    SET subscription_tier = %s, max_products = %s
+                    WHERE id = %s
+                """, (new_tier, new_max_products, current_user.id))
+            else:
+                cursor.execute("""
+                    UPDATE users 
+                    SET subscription_tier = ?, max_products = ?
+                    WHERE id = ?
+                """, (new_tier, new_max_products, current_user.id))
+
+            conn.commit()
+            conn.close()
+
+            flash('Subscription updated successfully!', 'success')
+            return redirect(url_for('dashboard'))
+
+        except Exception as e:
+            flash(f'Error updating subscription: {str(e)}', 'error')
+            return redirect(url_for('dashboard'))
+
+    # GET - show change options
+    return render_template('change_subscription.html', current_tier=current_tier)
 
 @app.route('/api/next_check_times')
 @login_required

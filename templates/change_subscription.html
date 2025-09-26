@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Change Subscription - Screenshot Tracker</title>
+    <style>
+        .plan-option {
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 10px 0;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .plan-option:hover {
+            border-color: #667eea;
+            background: #f8f9ff;
+        }
+
+        .plan-option.selected {
+            border-color: #667eea;
+            background: #f0f4ff;
+        }
+
+        .plan-option.current {
+            background: #e8f5e9;
+            border-color: #4caf50;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Change Subscription Plan</h1>
+        <p>Current plan: <strong>{{ current_tier|title }}</strong></p>
+
+        <form method="POST">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
+            <h3>Select New Plan:</h3>
+
+            <!-- Author Plans -->
+            <h4>Author Tier (2 products)</h4>
+            <div class="plan-option" onclick="selectPlan('{{ config.STRIPE_AUTHOR_WEEKLY_PRICE }}')">
+                <label>
+                    <input type="radio" name="price_id" value="{{ config.STRIPE_AUTHOR_WEEKLY_PRICE }}">
+                    Author Weekly - $2.99/week
+                </label>
+            </div>
+
+            <div class="plan-option" onclick="selectPlan('{{ config.STRIPE_AUTHOR_MONTHLY_PRICE }}')">
+                <label>
+                    <input type="radio" name="price_id" value="{{ config.STRIPE_AUTHOR_MONTHLY_PRICE }}">
+                    Author Monthly - $9.99/month
+                </label>
+            </div>
+
+            <!-- Publisher Plans -->
+            <h4>Publisher Tier (5 products)</h4>
+            <div class="plan-option" onclick="selectPlan('{{ config.STRIPE_PUBLISHER_WEEKLY_PRICE }}')">
+                <label>
+                    <input type="radio" name="price_id" value="{{ config.STRIPE_PUBLISHER_WEEKLY_PRICE }}">
+                    Publisher Weekly - $4.99/week
+                </label>
+            </div>
+
+            <div class="plan-option" onclick="selectPlan('{{ config.STRIPE_PUBLISHER_MONTHLY_PRICE }}')">
+                <label>
+                    <input type="radio" name="price_id" value="{{ config.STRIPE_PUBLISHER_MONTHLY_PRICE }}">
+                    Publisher Monthly - $19.99/month
+                </label>
+            </div>
+
+            <p style="margin-top: 20px; color: #666;">
+                Note: You'll be charged or credited the prorated difference immediately.
+            </p>
+
+            <div class="button-group">
+                <a href="{{ url_for('dashboard') }}" class="btn btn-secondary">Cancel</a>
+                <button type="submit" class="btn btn-primary">Change Plan</button>
+            </div>
+        </form>
+    </div>
+
+    <script>
+        function selectPlan(priceId) {
+            document.querySelectorAll('.plan-option').forEach(el => el.classList.remove('selected'));
+            event.currentTarget.classList.add('selected');
+            event.currentTarget.querySelector('input').checked = true;
+        }
+    </script>
+</body>
+</html>

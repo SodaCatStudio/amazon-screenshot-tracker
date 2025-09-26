@@ -1,0 +1,100 @@
+@app.route('/cancel_subscription', methods=['GET', 'POST'])
+@login_required
+def cancel_subscription():
+    """Cancel subscription page with password confirmation"""
+    if request.method == 'POST':
+        password = request.form.get('password')
+
+        if not password:
+            flash('Please enter your password to confirm cancellation', 'error')
+            return render_template('cancel_subscription.html')
+
+        # Verify password
+        conn = get_db()
+        cursor = conn.cursor()
+
+        if get_db_type() == 'postgresql':
+            cursor.execute('SELECT password_hash, stripe_subscription_id FROM users WHERE id = %s', (current_user.id,))
+        else:
+            cursor.execute('SELECT password_hash, stripe_subscription_id FROM users WHERE id = ?', (current_user.id,))
+
+        user_data = cursor.fetchone()
+
+        if not user_data:
+            conn.close()
+            flash('User not found', 'error')
+            return redirect(url_for('dashboard'))
+
+        password_hash = user_data[0] if isinstance(user_data, tuple) else user_data['password_hash']
+        subscription_id = user_data[1] if isinstance(user_data, tuple) else user_data['stripe_subscription_id']
+
+        if not check_password_hash(password_hash, password):
+            conn.close()
+            flash('Incorrect password', 'error')
+            return render_template('cancel_subscription.html')
+
+        # Cancel in Stripe
+        try:
+            if subscription_id:
+                stripe.Subscription.delete(subscription_id)
+                print(f"✅ Cancelled Stripe subscription {subscription_id}")
+
+            # Update database
+            if get_db_type() == 'postgresql':
+                cursor.execute("""
+                    UPDATE users 
+                    SET subscription_status = 'cancelled',
+                        max_products = 0
+                    WHERE id = %s
+                """, (current_user.id,))
+            else:
+                cursor.execute("""
+                    UPDATE users 
+                    SET subscription_status = 'cancelled',
+                        max_products = 0
+                    WHERE id = ?
+                """, (current_user.id,))
+
+            conn.commit()
+            conn.close()
+
+            # Send cancellation email
+            if email_notifier.is_configured():
+                send_cancellation_email(current_user.email)
+
+            flash('Your subscription has been cancelled. You will not be charged again.', 'success')
+            return redirect(url_for('dashboard'))
+
+        except Exception as e:
+            conn.close()
+            print(f"❌ Error cancelling subscription: {e}")
+            flash('Error cancelling subscription. Please contact support.', 'error')
+            return render_template('cancel_subscription.html')
+
+    # GET request - show cancellation form
+    return render_template('cancel_subscription.html')
+
+def send_cancellation_email(email):
+    """Send cancellation confirmation email"""
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <body>
+        <h2>Subscription Cancelled</h2>
+        <p>Your Screenshot Tracker subscription has been cancelled.</p>
+        <p>You will not be charged again, but you can continue using the service until the end of your current billing period.</p>
+
+        <h3>Refund Policy</h3>
+        <p>If you cancelled within 7 days of your initial purchase, you may be eligible for a refund. 
+        Please email support@screenshottracker.com with your account email and reason for cancellation.</p>
+
+        <p>We're sorry to see you go! If there's anything we could have done better, please let us know.</p>
+    </body>
+    </html>
+    """
+
+    email_notifier.send_email(
+        email,
+        "Subscription Cancelled - Screenshot Tracker",
+        html_content
+    )

@@ -1151,5 +1151,21 @@
         // Refresh every minute
         setInterval(loadNextCheckTimes, 60000);
     </script>
+
+    <!-- Subscription Management -->
+    <div style="margin-top: 50px; padding-top: 30px; border-top: 1px solid #eee; text-align: center;">
+        <p style="color: #666; margin-bottom: 10px;">
+            Need help? Email <a href="mailto:support@screenshottracker.com">support@screenshottracker.com</a>
+        </p>
+        <p>
+            <a href="{{ url_for('change_subscription') }}" style="color: #007bff; margin-right: 20px;">
+                Change Subscription
+            </a>
+            <a href="{{ url_for('cancel_subscription') }}" 
+               style="color: #dc3545; text-decoration: underline; font-size: 14px;">
+                Cancel Subscription
+            </a>
+        </p>
+    </div>
 </body>
 </html>
