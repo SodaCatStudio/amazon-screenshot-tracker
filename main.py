@@ -1717,7 +1717,7 @@ class AmazonMonitor:
                 }
 
                 screenshot_response = requests.get('https://app.scrapingbee.com/api/v1/', 
-                                                  params=screenshot_params, timeout=60)
+                                                  params=screenshot_params, timeout=30)
 
                 if screenshot_response.status_code == 200:
                     screenshot_data = screenshot_response.content
@@ -5189,7 +5189,7 @@ def add_product():
 
         user_data = cursor.fetchone()
 
-        # Fix: Check if user_data exists before accessing
+        # Check if user_data exists before accessing
         if not user_data:
             flash('User account not found', 'error')
             return redirect(url_for('dashboard'))
@@ -5230,6 +5230,14 @@ def add_product():
             )
 
         count_result = cursor.fetchone()
+        current_count = count_result[0] if count_result and count_result[0] else 0
+
+        print(f"📊 Current products: {current_count}, Max allowed: {max_products}")
+
+        if current_count >= max_products:
+            flash(f'You have {current_count} products (limit: {max_products}). Please upgrade or remove a product.', 'error')
+            conn.close()
+            return redirect(url_for('dashboard'))
         
         # Handle different types of database return values
         if count_result is None:
@@ -5329,6 +5337,7 @@ def add_product():
             product_id = cursor.lastrowid
 
         print(f"✅ Product saved with ID: {product_id}")
+        conn.commit()
 
         # Process target categories if provided
         if target_categories_input:
@@ -5362,7 +5371,7 @@ def add_product():
 
         # Save baseline screenshot if available
         if scrape_result.get('screenshot'):
-            print(f"📸 Processing baseline screenshot (length: {len(scrape_result['screenshot'])})")
+            print(f"📸 Saving baseline screenshot (length: {len(scrape_result['screenshot'])})")
 
             # Convert binary screenshot to base64 for database storage
             import base64
@@ -5389,9 +5398,9 @@ def add_product():
 
             print("✅ Baseline screenshot saved as base64")
         else:
-            print("⚠️ No screenshot data to save")
+            print("📸 Queueing screenshot for background capture...")
+            flash('Product added! Screenshot will be captured in the background.', 'info')
 
-        conn.commit()
         conn.close()
 
         flash(f'✅ Successfully added "{product_info.get("title", "Product")[:50]}..."', 'success')
