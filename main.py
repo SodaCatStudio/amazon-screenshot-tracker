@@ -5192,26 +5192,33 @@ def add_product():
         # Check if user_data exists before accessing
         if not user_data:
             flash('User account not found', 'error')
+            conn.close()
             return redirect(url_for('dashboard'))
 
         # Handle both dict and tuple responses
         if isinstance(user_data, dict):
-            subscription_status = user_data['subscription_status']
-            subscription_expires = user_data['subscription_expires']
-            max_products = user_data['max_products']
+            subscription_tier = user_data.get('subscription_tier', 'free')  # Add default
+            subscription_status = user_data.get('subscription_status', 'inactive')
+            subscription_expires = user_data.get('subscription_expires')
+            max_products = user_data.get('max_products', 0)
         else:
-            # Assuming tuple order matches SELECT order
-            subscription_status = user_data[1]
-            subscription_expires = user_data[2]
-            max_products = user_data[3]
+            subscription_tier = user_data[0] if len(user_data) > 0 else 'free'
+            subscription_status = user_data[1] if len(user_data) > 1 else 'inactive'
+            subscription_expires = user_data[2] if len(user_data) > 2 else None
+            max_products = user_data[3] if len(user_data) > 3 else 0
+
+        print(f"📊 User subscription: tier={subscription_tier}, status={subscription_status}, max={max_products}")
+
 
         # Check subscription status
         if subscription_status != 'active':
             flash('Please subscribe to add products. Visit our pricing page.', 'error')
+            conn.close()
             return redirect(url_for('pricing'))
 
-        if subscription_expires and subscription_expires < datetime.now():
+        if subscription_expires and isinstance(subscription_expires, datetime) and subscription_expires < datetime.now():
             flash('Your subscription has expired. Please renew.', 'error')
+            conn.close()
             return redirect(url_for('pricing'))
 
         # Check product limit
@@ -5230,7 +5237,13 @@ def add_product():
             )
 
         count_result = cursor.fetchone()
-        current_count = count_result[0] if count_result and count_result[0] else 0
+        
+        if isinstance(count_result, dict):
+            current_count = count_result.get('count', 0)
+        elif isinstance(count_result, (tuple, list)):
+            current_count = count_result[0] if count_result[0] is not None else 0
+        else:
+            current_count = 0
 
         print(f"📊 Current products: {current_count}, Max allowed: {max_products}")
 
@@ -5395,17 +5408,29 @@ def add_product():
         return redirect(url_for('dashboard'))
 
     except Exception as e:
-        conn.rollback()
-        print(f"❌ Error adding product: {e}")
+        print(f"❌ Error in add_product: {e}")
+        print(f"❌ Error type: {type(e).__name__}")
         import traceback
         traceback.print_exc()
 
-        if "Too Many Requests" in str(e):
-            flash('Rate limit reached. Please wait a moment and try again.', 'warning')
-        else:
-            flash('Error adding product. Please try again.', 'error')
+        if conn:
+            try:
+                conn.rollback()
+            except:
+                pass
+            try:
+                conn.close()
+            except:
+                pass
 
-        conn.close()
+        # More specific error messages
+        if "constraint" in str(e).lower():
+            flash('This product may already exist in your account.', 'error')
+        elif "timeout" in str(e).lower():
+            flash('Request timed out. Please try again.', 'error')
+        else:
+            flash(f'Error adding product: {str(e)[:100]}', 'error')
+
         return redirect(url_for('add_product_form'))
 
 @app.route('/pricing')
