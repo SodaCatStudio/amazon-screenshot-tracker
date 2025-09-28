@@ -5238,21 +5238,6 @@ def add_product():
             flash(f'You have {current_count} products (limit: {max_products}). Please upgrade or remove a product.', 'error')
             conn.close()
             return redirect(url_for('dashboard'))
-        
-        # Handle different types of database return values
-        if count_result is None:
-            current_count = 0
-        elif isinstance(count_result, (list, tuple)) and len(count_result) > 0:
-            current_count = count_result[0] if count_result[0] is not None else 0
-        elif isinstance(count_result, dict) and 'count' in count_result:
-            current_count = count_result['count']
-        else:
-            print(f"⚠️ Unexpected count_result format: {count_result}")
-            current_count = 0
-
-        if current_count >= max_products:
-            flash(f'You have reached your limit of {max_products} products. Upgrade to Publisher tier for more.', 'error')
-            return redirect(url_for('dashboard'))
             
         url = request.form.get('url', '').strip()
         target_categories_input = request.form.get('target_categories', '').strip()
