@@ -1662,6 +1662,7 @@ class AmazonMonitor:
             print("❌ ScrapingBee API key not configured")
             return {'success': False, 'error': 'API key not configured', 'html': '', 'screenshot': None}
 
+        # First, always get HTML
         html_params = {
             'api_key': self.api_key,
             'url': url,
@@ -1669,18 +1670,13 @@ class AmazonMonitor:
             'country_code': 'us',
             'window_width': 1920,
             'window_height': 1080,
-            'wait': 3000,
-            'wait_for': '#productTitle',
-            'js_scenario': json.dumps({
-                "instructions": [
-                    {"wait": 2000}
-                ]
-            })
+            'wait': 2000,  # Reduced from 3000
+            'wait_for': '#productTitle'
         }
 
         try:
             print("📊 Fetching HTML content...")
-            html_response = requests.get('https://app.scrapingbee.com/api/v1/', params=html_params, timeout=60)
+            html_response = requests.get('https://app.scrapingbee.com/api/v1/', params=html_params, timeout=25)
 
             if html_response.status_code != 200:
                 print(f"❌ Failed to get HTML: {html_response.status_code}")
@@ -1693,11 +1689,6 @@ class AmazonMonitor:
 
             html_content = html_response.text
             print(f"✅ Got HTML content ({len(html_content)} chars)")
-
-            # Check if we actually got HTML
-            if 'DOCTYPE' not in html_content[:500] and '<html' not in html_content[:500]:
-                print("⚠️ Response doesn't look like HTML")
-                print(f"First 200 chars: {html_content[:200]}")
 
             screenshot_data = None
 
@@ -1713,17 +1704,22 @@ class AmazonMonitor:
                     'screenshot_full_page': 'true',
                     'window_width': 1920,
                     'window_height': 1080,
-                    'wait': 3000
+                    'wait': 2000  # Reduced from 3000
                 }
 
-                screenshot_response = requests.get('https://app.scrapingbee.com/api/v1/', 
-                                                  params=screenshot_params, timeout=30)
+                try:
+                    screenshot_response = requests.get('https://app.scrapingbee.com/api/v1/', 
+                                                      params=screenshot_params, timeout=25)
 
-                if screenshot_response.status_code == 200:
-                    screenshot_data = screenshot_response.content
-                    print(f"✅ Got screenshot ({len(screenshot_data)} bytes)")
-                else:
-                    print(f"⚠️ Screenshot failed: {screenshot_response.status_code}")
+                    if screenshot_response.status_code == 200:
+                        screenshot_data = screenshot_response.content
+                        print(f"✅ Got screenshot ({len(screenshot_data)} bytes)")
+                    else:
+                        print(f"⚠️ Screenshot failed: {screenshot_response.status_code}")
+                except requests.exceptions.Timeout:
+                    print("⚠️ Screenshot timed out, continuing without it")
+                except Exception as e:
+                    print(f"⚠️ Screenshot error: {e}, continuing without it")
 
             return {
                 'success': True,
@@ -1732,68 +1728,8 @@ class AmazonMonitor:
                 'screenshot': screenshot_data
             }
 
-        except Exception as e:
-            print(f"❌ Error during scraping: {str(e)}")
-            return {
-                'success': False,
-                'error': str(e),
-                'html': '',
-                'screenshot': None
-            }
-
-        params = {
-            'api_key': self.api_key,
-            'url': url,
-            'premium_proxy': 'true',
-            'country_code': 'us',
-            'window_width': 1920,
-            'window_height': 1080,
-            'wait': 3000,
-            'wait_for': '#detailBulletsWrapper_feature_div,#prodDetails,#detail-bullets_feature_div',
-            'return_page_source': 'true',  # Add this to ensure HTML is returned
-        }
-
-        if need_screenshot:
-            params['screenshot'] = 'true'
-            params['screenshot_full_page'] = 'true'
-            # Use extract_rules to get both HTML and screenshot
-            params['extract_rules'] = json.dumps({
-                "html": "body",  # Extract full HTML
-            })
-        else:
-            print("📊 HTML-only check (no screenshot)...")
-
-        try:
-            print(f"🔍 Making ScrapingBee request with {len(params)} parameters")
-            response = requests.get('https://app.scrapingbee.com/api/v1/', params=params, timeout=30)
-
-            if response.status_code != 200:
-                error_msg = f'ScrapingBee returned status {response.status_code}'
-                print(f"❌ {error_msg}")
-                print(f"❌ ScrapingBee error response: {response.text[:500]}")
-                try:
-                    error_json = response.json()
-                    print(f"❌ ScrapingBee error details: {error_json}")
-                except:
-                    pass
-                return {
-                    'success': False,
-                    'error': f"{error_msg}: {response.text}",
-                    'html': '',
-                    'screenshot': None
-                }
-
-            print("✅ Successfully scraped Amazon page")
-
-            return {
-                'success': True,
-                'error': None,
-                'html': response.text,
-                'screenshot': response.content if need_screenshot and response.headers.get('Content-Type', '').startswith('image/') else None
-            }
-
         except requests.exceptions.Timeout:
-            print("❌ Request timed out after 60 seconds")
+            print("❌ Request timed out")
             return {
                 'success': False,
                 'error': 'Request timed out',
