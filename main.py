@@ -5354,6 +5354,8 @@ def add_product():
 
                     print(f"🎯 Added target category: {category_name} (target rank: {target_rank})")
 
+            conn.commit()
+
         # Save baseline screenshot if available
         if scrape_result.get('screenshot'):
             print(f"📸 Saving baseline screenshot (length: {len(scrape_result['screenshot'])})")
@@ -5380,6 +5382,7 @@ def add_product():
                     VALUES (?, ?, ?, ?, ?)
                 ''', (product_id, screenshot_base64, product_info.get('rank'),
                       product_info.get('category'), datetime.now()))
+            conn.commit()
 
             print("✅ Baseline screenshot saved as base64")
         else:
