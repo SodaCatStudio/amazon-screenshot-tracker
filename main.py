@@ -5248,11 +5248,17 @@ def add_product():
                 datetime.now()
             ))
             result = cursor.fetchone()
-            if result:
-                product_id = result['id'] if isinstance(result, dict) else result[0]
+            # Handle different types of database result formats safely
+            if result is None:
+                print("❌ Database insert failed - no result returned")
+                return None
+            elif isinstance(result, dict):
+                product_id = result['id']
+            elif isinstance(result, (list, tuple)) and len(result) > 0:
+                product_id = result[0]
             else:
-                # Handle the case where result is None
-                raise ValueError("No product ID found in the query results.")
+                print(f"❌ Unexpected result format: {result}")
+                return None
         else:
             cursor.execute('''
                 INSERT INTO products (user_id, user_email, product_url, product_title, 
@@ -5307,6 +5313,17 @@ def add_product():
 
         # Save baseline screenshot if available
         if scrape_result.get('screenshot'):
+            # We already have it from the initial scrape
+            screenshot_data = scrape_result['screenshot']
+        else:
+            # Try to get just the screenshot
+            print("📸 Attempting to capture baseline screenshot...")
+            try:
+                screenshot_result = user_monitor.scrape_amazon_page(url, need_screenshot=True)
+                screenshot_data = screenshot_result.get('screenshot')
+            except:
+                screenshot_data = None
+        if screenshot_data:
             print(f"📸 Saving baseline screenshot (length: {len(scrape_result['screenshot'])})")
 
             # Convert binary screenshot to base64 for database storage
