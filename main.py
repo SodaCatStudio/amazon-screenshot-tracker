@@ -5248,17 +5248,7 @@ def add_product():
                 datetime.now()
             ))
             result = cursor.fetchone()
-            # Handle different types of database result formats safely
-            if result is None:
-                print("❌ Database insert failed - no result returned")
-                return None
-            elif isinstance(result, dict):
-                product_id = result['id']
-            elif isinstance(result, (list, tuple)) and len(result) > 0:
-                product_id = result[0]
-            else:
-                print(f"❌ Unexpected result format: {result}")
-                return None
+            product_id = result['id'] if isinstance(result, dict) else result[0]
         else:
             cursor.execute('''
                 INSERT INTO products (user_id, user_email, product_url, product_title, 
