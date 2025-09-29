@@ -5165,12 +5165,12 @@ def add_product():
 
         if get_db_type() == 'postgresql':
             cursor.execute(
-                "SELECT COUNT(*) FROM products WHERE user_id = %s AND active = true",
+                "SELECT COUNT(*) FROM products WHERE user_id = %s",
                 (current_user.id,)
             )
         else:
             cursor.execute(
-                "SELECT COUNT(*) FROM products WHERE user_id = ? AND active = 1",
+                "SELECT COUNT(*) FROM products WHERE user_id = ?",
                 (current_user.id,)
             )
 
