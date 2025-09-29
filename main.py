@@ -1704,7 +1704,9 @@ class AmazonMonitor:
                     'screenshot_full_page': 'true',
                     'window_width': 1920,
                     'window_height': 1080,
-                    'wait': 2000  # Reduced from 3000
+                    'wait': 2000,  # Reduced from 3000
+                    'block_ads': 'true',  # Add this - blocks ads which speeds up rendering
+                    'block_resources': 'false'  # Keep resources for proper rendering
                 }
 
                 try:
@@ -5248,7 +5250,27 @@ def add_product():
                 datetime.now()
             ))
             result = cursor.fetchone()
-            product_id = result['id'] if isinstance(result, dict) else result[0]
+
+            if result:
+                if isinstance(result, dict):
+                    product_id = result['id']
+                elif isinstance(result, (tuple, list)):
+                    product_id = result[0]
+                else:
+                    product_id = result
+            else:
+                # Fallback: query for the product we just inserted
+                cursor.execute('''
+                    SELECT id FROM products 
+                    WHERE user_id = %s AND product_url = %s 
+                    ORDER BY id DESC LIMIT 1
+                ''', (current_user.id, url))
+                fallback_result = cursor.fetchone()
+                if fallback_result:
+                    product_id = fallback_result['id'] if isinstance(fallback_result, dict) else fallback_result[0]
+                else:
+                    raise ValueError("Failed to get product ID after insertion")
+                    
         else:
             cursor.execute('''
                 INSERT INTO products (user_id, user_email, product_url, product_title, 
@@ -5265,6 +5287,9 @@ def add_product():
                 datetime.now()
             ))
             product_id = cursor.lastrowid
+
+        if not product_id:
+            raise ValueError("Failed to get product ID after insertion")
 
         print(f"✅ Product saved with ID: {product_id}")
         conn.commit()
@@ -5341,9 +5366,10 @@ def add_product():
             conn.commit()
 
             print("✅ Baseline screenshot saved as base64")
+            flash(f'✅ Successfully added "{product_info.get("title", "Product")[:50]}..." with screenshot!', 'success')
         else:
-            print("📸 Queueing screenshot for background capture...")
-            flash('Product added! Screenshot will be captured in the background.', 'info')
+            print("📸 Screenshot will be captured in background.")
+            flash('Product added! Screenshot will be captured shortly.', 'info')
 
         conn.close()
 
