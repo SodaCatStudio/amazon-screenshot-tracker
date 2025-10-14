@@ -1116,7 +1116,7 @@ class EmailNotifier:
             })
 
             print(f"✅ Resend response: {email}")
-            return email is not None
+            return True
 
         except Exception as e:
             print(f"❌ Resend error: {str(e)}")
@@ -4329,6 +4329,66 @@ def credit_leak_detector():
         import traceback
         return f"<pre>{traceback.format_exc()}</pre>", 500
 
+@app.route('/admin/resend_verification_to/<email>')
+@login_required
+def admin_resend_verification(email):
+    """Admin tool to resend verification email"""
+    if current_user.email not in ['josh.matern@gmail.com', 'amazonscreenshottracker@gmail.com']:
+        return "Unauthorized", 403
+
+    conn = get_db()
+    cursor = conn.cursor()
+
+    try:
+        # Get user info
+        if get_db_type() == 'postgresql':
+            cursor.execute('SELECT id, is_verified FROM users WHERE email = %s', (email,))
+        else:
+            cursor.execute('SELECT id, is_verified FROM users WHERE email = ?', (email,))
+
+        user = cursor.fetchone()
+        if not user:
+            return f"User {email} not found", 404
+
+        user_id = user[0] if isinstance(user, tuple) else user['id']
+
+        # Generate new token
+        verification_token = secrets.token_urlsafe(32)
+        token_expiry = datetime.now() + timedelta(hours=24)
+
+        # Update user
+        if get_db_type() == 'postgresql':
+            cursor.execute('''
+                UPDATE users 
+                SET verification_token = %s, verification_token_expiry = %s
+                WHERE id = %s
+            ''', (verification_token, token_expiry, user_id))
+        else:
+            cursor.execute('''
+                UPDATE users 
+                SET verification_token = ?, verification_token_expiry = ?
+                WHERE id = ?
+            ''', (verification_token, token_expiry, user_id))
+
+        conn.commit()
+        conn.close()
+
+        # Send email
+        success = email_notifier.send_verification_email(email, verification_token)
+
+        if success:
+            return f"""
+            <h2>✅ Verification email sent to {email}</h2>
+            <p>Token: {verification_token}</p>
+            <p>Direct link: <a href="/auth/verify_email?token={verification_token}">Verify Now</a></p>
+            """
+        else:
+            return f"Failed to send email to {email}", 500
+
+    except Exception as e:
+        if conn:
+            conn.close()
+        return f"Error: {str(e)}", 500
 
 @app.route('/kill_scheduler')
 @login_required
