@@ -1104,25 +1104,36 @@ class EmailNotifier:
 
     def _send_via_resend(self, recipient, subject, html_content, attachments=None):
         try:
-            if not attachments:
-                response = resend.Emails.send({
-                    "from": "Screenshot Tracker <noreply@screenshottracker.com>",
-                    "to": recipient,
-                    "subject": subject,
-                    "html": html_content
-                })
-            else:
-                # Handle attachments
-                response = resend.Emails.send({
-                    "from": "Screenshot Tracker <noreply@screenshottracker.com>",
-                    "to": recipient,
-                    "subject": subject,
-                    "html": html_content,
-                    "attachments": attachments
-                })
-            return response is not None
+            import resend
+            resend.api_key = os.environ.get('RESEND_API_KEY')
+
+            if not resend.api_key:
+                print("❌ RESEND_API_KEY not set")
+                return False
+
+            # Build the email data
+            email_data = {
+                "from": "Screenshot Tracker <noreply@screenshottracker.com>",
+                "to": recipient if isinstance(recipient, list) else [recipient],
+                "subject": subject,
+                "html": html_content
+            }
+
+            if attachments:
+                # Handle attachments if needed
+                email_data["attachments"] = attachments
+
+            # Send the email without type hints
+            response = resend.Emails.send(**email_data)  # Use ** to unpack
+            print(f"✅ Resend email sent to {recipient}: {response}")
+            return True
+
         except Exception as e:
-            print(f"Resend error: {e}")
+            print(f"❌ Resend error: {str(e)}")
+            print(f"   API Key exists: {bool(os.environ.get('RESEND_API_KEY'))}")
+            print(f"   Recipient: {recipient}")
+            import traceback
+            traceback.print_exc()
             return False
 
     def send_email(self, recipient, subject, html_content, attachments=None):
@@ -4892,6 +4903,20 @@ def test_product_scrape():
     except Exception as e:
         import traceback
         return f"Test failed: {traceback.format_exc()}", 500
+
+@app.route('/test_resend')
+@login_required
+def test_resend():
+    if current_user.email not in ['josh.matern@gmail.com']:
+        return "Unauthorized", 403
+
+    success = email_notifier._send_via_resend(
+        current_user.email,
+        "Test Email",
+        "<h2>Test</h2><p>This is a test from Screenshot Tracker.</p>"
+    )
+
+    return f"Email {'sent' if success else 'failed'}! Check logs for details."
 
 @app.route('/fix_product/<int:product_id>')
 @login_required
