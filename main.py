@@ -1107,30 +1107,19 @@ class EmailNotifier:
             import resend
             resend.api_key = os.environ.get('RESEND_API_KEY')
 
-            if not resend.api_key:
-                print("❌ RESEND_API_KEY not set")
-                return False
-
-            # Correct format for Resend SDK
-            params = {
-                "from_": "Screenshot Tracker <noreply@screenshottracker.com>",  # Note: from_ with underscore
-                "to": recipient if isinstance(recipient, list) else [recipient],
+            # Try their exact format from docs
+            email = resend.Emails.send({
+                "from": "Screenshot Tracker <noreply@screenshottracker.com>",
+                "to": [recipient] if not isinstance(recipient, list) else recipient,
                 "subject": subject,
                 "html": html_content
-            }
+            })
 
-            if attachments:
-                params["attachments"] = attachments
-
-            # Send using the correct method
-            response = resend.Emails.send(params)
-            print(f"✅ Resend email sent to {recipient}: {response}")
-            return True
+            print(f"✅ Resend response: {email}")
+            return email is not None
 
         except Exception as e:
             print(f"❌ Resend error: {str(e)}")
-            import traceback
-            traceback.print_exc()
             return False
 
     def send_email(self, recipient, subject, html_content, attachments=None):
