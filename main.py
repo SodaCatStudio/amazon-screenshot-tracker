@@ -7191,6 +7191,7 @@ def stripe_webhook():
             session = event['data']['object']
             email = session['customer_email'].lower()
             subscription_id = session['subscription']
+            customer_id = session.get('customer')
 
             print(f"🔷 Processing new subscription for {email}")
 
@@ -7360,6 +7361,41 @@ def stripe_webhook():
     finally:
         conn.close()
 
+@app.route('/admin/fix_paid_user/<email>')
+@login_required  
+def fix_paid_user(email):
+    if current_user.email not in ['josh.matern@gmail.com']:
+        return "Unauthorized", 403
+
+    conn = get_db()
+    cursor = conn.cursor()
+
+    setup_token = secrets.token_urlsafe(32)
+
+    cursor.execute("""
+        INSERT INTO users (
+            email, password_hash, subscription_status, subscription_tier,
+            max_products, is_verified, verification_token, verification_token_expiry
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (email) DO UPDATE SET
+            subscription_status = 'active',
+            subscription_tier = 'author',
+            max_products = 2,
+            verification_token = EXCLUDED.verification_token
+    """, (email, 'PENDING_SETUP', 'active', 'author', 2, False,
+          setup_token, datetime.now() + timedelta(hours=24)))
+
+    conn.commit()
+    conn.close()
+
+    setup_link = f"https://screenshottracker.com/auth/complete-registration?email={email}&token={setup_token}"
+
+    return f"""
+    <h2>User created/updated for {email}</h2>
+    <p>Send them this link to set their password:</p>
+    <p><a href="{setup_link}">{setup_link}</a></p>
+    """
+
 @app.route('/admin/create_paid_user/<email>')
 @login_required
 def create_paid_user(email):
@@ -7420,6 +7456,32 @@ def create_paid_user(email):
         print(f"❌ Failed to send setup email to {email}")
 
     return f"User created for {email}. Setup link: {setup_link}"
+
+@app.route('/admin/fix_stripe_columns')
+@login_required
+def fix_stripe_columns():
+    if current_user.email not in ['josh.matern@gmail.com']:
+        return "Unauthorized", 403
+
+    conn = get_db()
+    cursor = conn.cursor()
+
+    try:
+        if get_db_type() == 'postgresql':
+            cursor.execute("""
+                ALTER TABLE users 
+                ADD COLUMN IF NOT EXISTS stripe_subscription_id VARCHAR(100),
+                ADD COLUMN IF NOT EXISTS stripe_customer_id VARCHAR(100)
+            """)
+            conn.commit()
+            return "✅ Stripe columns added successfully"
+        else:
+            return "This is for PostgreSQL only", 400
+    except Exception as e:
+        conn.rollback()
+        return f"Error: {str(e)}", 500
+    finally:
+        conn.close()
 
 @app.route('/success')
 def subscription_success():
