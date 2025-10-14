@@ -7189,8 +7189,10 @@ def stripe_webhook():
     try:
         if event['type'] == 'checkout.session.completed':
             session = event['data']['object']
-            email = session['customer_email']
+            email = session['customer_email'].lower()
             subscription_id = session['subscription']
+
+            print(f"🔷 Processing new subscription for {email}")
 
             # Get subscription details
             subscription = stripe.Subscription.retrieve(subscription_id)
@@ -7208,7 +7210,10 @@ def stripe_webhook():
 
             tier, max_products = tier_map.get(price_id, ('author', 2))
 
-            # CREATE/UPDATE USER HERE
+            # Generate setup token
+            setup_token = secrets.token_urlsafe(32)
+
+            # CREATE USER IN DATABASE
             if get_db_type() == 'postgresql':
                 cursor.execute("""
                     INSERT INTO users (
@@ -7220,14 +7225,18 @@ def stripe_webhook():
                         stripe_customer_id,
                         max_products,
                         is_verified,
-                        subscription_expires
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        subscription_expires,
+                        verification_token,
+                        verification_token_expiry
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (email) DO UPDATE SET
                         subscription_status = 'active',
                         subscription_tier = EXCLUDED.subscription_tier,
                         stripe_subscription_id = EXCLUDED.stripe_subscription_id,
                         stripe_customer_id = EXCLUDED.stripe_customer_id,
-                        max_products = EXCLUDED.max_products
+                        max_products = EXCLUDED.max_products,
+                        verification_token = EXCLUDED.verification_token,
+                        verification_token_expiry = EXCLUDED.verification_token_expiry
                 """, (
                     email,
                     'PENDING_SETUP',
@@ -7236,9 +7245,14 @@ def stripe_webhook():
                     subscription_id,
                     session['customer'],
                     max_products,
-                    False,
-                    datetime.now() + timedelta(days=30)
+                    False,  # Not verified yet
+                    datetime.now() + timedelta(days=30),
+                    setup_token,
+                    datetime.now() + timedelta(hours=24)
                 ))
+
+                conn.commit()
+                print(f"✅ User created/updated in database for {email}")
 
             # Send registration email
             registration_token = secrets.token_urlsafe(32)
@@ -7247,16 +7261,16 @@ def stripe_webhook():
                 WHERE email = %s
             """, (registration_token, email))
 
-            # Send email with setup link
+            # Send setup email
             if email_notifier.is_configured():
-                setup_link = f"https://screenshottracker.com/auth/setup-account?email={email}&token={registration_token}"
+                setup_link = f"https://screenshottracker.com/auth/complete-registration?email={email}&token={setup_token}"
 
                 html_content = f"""
                 <!DOCTYPE html>
                 <html>
                 <body>
                     <h2>Welcome to Screenshot Tracker!</h2>
-                    <p>Your subscription is active. Please complete your account setup:</p>
+                    <p>Your subscription is active! Please complete your account setup:</p>
 
                     <p><a href="{setup_link}" style="background: #ff9900; color: white; padding: 12px 30px; 
                           text-decoration: none; border-radius: 5px; display: inline-block;">
@@ -7270,14 +7284,16 @@ def stripe_webhook():
                 </html>
                 """
 
-                email_notifier.send_email(
+                success = email_notifier.send_email(
                     email,
                     "Complete Your Screenshot Tracker Setup",
                     html_content
                 )
-                print(f"✅ Setup email sent to {email}")
-            else:
-                print(f"❌ Email system not configured - cannot send setup email to {email}")
+
+                if success:
+                    print(f"✅ Setup email sent to {email}")
+                else:
+                    print(f"❌ Failed to send setup email to {email}")
 
         elif event['type'] == 'customer.subscription.deleted':
             # Handle cancellation
@@ -7343,6 +7359,67 @@ def stripe_webhook():
         return str(e), 500
     finally:
         conn.close()
+
+@app.route('/admin/create_paid_user/<email>')
+@login_required
+def create_paid_user(email):
+    if current_user.email not in ['josh.matern@gmail.com']:
+        return "Unauthorized", 403
+
+    conn = get_db()
+    cursor = conn.cursor()
+
+    setup_token = secrets.token_urlsafe(32)
+
+    if get_db_type() == 'postgresql':
+        cursor.execute("""
+            INSERT INTO users (
+                email, password_hash, subscription_status, subscription_tier,
+                max_products, is_verified, verification_token, verification_token_expiry
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (email) DO UPDATE SET
+                subscription_status = 'active',
+                subscription_tier = 'author',
+                max_products = 2
+        """, (email, 'PENDING_SETUP', 'active', 'author', 2, False, 
+              setup_token, datetime.now() + timedelta(hours=24)))
+
+    conn.commit()
+    conn.close()
+
+    # Send setup email
+    setup_link = f"https://screenshottracker.com/auth/complete-registration?email={email}&token={setup_token}"
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <body>
+        <h2>Welcome to Screenshot Tracker!</h2>
+        <p>Your subscription is active! Please complete your account setup:</p>
+
+        <p><a href="{setup_link}" style="background: #ff9900; color: white; padding: 12px 30px; 
+              text-decoration: none; border-radius: 5px; display: inline-block;">
+            Set Your Password
+        </a></p>
+
+        <p>Or copy this link: {setup_link}</p>
+
+        <p>This link expires in 24 hours.</p>
+    </body>
+    </html>
+    """
+
+    success = email_notifier.send_email(
+        email,
+        "Complete Your Screenshot Tracker Setup",
+        html_content
+    )
+
+    if success:
+        print(f"✅ Setup email sent to {email}")
+    else:
+        print(f"❌ Failed to send setup email to {email}")
+
+    return f"User created for {email}. Setup link: {setup_link}"
 
 @app.route('/success')
 def subscription_success():
