@@ -3542,16 +3542,22 @@ def complete_registration():
         cursor = conn.cursor()
 
         cursor.execute("""
-            SELECT id, subscription_status 
+            SELECT id, subscription_status, verification_token_expiry 
             FROM users 
-            WHERE LOWER(email) = LOWER(%s) 
-            AND password_hash = 'PENDING_SETUP'
-        """, (email,))
+            WHERE LOWER(email) = LOWER(%s)
+              AND password_hash = 'PENDING_SETUP'
+              AND verification_token = %s
+        """, (email, token))
 
         user = cursor.fetchone()
 
         if not user or user[1] != 'active':
             flash('Invalid or expired registration link', 'error')
+            return redirect(url_for('auth.login'))
+
+        # Check token expiry
+        if datetime.now() > user[2]:
+            flash('This registration link has expired. Please contact support.', 'error')
             return redirect(url_for('auth.login'))
 
         # Update user with password
@@ -7255,12 +7261,10 @@ def stripe_webhook():
                 conn.commit()
                 print(f"✅ User created/updated in database for {email}")
 
-            # Send registration email
-            registration_token = secrets.token_urlsafe(32)
             cursor.execute("""
                 UPDATE users SET verification_token = %s 
                 WHERE email = %s
-            """, (registration_token, email))
+            """, (setup_token, email))
 
             # Send setup email
             if email_notifier.is_configured():
