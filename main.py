@@ -7407,6 +7407,19 @@ def stripe_webhook():
             customer_id = invoice.get('customer')
             print(f"✅ Invoice paid for subscription {subscription_id}, customer {customer_id}")
 
+            # Some invoices (e.g., one-time payments) have no subscription
+            if not subscription_id:
+                print("⚠️ Skipping — no subscription ID on invoice.")
+                return '', 200  # Acknowledge without error
+
+            # Retrieve subscription details safely
+            try:
+                subscription = stripe.Subscription.retrieve(subscription_id)
+                price_id = subscription['items']['data'][0]['price']['id']
+            except Exception as e:
+                print(f"⚠️ Could not retrieve subscription {subscription_id}: {e}")
+                return '', 200  # Don’t fail webhook retries
+
             # Map price IDs to durations
             duration_map = {
                 os.environ.get('STRIPE_AUTHOR_WEEKLY_PRICE'): timedelta(weeks=1),
@@ -7417,11 +7430,14 @@ def stripe_webhook():
                 os.environ.get('STRIPE_PUBLISHER_YEARLY_PRICE'): timedelta(days=365),
             }
 
-            # In invoice.payment_succeeded
-            price_id = invoice['lines']['data'][0]['price']['id']
+            # Use price from invoice lines if available; otherwise fall back to subscription
+            try:
+                price_id = invoice['lines']['data'][0]['price']['id']
+            except (KeyError, IndexError, TypeError):
+                price_id = subscription['items']['data'][0]['price']['id']
             expires_at = datetime.now() + duration_map.get(price_id, timedelta(days=30))
 
-            if subscription_id and invoice['billing_reason'] == 'subscription_cycle':
+            if invoice['billing_reason'] == 'subscription_cycle':
                 if get_db_type() == 'postgresql':
                     cursor.execute("""
                         UPDATE users 
@@ -7437,7 +7453,10 @@ def stripe_webhook():
                         WHERE stripe_subscription_id = ?
                     """, (expires_at, subscription_id))
 
-                print(f"✅ Subscription renewed: {subscription_id}")
+                conn.commit()
+                print(f"✅ Subscription renewed: {subscription_id}, new expiry: {expires_at}")
+
+            return '', 200
 
         elif event['type'] == 'invoice.payment_failed':
             # Handle failed payment
