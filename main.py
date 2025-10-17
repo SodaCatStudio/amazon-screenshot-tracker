@@ -2892,17 +2892,18 @@ def create_enhanced_user_tables():
 
 @auth.route('/setup-account', methods=['GET', 'POST'])
 def setup_account():
-    email = request.args.get('email')
-    token = request.args.get('token')
+
 
     if request.method == 'POST':
         password = request.form.get('password')
         full_name = request.form.get('full_name')
+        email = request.form.get('email')
+        token = request.form.get('token')
 
         # Validate password exists
         if not password:
             flash('Password is required', 'error')
-            return render_template('setup_account.html', email=email)
+            return render_template('setup_account.html', email=email, token=token)
 
         conn = get_db()
         cursor = conn.cursor()
@@ -2912,13 +2913,11 @@ def setup_account():
             cursor.execute("""
                 SELECT id FROM users 
                 WHERE email = %s AND setup_token = %s 
-                AND password_hash = 'PENDING_SETUP'
             """, (email, token))
         else:
             cursor.execute("""
                 SELECT id FROM users 
                 WHERE email = ? AND setup_token = ? 
-                AND password_hash = 'PENDING_SETUP'
             """, (email, token))
 
         user = cursor.fetchone()
@@ -2950,7 +2949,10 @@ def setup_account():
 
         flash('Account setup complete! You can now log in.', 'success')
         return redirect(url_for('auth.login'))
-
+        
+    # GET request (display page)
+    email = request.args.get('email')
+    token = request.args.get('token')
     return render_template('setup_account.html', email=email)
 
 # Authentication routes with best practices
@@ -7337,7 +7339,9 @@ def stripe_webhook():
                         subscription_tier = EXCLUDED.subscription_tier,
                         stripe_subscription_id = EXCLUDED.stripe_subscription_id,
                         stripe_customer_id = EXCLUDED.stripe_customer_id,
-                        max_products = EXCLUDED.max_products
+                        max_products = EXCLUDED.max_products,
+                        setup_token = EXCLUDED.setup_token,
+                        setup_token_expiry = EXCLUDED.setup_token_expiry
                 """, (
                     email,
                     'PENDING_SETUP',
@@ -7410,39 +7414,38 @@ def stripe_webhook():
             conn.commit()
 
         elif event['type'] == 'invoice.payment_succeeded':
-        # This fires on successful renewal
             invoice = event['data']['object']
-            subscription_id = invoice['subscription']
-            if not subscription_id:
-                return '', 200  # Acknowledge without error
+
+            # Safely get subscription id and customer
+            subscription_id = invoice.get('subscription')
             customer_id = invoice.get('customer')
-            customer_email = invoice.get('customer_email')
+            customer_email = invoice.get('customer_email')  # may be None
+
             print(f"✅ Invoice payment succeeded. Subscription: {subscription_id}, Customer: {customer_id}, Email: {customer_email}")
 
-
-            # Some invoices (e.g., one-time payments) have no subscription
+            # If invoice has no subscription (one-off invoice), skip it
             if not subscription_id:
-                print("⚠️ Skipping — no subscription ID on invoice.")
-                return '', 200  # Acknowledge without error
+                print("⚠️ Invoice has no subscription field — skipping renewal handling.")
+                return '', 200
 
-            # Retrieve subscription safely
+            # Retrieve subscription safely (catch Stripe errors)
             try:
                 subscription = stripe.Subscription.retrieve(subscription_id)
             except Exception as e:
                 print(f"⚠️ Could not retrieve subscription {subscription_id}: {e}")
                 return '', 200
 
-            # Get price ID safely
+            # Try to get price_id from invoice lines; fallback to subscription
             try:
                 price_id = invoice['lines']['data'][0]['price']['id']
             except (KeyError, IndexError, TypeError):
                 try:
                     price_id = subscription['items']['data'][0]['price']['id']
                 except Exception:
-                    print(f"⚠️ Could not find price_id for subscription {subscription_id}")
-                    return '', 200
+                    print(f"⚠️ Could not find a price_id for subscription {subscription_id}; defaulting duration")
+                    price_id = None
 
-            # Map price IDs to durations
+            # Map to durations (your existing map)
             duration_map = {
                 os.environ.get('STRIPE_AUTHOR_WEEKLY_PRICE'): timedelta(weeks=1),
                 os.environ.get('STRIPE_AUTHOR_MONTHLY_PRICE'): timedelta(days=30),
@@ -7451,9 +7454,9 @@ def stripe_webhook():
                 os.environ.get('STRIPE_PUBLISHER_MONTHLY_PRICE'): timedelta(days=30),
                 os.environ.get('STRIPE_PUBLISHER_YEARLY_PRICE'): timedelta(days=365),
             }
-
             expires_at = datetime.now() + duration_map.get(price_id, timedelta(days=30))
 
+            # Update only subscription_expires and subscription_status — do NOT touch setup_token or password_hash
             try:
                 if get_db_type() == 'postgresql':
                     cursor.execute("""
@@ -7474,6 +7477,14 @@ def stripe_webhook():
                 print(f"✅ Subscription renewed successfully until {expires_at}")
             except Exception as e:
                 print(f"❌ Database update failed for subscription {subscription_id}: {e}")
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+            finally:
+                # Do not close conn here if it's the shared connection in the outer handler;
+                # the outer finally will close it. If you created a local connection, close it here.
+                pass
 
             return '', 200
 

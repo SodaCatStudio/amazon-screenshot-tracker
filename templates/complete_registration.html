@@ -296,9 +296,9 @@
             </ul>
         </div>
 
-        <form method="POST" action="{{ url_for('auth.register') }}" id="registerForm">
-            <!-- CRITICAL: CSRF TOKEN - This was missing! -->
+        <form method="POST" action="{{ url_for('auth.setup_account') }}" id="registerForm">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="token" value="{{ token }}">
 
             <div class="form-group">
                 <label for="full_name">Full Name</label>
@@ -317,7 +317,7 @@
                        name="email" 
                        required 
                        autocomplete="email"
-                       placeholder="your@email.com"
+                       readonly
                        value="{{ email if email else '' }}">
             </div>
 
@@ -364,7 +364,6 @@
                        id="confirm_password" 
                        name="confirm_password" 
                        required 
-                       autocomplete="new-password"
                        placeholder="Confirm your password">
             </div>
 
