@@ -4707,113 +4707,6 @@ def debug_baseline_screenshots():
             conn.close()
         return f"Error: {str(e)}", 500
 
-# ============= PADDLE INTEGRATION =============
-
-def verify_paddle_signature(post_data, public_key_string):
-    """Verify Paddle webhook signature"""
-    # Get the signature from the request
-    signature = post_data.get('p_signature')
-
-    # Remove the signature from the data
-    post_data_copy = post_data.copy()
-    del post_data_copy['p_signature']
-
-    # Sort the data
-    sorted_data = OrderedDict(sorted(post_data_copy.items()))
-
-    # Serialize the data
-    serialized = ''
-    for key, value in sorted_data.items():
-        serialized += f'{key}={value}'
-
-    # For now, return True - implement proper verification later
-    # Paddle's signature verification is complex (PHP-style serialization)
-    return True
-
-@app.route('/paddle_webhook', methods=['POST'])
-@csrf.exempt
-def paddle_webhook():
-    """Handle Paddle subscription events"""
-
-    # Paddle sends form-encoded data
-    webhook_data = request.form.to_dict()
-
-    # TODO: Verify signature properly or use Paddle's verification endpoint
-    # For now, check the alert_id is unique to prevent replay attacks
-
-    alert_name = webhook_data.get('alert_name')
-    email = webhook_data.get('email', '').lower()
-
-    conn = get_db()
-    cursor = conn.cursor()
-
-    try:
-        if alert_name == 'subscription_created':
-            subscription_id = webhook_data.get('subscription_id')
-            subscription_plan_id = webhook_data.get('subscription_plan_id')
-            next_bill_date = webhook_data.get('next_bill_date')
-
-            # Map plan IDs to tiers
-            tier_mapping = {
-                os.environ.get('PADDLE_AUTHOR_PLAN_ID'): ('author', 2),
-                os.environ.get('PADDLE_PUBLISHER_PLAN_ID'): ('publisher', 5)
-            }
-
-            if subscription_plan_id not in tier_mapping:
-                return 'Unknown plan', 400
-
-            tier, max_products = tier_mapping[subscription_plan_id]
-
-            # Update or create user
-            if get_db_type() == 'postgresql':
-                cursor.execute("""
-                    INSERT INTO users (email, password_hash, subscription_tier,
-                                     subscription_status, subscription_expires,
-                                     paddle_subscription_id, max_products, is_verified)
-                    VALUES (%s, %s, %s, 'active', %s, %s, %s, true)
-                    ON CONFLICT (email) DO UPDATE SET
-                        subscription_tier = EXCLUDED.subscription_tier,
-                        subscription_status = EXCLUDED.subscription_status,
-                        subscription_expires = EXCLUDED.subscription_expires,
-                        paddle_subscription_id = EXCLUDED.paddle_subscription_id,
-                        max_products = EXCLUDED.max_products
-                """, (email, 'PENDING_SETUP', tier, next_bill_date, 
-                      subscription_id, max_products))
-
-        elif alert_name == 'subscription_cancelled':
-            subscription_id = webhook_data.get('subscription_id')
-            cancellation_effective_date = webhook_data.get('cancellation_effective_date')
-
-            if get_db_type() == 'postgresql':
-                cursor.execute("""
-                    UPDATE users 
-                    SET subscription_status = 'cancelled',
-                        subscription_expires = %s
-                    WHERE paddle_subscription_id = %s
-                """, (cancellation_effective_date, subscription_id))
-
-        elif alert_name == 'subscription_payment_succeeded':
-            subscription_id = webhook_data.get('subscription_id')
-            next_bill_date = webhook_data.get('next_bill_date')
-
-            if get_db_type() == 'postgresql':
-                cursor.execute("""
-                    UPDATE users 
-                    SET subscription_expires = %s,
-                        subscription_status = 'active'
-                    WHERE paddle_subscription_id = %s
-                """, (next_bill_date, subscription_id))
-
-        conn.commit()
-        return '', 200
-
-    except Exception as e:
-        conn.rollback()
-        print(f"Paddle webhook error: {e}")
-        return str(e), 500
-    finally:
-        conn.close()
-
 
 @app.route('/capture_baseline/<int:product_id>')
 @login_required
@@ -7335,13 +7228,15 @@ def stripe_webhook():
                         setup_token_expiry
                     ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (email) DO UPDATE SET
+                        is_verified = false,
                         subscription_status = 'active',
                         subscription_tier = EXCLUDED.subscription_tier,
                         stripe_subscription_id = EXCLUDED.stripe_subscription_id,
                         stripe_customer_id = EXCLUDED.stripe_customer_id,
                         max_products = EXCLUDED.max_products,
                         setup_token = EXCLUDED.setup_token,
-                        setup_token_expiry = EXCLUDED.setup_token_expiry
+                        setup_token_expiry = EXCLUDED.setup_token_expiry,
+                        password_hash = 'PENDING_SETUP'
                 """, (
                     email,
                     'PENDING_SETUP',
