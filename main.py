@@ -2911,13 +2911,13 @@ def setup_account():
         if get_db_type() == 'postgresql':
             cursor.execute("""
                 SELECT id FROM users 
-                WHERE email = %s AND verification_token = %s 
+                WHERE email = %s AND setup_token = %s 
                 AND password_hash = 'PENDING_SETUP'
             """, (email, token))
         else:
             cursor.execute("""
                 SELECT id FROM users 
-                WHERE email = ? AND verification_token = ? 
+                WHERE email = ? AND setup_token = ? 
                 AND password_hash = 'PENDING_SETUP'
             """, (email, token))
 
@@ -2934,14 +2934,14 @@ def setup_account():
             cursor.execute("""
                 UPDATE users 
                 SET password_hash = %s, full_name = %s, 
-                    is_verified = true, verification_token = NULL
+                    is_verified = true, setup_token = NULL
                 WHERE id = %s
             """, (password_hash, full_name or '', user[0]))
         else:
             cursor.execute("""
                 UPDATE users 
                 SET password_hash = ?, full_name = ?, 
-                    is_verified = 1, verification_token = NULL
+                    is_verified = 1, setup_token = NULL
                 WHERE id = ?
             """, (password_hash, full_name or '', user[0]))
 
