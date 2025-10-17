@@ -7274,10 +7274,21 @@ def stripe_webhook():
             session = event['data']['object']
             email = session.get('customer_email')  
             if not email:
-                print("❌ Stripe checkout session missing customer_email!")
-                return "No customer email", 400  
+                customer_id = session.get('customer')
+                if customer_id:
+                    customer = stripe.Customer.retrieve(customer_id)
+                    email = customer.get('email')
 
-            email = email.lower()
+            if not email:
+                print(f"❌ Stripe checkout session {session['id']} missing customer_email!")
+                return '', 200  # Prevent retries
+
+            if email:
+                email = email.lower()
+            else:
+                print(f"❌ Stripe checkout session {session['id']} missing customer_email!")
+                return '', 200
+
             subscription_id = session['subscription']
             customer_id = session.get('customer')
 
