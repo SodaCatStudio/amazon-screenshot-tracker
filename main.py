@@ -3188,6 +3188,83 @@ def logout():
     # Always redirect to the index/landing page, not login
     return redirect(url_for('index'))
 
+@auth.route('/admin/resend_setup/<email>')
+def resend_setup(email):
+    """Admin route to resend setup email to a paid user"""
+
+    # List of admin emails
+    ADMIN_EMAILS = ['josh.matern@gmail.com']
+    if not current_user.is_authenticated or current_user.email not in ADMIN_EMAILS:
+        return "Unauthorized", 403
+
+    conn = get_db()
+    cursor = conn.cursor()
+
+    try:
+        # Fetch user
+        cursor.execute("""
+            SELECT id, subscription_status
+            FROM users
+            WHERE LOWER(email) = LOWER(%s)
+        """, (email,))
+        user = cursor.fetchone()
+
+        if not user:
+            return f"User {email} not found", 404
+
+        user_id = user[0]
+        subscription_status = user[1]
+
+        # Only allow if subscription is active
+        if subscription_status != 'active':
+            return f"User {email} does not have an active subscription", 400
+
+        # Generate new setup token
+        setup_token = secrets.token_urlsafe(32)
+        setup_token_expiry = datetime.now() + timedelta(hours=24)
+
+        # Update user in DB
+        cursor.execute("""
+            UPDATE users 
+            SET setup_token = %s, setup_token_expiry = %s
+            WHERE id = %s
+        """, (setup_token, setup_token_expiry, user_id))
+        conn.commit()
+
+        # Generate setup link
+        setup_link = f"https://screenshottracker.com/auth/complete-registration?email={email}&token={setup_token}"
+
+        # HTML email content
+        html_content = f"""
+        <h2>Welcome to Screenshot Tracker!</h2>
+        <p>Your subscription is active! Please complete your account setup:</p>
+        <p><a href="{setup_link}">Set Your Password</a></p>
+        <p>Or copy this link: {setup_link}</p>
+        <p>This link expires in 24 hours.</p>
+        """
+
+        # Send email
+        if email_notifier.is_configured():
+            success = email_notifier.send_email(
+                email,
+                "Complete Your Screenshot Tracker Setup",
+                html_content
+            )
+            if success:
+                flash(f"✅ Setup email sent to {email}", "success")
+            else:
+                flash(f"❌ Failed to send setup email to {email}", "error")
+        else:
+            flash("⚠️ Email system not configured", "warning")
+
+    except Exception as e:
+        conn.rollback()
+        flash(f"❌ Error: {e}", "error")
+    finally:
+        conn.close()
+
+    return redirect("https://www.screenshottracker.com/dashboard")
+
 @auth.route('/reset_password', methods=['GET', 'POST'])
 def reset_password():
     """Handle password reset with token"""
