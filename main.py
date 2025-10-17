@@ -7169,25 +7169,34 @@ def stripe_webhook():
             email = (
                 session.get('customer_email')
                 or session.get('customer_details', {}).get('email')
-                or None
             )
-            subscription_id = session.get('subscription')
             customer_id = session.get('customer')
 
-            print("Subscription ID:", session.get('subscription'))
+            subscription_id = getattr(session, 'subscription', None) or session.get('subscription')
 
             if not subscription_id:
-                print("⚠️ checkout.session.completed missing subscription ID")
-                return '', 200  # acknowledge but do not fail
+                print(f"⚠️ Warning: checkout.session.completed has no subscription_id for customer {customer_id} ({email}) and so is looking up from invoice")
+
+
+            # If still None, look up from invoice
+            if not subscription_id and session.get('invoice'):
+                try:
+                    invoice = stripe.Invoice.retrieve(session['invoice'])
+                    subscription_id = invoice.get('subscription')
+                except Exception as e:
+                    print(f"⚠️ Could not retrieve subscription from invoice: {e}")
+
+            if not subscription_id:
+                print(f"⚠️ Warning: checkout.session.completed has no subscription_id for customer {customer_id} ({email}) and couldn't find from invoice")
+
 
             print("🔔 Received checkout.session.completed event:")
             print(json.dumps(event, indent=2))
 
             if not email:
-                print("❌ checkout.session.completed missing email!")
-                return '', 200
-
-            print(f"🔷 Processing new subscription for {email}")
+                print("❌ No email found in session.")
+            else:
+                print(f"🔷 Processing new subscription for {email}")
 
             # Get subscription details
             subscription = stripe.Subscription.retrieve(subscription_id)
