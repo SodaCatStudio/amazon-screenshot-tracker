@@ -7272,7 +7272,12 @@ def stripe_webhook():
     try:
         if event['type'] == 'checkout.session.completed':
             session = event['data']['object']
-            email = session['customer_email'].lower()
+            email = session.get('customer_email')  
+            if not email:
+                print("❌ Stripe checkout session missing customer_email!")
+                return "No customer email", 400  
+
+            email = email.lower()
             subscription_id = session['subscription']
             customer_id = session.get('customer')
 
@@ -7376,11 +7381,12 @@ def stripe_webhook():
             # Handle cancellation
             subscription = event['data']['object']
 
+            # Set subscription_status to 'cancelled' and max_products to 0 so the user can't add more
             if get_db_type() == 'postgresql':
                 cursor.execute("""
                     UPDATE users 
                     SET subscription_status = 'cancelled',
-                        max_products = 0  # This prevents adding products
+                        max_products = 0
                     WHERE stripe_subscription_id = %s
                 """, (subscription['id'],))
 
