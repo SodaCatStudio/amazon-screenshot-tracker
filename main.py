@@ -7170,33 +7170,15 @@ def stripe_webhook():
                 session.get('customer_email')
                 or session.get('customer_details', {}).get('email')
             )
+            subscription_id = session.get('subscription')
             customer_id = session.get('customer')
 
-            subscription_id = getattr(session, 'subscription', None) or session.get('subscription')
-
-            if not subscription_id:
-                print(f"⚠️ Warning: checkout.session.completed has no subscription_id for customer {customer_id} ({email}) and so is looking up from invoice")
-
-
-            # If still None, look up from invoice
-            if not subscription_id and session.get('invoice'):
-                try:
-                    invoice = stripe.Invoice.retrieve(session['invoice'])
-                    subscription_id = invoice.get('subscription')
-                except Exception as e:
-                    print(f"⚠️ Could not retrieve subscription from invoice: {e}")
-
-            if not subscription_id:
-                print(f"⚠️ Warning: checkout.session.completed has no subscription_id for customer {customer_id} ({email}) and couldn't find from invoice")
-
+            if not email or not subscription_id:
+                print("⚠️ Missing email or subscription ID")
+                return '', 200
 
             print("🔔 Received checkout.session.completed event:")
             print(json.dumps(event, indent=2))
-
-            if not email:
-                print("❌ No email found in session.")
-            else:
-                print(f"🔷 Processing new subscription for {email}")
 
             # Get subscription details
             subscription = stripe.Subscription.retrieve(subscription_id)
@@ -7237,22 +7219,20 @@ def stripe_webhook():
                         setup_token_expiry
                     ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (email) DO UPDATE SET
-                        is_verified = false,
-                        subscription_status = 'active',
                         subscription_tier = EXCLUDED.subscription_tier,
+                        subscription_status = EXCLUDED.subscription_status,
                         stripe_subscription_id = EXCLUDED.stripe_subscription_id,
                         stripe_customer_id = EXCLUDED.stripe_customer_id,
                         max_products = EXCLUDED.max_products,
                         setup_token = EXCLUDED.setup_token,
-                        setup_token_expiry = EXCLUDED.setup_token_expiry,
-                        password_hash = 'PENDING_SETUP'
+                        setup_token_expiry = EXCLUDED.setup_token_expiry
                 """, (
                     email,
                     'PENDING_SETUP',
                     'active',
                     tier,
                     subscription_id,
-                    session['customer'],
+                    customer_id,
                     max_products,
                     False,  # Not verified yet
                     datetime.now() + timedelta(days=30),
@@ -7421,11 +7401,10 @@ def stripe_webhook():
         print(f"Stripe webhook error: {e}")
         return str(e), 500
     finally:
-        if conn:
-            try:
-                conn.close()
-            except Exception:
-                pass
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 @app.route('/admin/fix_paid_user/<email>')
 @login_required  
