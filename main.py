@@ -7177,9 +7177,6 @@ def stripe_webhook():
                 print("⚠️ Missing email or subscription ID")
                 return '', 200
 
-            conn = get_db()
-            cursor = conn.cursor()
-
             print("🔔 Received checkout.session.completed event:")
             print(json.dumps(event, indent=2))
 
@@ -7249,10 +7246,17 @@ def stripe_webhook():
                 """, (email, customer_id, subscription_id))
 
             conn.commit()
-            conn.close()
             
             print(f"✅ User created/updated in database for {email}")
 
+            cursor.execute("SELECT setup_token FROM users WHERE email=%s", (email,))
+            row = cursor.fetchone()
+            if row:
+                token_in_db = row[0]
+                print(f"💡 Setup token in DB for {email}: {token_in_db}")
+            else:
+                print(f"⚠️ No user found in DB for {email} when trying to log setup_token")
+            
             # Send setup email
             if email_notifier.is_configured():
                 setup_link = f"https://screenshottracker.com/auth/complete-registration?email={email}&token={setup_token}"
@@ -7303,9 +7307,6 @@ def stripe_webhook():
 
         elif event['type'] == 'invoice.payment_succeeded':
             invoice = event['data']['object']
-
-            conn = get_db()
-            cursor = conn.cursor()
 
             # Safely get subscription id and customer
             subscription_id = invoice.get('subscription')
@@ -7365,7 +7366,6 @@ def stripe_webhook():
                     """, (expires_at, subscription_id))
 
                 conn.commit()
-                conn.close()
                 print(f"✅ Subscription renewed successfully until {expires_at}")
             except Exception as e:
                 print(f"❌ Database update failed for subscription {subscription_id}: {e}")
@@ -7384,9 +7384,6 @@ def stripe_webhook():
             # Handle failed payment
             invoice = event['data']['object']
             subscription_id = invoice['subscription']
-
-            conn = get_db()
-            cursor = conn.cursor()
 
             if get_db_type() == 'postgresql':
                 cursor.execute("""
