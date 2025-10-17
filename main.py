@@ -7227,7 +7227,8 @@ def create_checkout():
             'line_items': [{'price': price_id, 'quantity': 1}],
             'mode': 'subscription',
             'success_url': 'https://screenshottracker.com/success?session_id={CHECKOUT_SESSION_ID}',
-            'cancel_url': 'https://screenshottracker.com/pricing'
+            'cancel_url': 'https://screenshottracker.com/pricing',
+             "allow_promotion_codes": True
         }
 
         # Only add email if user is logged in
