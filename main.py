@@ -7359,7 +7359,7 @@ def stripe_webhook():
                 """, (email, customer_id, subscription_id))
 
             conn.commit()
-            conn.close()
+            
             print(f"✅ User created/updated in database for {email}")
 
             # Send setup email
@@ -7505,9 +7505,13 @@ def stripe_webhook():
     except Exception as e:
         conn.rollback()
         print(f"Stripe webhook error: {e}")
-        return str(e), 200
+        return str(e), 500
     finally:
-        conn.close()
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 @app.route('/admin/fix_paid_user/<email>')
 @login_required  
