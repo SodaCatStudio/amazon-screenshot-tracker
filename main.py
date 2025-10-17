@@ -7274,9 +7274,19 @@ def stripe_webhook():
             email = (
                 session.get('customer_email')
                 or session.get('customer_details', {}).get('email')
+                or None
             )
             subscription_id = session.get('subscription')
             customer_id = session.get('customer')
+
+            print("Subscription ID:", session.get('subscription'))
+
+            if not email:
+                print("❌ checkout.session.completed missing email!")
+                return '', 200
+
+            print("🔔 Received checkout.session.completed event:")
+            print(json.dumps(event, indent=2))
 
             if not email:
                 print("❌ checkout.session.completed missing email!")
