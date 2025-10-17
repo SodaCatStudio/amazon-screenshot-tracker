@@ -7271,25 +7271,16 @@ def stripe_webhook():
     try:
         if event['type'] == 'checkout.session.completed':
             session = event['data']['object']
-            email = session.get('customer_email')  
-            if not email:
-                customer_id = session.get('customer')
-                if customer_id:
-                    customer = stripe.Customer.retrieve(customer_id)
-                    email = customer.get('email')
-
-            if not email:
-                print(f"❌ Stripe checkout session {session['id']} missing customer_email!")
-                return '', 200  # Prevent retries
-
-            if email:
-                email = email.lower()
-            else:
-                print(f"❌ Stripe checkout session {session['id']} missing customer_email!")
-                return '', 200
-
-            subscription_id = session['subscription']
+            email = (
+                session.get('customer_email')
+                or session.get('customer_details', {}).get('email')
+            )
+            subscription_id = session.get('subscription')
             customer_id = session.get('customer')
+
+            if not email:
+                print("❌ checkout.session.completed missing email!")
+                return '', 200
 
             print(f"🔷 Processing new subscription for {email}")
 
@@ -7329,6 +7320,8 @@ def stripe_webhook():
                         setup_token_expiry
                     ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (email) DO UPDATE SET
+                        password_hash = 'PENDING_SETUP',
+                        is_verified = false,
                         subscription_status = 'active',
                         subscription_tier = EXCLUDED.subscription_tier,
                         stripe_subscription_id = EXCLUDED.stripe_subscription_id,
@@ -7349,9 +7342,15 @@ def stripe_webhook():
                     setup_token,
                     datetime.now() + timedelta(hours=24)
                 ))
+            else:
+                cursor.execute("""
+                    INSERT OR REPLACE INTO users (email, stripe_customer_id, stripe_subscription_id, password_hash, is_verified)
+                    VALUES (?, ?, ?, 'PENDING_SETUP', 0)
+                """, (email, customer_id, subscription_id))
 
-                conn.commit()
-                print(f"✅ User created/updated in database for {email}")
+            conn.commit()
+            conn.close()
+            print(f"✅ User created/updated in database for {email}")
 
             # Send setup email
             if email_notifier.is_configured():
@@ -7399,26 +7398,38 @@ def stripe_webhook():
                         max_products = 0
                     WHERE stripe_subscription_id = %s
                 """, (subscription['id'],))
+            conn.commit()
 
         elif event['type'] == 'invoice.payment_succeeded':
         # This fires on successful renewal
             invoice = event['data']['object']
             subscription_id = invoice['subscription']
             customer_id = invoice.get('customer')
-            print(f"✅ Invoice paid for subscription {subscription_id}, customer {customer_id}")
+            customer_email = invoice.get('customer_email')
+            print(f"✅ Invoice payment succeeded. Subscription: {subscription_id}, Customer: {customer_id}, Email: {customer_email}")
+
 
             # Some invoices (e.g., one-time payments) have no subscription
             if not subscription_id:
                 print("⚠️ Skipping — no subscription ID on invoice.")
                 return '', 200  # Acknowledge without error
 
-            # Retrieve subscription details safely
+            # Retrieve subscription safely
             try:
                 subscription = stripe.Subscription.retrieve(subscription_id)
-                price_id = subscription['items']['data'][0]['price']['id']
             except Exception as e:
                 print(f"⚠️ Could not retrieve subscription {subscription_id}: {e}")
-                return '', 200  # Don’t fail webhook retries
+                return '', 200
+
+            # Get price ID safely
+            try:
+                price_id = invoice['lines']['data'][0]['price']['id']
+            except (KeyError, IndexError, TypeError):
+                try:
+                    price_id = subscription['items']['data'][0]['price']['id']
+                except Exception:
+                    print(f"⚠️ Could not find price_id for subscription {subscription_id}")
+                    return '', 200
 
             # Map price IDs to durations
             duration_map = {
@@ -7430,31 +7441,30 @@ def stripe_webhook():
                 os.environ.get('STRIPE_PUBLISHER_YEARLY_PRICE'): timedelta(days=365),
             }
 
-            # Use price from invoice lines if available; otherwise fall back to subscription
-            try:
-                price_id = invoice['lines']['data'][0]['price']['id']
-            except (KeyError, IndexError, TypeError):
-                price_id = subscription['items']['data'][0]['price']['id']
             expires_at = datetime.now() + duration_map.get(price_id, timedelta(days=30))
 
-            if invoice['billing_reason'] == 'subscription_cycle':
+            try:
                 if get_db_type() == 'postgresql':
                     cursor.execute("""
-                        UPDATE users 
+                        UPDATE users
                         SET subscription_expires = %s,
                             subscription_status = 'active'
                         WHERE stripe_subscription_id = %s
                     """, (expires_at, subscription_id))
                 else:
                     cursor.execute("""
-                        UPDATE users 
+                        UPDATE users
                         SET subscription_expires = ?,
                             subscription_status = 'active'
                         WHERE stripe_subscription_id = ?
                     """, (expires_at, subscription_id))
 
                 conn.commit()
-                print(f"✅ Subscription renewed: {subscription_id}, new expiry: {expires_at}")
+                print(f"✅ Subscription renewed successfully until {expires_at}")
+            except Exception as e:
+                print(f"❌ Database update failed for subscription {subscription_id}: {e}")
+            finally:
+                conn.close()
 
             return '', 200
 
@@ -7475,6 +7485,7 @@ def stripe_webhook():
                     SET subscription_status = 'past_due'
                     WHERE stripe_subscription_id = ?
                 """, (subscription_id,))
+            conn.commit()
 
             print(f"⚠️ Payment failed for subscription: {subscription_id}")
 
@@ -7484,7 +7495,7 @@ def stripe_webhook():
     except Exception as e:
         conn.rollback()
         print(f"Stripe webhook error: {e}")
-        return str(e), 500
+        return str(e), 200
     finally:
         conn.close()
 
