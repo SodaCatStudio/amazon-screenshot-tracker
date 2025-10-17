@@ -3598,12 +3598,12 @@ def resend_verification():
 
 @auth.route('/complete-registration', methods=['GET', 'POST'])
 def complete_registration():
-    email = request.args.get('email', '').lower()
+    #email = request.args.get('email', '').lower()
     token = request.args.get('token')
 
     if request.method == 'GET':
         # Show password setup form
-        return render_template('complete_registration.html', email=email, token=token)
+        return render_template('complete_registration.html', token=token)
 
     if request.method == 'POST':
         password = request.form.get('password')
@@ -3612,48 +3612,46 @@ def complete_registration():
         # Validate required fields
         if not password:
             flash('Password is required', 'error')
-            return render_template('complete_registration.html', email=email, token=token)
+            return render_template('complete_registration.html', token=token)
 
         # Verify user has active subscription
         conn = get_db()
         cursor = conn.cursor()
 
-        cursor.execute("""
-            SELECT id, subscription_status, verification_token_expiry 
-            FROM users 
-            WHERE LOWER(email) = LOWER(%s)
-              AND password_hash = 'PENDING_SETUP'
-              AND verification_token = %s
-        """, (email, token))
+        try:
+            # Verify user exists with valid setup_token
+            cursor.execute("""
+                SELECT id, subscription_status
+                FROM users
+                WHERE setup_token = %s
+                AND setup_token_expiry > %s
+            """, (token, datetime.now()))
+            user = cursor.fetchone()
 
-        user = cursor.fetchone()
+            if not user or user[1] != 'active':
+                flash('Invalid or expired registration link', 'error')
+                return redirect(url_for('auth.login'))
 
-        if not user or user[1] != 'active':
-            flash('Invalid or expired registration link', 'error')
+            # Update user with password and full name
+            password_hash = generate_password_hash(password)
+            cursor.execute("""
+                UPDATE users
+                SET password_hash = %s,
+                    full_name = %s,
+                    is_verified = true,
+                    setup_token = NULL,
+                    setup_token_expiry = NULL
+                WHERE id = %s
+            """, (password_hash, full_name, user[0]))
+            conn.commit()
+
+            flash('Registration complete! You can now log in.', 'success')
             return redirect(url_for('auth.login'))
 
-        # Check token expiry
-        if datetime.now() > user[2]:
-            flash('This registration link has expired. Please contact support.', 'error')
-            return redirect(url_for('auth.login'))
+        finally:
+            conn.close()
 
-        # Update user with password
-        password_hash = generate_password_hash(password)
-
-        cursor.execute("""
-            UPDATE users 
-            SET password_hash = %s,
-                full_name = %s,
-                is_verified = true
-            WHERE id = %s
-        """, (password_hash, full_name, user[0]))
-
-        conn.commit()
-
-        flash('Registration complete! You can now log in.', 'success')
-        return redirect(url_for('auth.login'))
-    
-    # Fallback return (should never reach here due to methods=['GET', 'POST'])
+    # Fallback (should never reach here)
     return redirect(url_for('auth.login'))
 
 # ============= REGISTER BLUEPRINTS =============
@@ -7406,22 +7404,38 @@ def stripe_webhook():
         # This fires on successful renewal
             invoice = event['data']['object']
             subscription_id = invoice['subscription']
+            customer_id = invoice.get('customer')
+            print(f"✅ Invoice paid for subscription {subscription_id}, customer {customer_id}")
 
-            if invoice['billing_reason'] == 'subscription_cycle':
+            # Map price IDs to durations
+            duration_map = {
+                os.environ.get('STRIPE_AUTHOR_WEEKLY_PRICE'): timedelta(weeks=1),
+                os.environ.get('STRIPE_AUTHOR_MONTHLY_PRICE'): timedelta(days=30),
+                os.environ.get('STRIPE_AUTHOR_YEARLY_PRICE'): timedelta(days=365),
+                os.environ.get('STRIPE_PUBLISHER_WEEKLY_PRICE'): timedelta(weeks=1),
+                os.environ.get('STRIPE_PUBLISHER_MONTHLY_PRICE'): timedelta(days=30),
+                os.environ.get('STRIPE_PUBLISHER_YEARLY_PRICE'): timedelta(days=365),
+            }
+
+            # In invoice.payment_succeeded
+            price_id = invoice['lines']['data'][0]['price']['id']
+            expires_at = datetime.now() + duration_map.get(price_id, timedelta(days=30))
+
+            if subscription_id and invoice['billing_reason'] == 'subscription_cycle':
                 if get_db_type() == 'postgresql':
                     cursor.execute("""
                         UPDATE users 
                         SET subscription_expires = %s,
                             subscription_status = 'active'
                         WHERE stripe_subscription_id = %s
-                    """, (datetime.now() + timedelta(days=30), subscription_id))
+                    """, (expires_at, subscription_id))
                 else:
                     cursor.execute("""
                         UPDATE users 
                         SET subscription_expires = ?,
                             subscription_status = 'active'
                         WHERE stripe_subscription_id = ?
-                    """, (datetime.now() + timedelta(days=30), subscription_id))
+                    """, (expires_at, subscription_id))
 
                 print(f"✅ Subscription renewed: {subscription_id}")
 
