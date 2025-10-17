@@ -7233,8 +7233,8 @@ def stripe_webhook():
                         max_products,
                         is_verified,
                         subscription_expires,
-                        verification_token,
-                        verification_token_expiry
+                        setup_token,
+                        setup_token_expiry
                     ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (email) DO UPDATE SET
                         subscription_status = 'active',
@@ -7242,8 +7242,8 @@ def stripe_webhook():
                         stripe_subscription_id = EXCLUDED.stripe_subscription_id,
                         stripe_customer_id = EXCLUDED.stripe_customer_id,
                         max_products = EXCLUDED.max_products,
-                        verification_token = EXCLUDED.verification_token,
-                        verification_token_expiry = EXCLUDED.verification_token_expiry
+                        setup_token = EXCLUDED.setup_token,
+                        setup_token_expiry = EXCLUDED.setup_token_expiry
                 """, (
                     email,
                     'PENDING_SETUP',
@@ -7260,11 +7260,6 @@ def stripe_webhook():
 
                 conn.commit()
                 print(f"✅ User created/updated in database for {email}")
-
-            cursor.execute("""
-                UPDATE users SET verification_token = %s 
-                WHERE email = %s
-            """, (setup_token, email))
 
             # Send setup email
             if email_notifier.is_configured():
