@@ -7181,10 +7181,11 @@ def stripe_webhook():
             print(json.dumps(event, indent=2))
 
             # Get subscription details
-            subscription = stripe.Subscription.retrieve(subscription_id)
             try:
+                subscription = stripe.Subscription.retrieve(subscription_id)
                 price_id = subscription['lines']['data'][0]['price']['id']
-            except (KeyError, IndexError, TypeError):
+            except Exception as e:
+                print(f"⚠️ Error retrieving subscription details: {e}")
                 price_id = None
 
             # Map price IDs to tiers
@@ -7201,6 +7202,8 @@ def stripe_webhook():
 
             # Generate setup token
             setup_token = secrets.token_urlsafe(32)
+            subscription_expires = datetime.now() + timedelta(days=30)
+            setup_token_expiry = datetime.now() + timedelta(hours=24)
 
             # CREATE USER IN DATABASE
             if get_db_type() == 'postgresql':
@@ -7235,21 +7238,53 @@ def stripe_webhook():
                     customer_id,
                     max_products,
                     False,  # Not verified yet
-                    datetime.now() + timedelta(days=30),
+                    subscription_expires,
                     setup_token,
-                    datetime.now() + timedelta(hours=24)
+                    setup_token_expiry
                 ))
+
+                conn.commit()
+
+                # Query using PostgreSQL syntax
+                cursor.execute("SELECT setup_token FROM users WHERE email = %s", (email,))
+                
             else:
                 cursor.execute("""
-                    INSERT OR REPLACE INTO users (email, stripe_customer_id, stripe_subscription_id, password_hash, is_verified)
-                    VALUES (?, ?, ?, 'PENDING_SETUP', 0)
-                """, (email, customer_id, subscription_id))
+                    INSERT OR REPLACE INTO users (
+                        email,
+                        stripe_customer_id,
+                        stripe_subscription_id,
+                        password_hash,
+                        is_verified,
+                        subscription_status,
+                        subscription_tier,
+                        max_products,
+                        subscription_expires,
+                        setup_token,
+                        setup_token_expiry
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                    email,
+                    customer_id,
+                    subscription_id,
+                    'PENDING_SETUP',
+                    0,
+                    'active',
+                    tier,
+                    max_products,
+                    subscription_expires,
+                    setup_token,
+                    setup_token_expiry
+                    ))
 
-            conn.commit()
-            
+                conn.commit()
+
+                # Query using SQLite syntax
+                cursor.execute("SELECT setup_token FROM users WHERE email = ?", (email,))
+
             print(f"✅ User created/updated in database for {email}")
 
-            cursor.execute("SELECT setup_token FROM users WHERE email=%s", (email,))
+            # Verify the token was saved
             row = cursor.fetchone()
             if row:
                 token_in_db = row[0]
@@ -7302,6 +7337,13 @@ def stripe_webhook():
                     SET subscription_status = 'cancelled',
                         max_products = 0
                     WHERE stripe_subscription_id = %s
+                """, (subscription['id'],))
+            else:
+                cursor.execute("""
+                    UPDATE users 
+                    SET subscription_status = 'cancelled',
+                        max_products = 0
+                    WHERE stripe_subscription_id = ?
                 """, (subscription['id'],))
             conn.commit()
 
@@ -7369,14 +7411,7 @@ def stripe_webhook():
                 print(f"✅ Subscription renewed successfully until {expires_at}")
             except Exception as e:
                 print(f"❌ Database update failed for subscription {subscription_id}: {e}")
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
-            finally:
-                # Do not close conn here if it's the shared connection in the outer handler;
-                # the outer finally will close it. If you created a local connection, close it here.
-                pass
+                conn.rollback()
 
             return '', 200
 
@@ -7401,7 +7436,6 @@ def stripe_webhook():
 
             print(f"⚠️ Payment failed for subscription: {subscription_id}")
 
-        conn.commit()
         return '', 200
 
     except Exception as e:
