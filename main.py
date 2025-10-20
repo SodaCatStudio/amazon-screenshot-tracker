@@ -3600,7 +3600,7 @@ def resend_verification():
 
 @auth.route('/complete-registration', methods=['GET', 'POST'])
 def complete_registration():
-    #email = request.args.get('email', '').lower()
+    email = request.args.get('email', '').lower()
     token = request.args.get('token')
 
     if request.method == 'GET':
@@ -3614,7 +3614,7 @@ def complete_registration():
         # Validate required fields
         if not password:
             flash('Password is required', 'error')
-            return render_template('complete_registration.html', token=token)
+            return render_template('complete_registration.html', email=email, token=token)
 
         # Verify user has active subscription
         conn = get_db()
@@ -3622,15 +3622,34 @@ def complete_registration():
 
         try:
             # Verify user exists with valid setup_token
+            print(f"🔍 Looking up user with email: {email}")
             cursor.execute("""
-                SELECT id, subscription_status
-                FROM users
-                WHERE setup_token = %s
-                AND setup_token_expiry > %s
-            """, (token, datetime.now()))
+                SELECT id, email, subscription_status, setup_token_expiry
+                    FROM users
+                    WHERE setup_token = %s
+                    AND email = %s
+                    AND setup_token_expiry > %s
+                """, (token, email, datetime.now()))
             user = cursor.fetchone()
 
-            if not user or user[1] != 'active':
+            if not user:
+                print("❌ No user found with token and email")
+
+                # Debug: Check if user exists at all
+                cursor.execute("SELECT email, setup_token, setup_token_expiry FROM users WHERE email = %s", (email,))
+                debug_user = cursor.fetchone()
+                if debug_user:
+                    print(f"   User exists: {debug_user[0]}")
+                    print(f"   Token in DB: {debug_user[1][:20] if debug_user[1] else 'None'}...")
+                    print(f"   Expiry: {debug_user[2]}")
+                else:
+                    print(f"   No user found with email {email}")
+
+                flash('Invalid or expired registration link', 'error')
+                return redirect(url_for('auth.login'))
+
+            if user[2] != 'active':
+                print(f"❌ User subscription not active: {user[2]}")
                 flash('Invalid or expired registration link', 'error')
                 return redirect(url_for('auth.login'))
 
@@ -3646,10 +3665,16 @@ def complete_registration():
                 WHERE id = %s
             """, (password_hash, full_name, user[0]))
             conn.commit()
-
+            print(f"✅ User {email} registration completed successfully")
+            
             flash('Registration complete! You can now log in.', 'success')
             return redirect(url_for('auth.login'))
 
+        except Exception as e:
+            print(f"❌ Error during registration completion: {e}")
+            conn.rollback()
+            flash('An error occurred. Please try again.', 'error')
+            return redirect(url_for('auth.login'))
         finally:
             conn.close()
 
@@ -7258,7 +7283,9 @@ def stripe_webhook():
                     cursor.execute("SELECT setup_token, subscription_tier, max_products FROM users WHERE email = %s", (email,))
                     row = cursor.fetchone()
                     if row:
-                        token_in_db, tier_in_db, max_in_db = row
+                        token_in_db = row[0]
+                        tier_in_db = row[1]
+                        max_in_db = row[2]    
                         print(f"💡 Verified in DB - Email: {email}")
                         print(f"   Setup token: {token_in_db[:10]}...")
                         print(f"   Tier: {tier_in_db}, Max products: {max_in_db}")
