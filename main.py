@@ -3630,26 +3630,29 @@ def complete_registration():
                     AND email = %s
                     AND setup_token_expiry > %s
                 """, (token, email, datetime.now()))
-            user = cursor.fetchone()
+            user_raw = cursor.fetchone()
 
-            if not user:
-                print("❌ No user found with token and email")
+            if not user_raw:
+                print(f"❌ No user found with token and email")
 
                 # Debug: Check if user exists at all
                 cursor.execute("SELECT email, setup_token, setup_token_expiry FROM users WHERE email = %s", (email,))
-                debug_user = cursor.fetchone()
-                if debug_user:
-                    print(f"   User exists: {debug_user[0]}")
-                    print(f"   Token in DB: {debug_user[1][:20] if debug_user[1] else 'None'}...")
-                    print(f"   Expiry: {debug_user[2]}")
+                debug_user_raw = cursor.fetchone()
+                if debug_user_raw:
+                    debug_user = dict(debug_user_raw)
+                    print(f"   User exists: {debug_user['email']}")
+                    print(f"   Token in DB: {debug_user['setup_token'][:20] if debug_user['setup_token'] else 'None'}...")
+                    print(f"   Expiry: {debug_user['setup_token_expiry']}")
                 else:
                     print(f"   No user found with email {email}")
 
                 flash('Invalid or expired registration link', 'error')
                 return redirect(url_for('auth.login'))
 
-            if user[2] != 'active':
-                print(f"❌ User subscription not active: {user[2]}")
+            user = dict(user_raw)  # Convert to dict
+
+            if user['subscription_status'] != 'active':
+                print(f"❌ User subscription not active: {user['subscription_status']}")
                 flash('Invalid or expired registration link', 'error')
                 return redirect(url_for('auth.login'))
 
@@ -3663,7 +3666,7 @@ def complete_registration():
                     setup_token = NULL,
                     setup_token_expiry = NULL
                 WHERE id = %s
-            """, (password_hash, full_name, user[0]))
+            """, (password_hash, full_name, user['id']))
             conn.commit()
             print(f"✅ User {email} registration completed successfully")
             
@@ -7307,19 +7310,21 @@ def stripe_webhook():
 
                     # Verify the token was saved
                     print("🔧 Querying to verify user was saved...")
-                    cursor.execute("SELECT setup_token, subscription_tier, max_products FROM users WHERE email = %s", (email,))
-                    row = cursor.fetchone()
-                    if row:
-                        print(f"💡 Verified in DB - Email: {row[0]}")
-                        print(f"   Setup token: {row[1][:10] if row[1] else 'NULL'}...")
-                        print(f"   Tier: {row[2]}, Max products: {row[3]}")
-                        print(f"   Status: {row[4]}")
+                    cursor.execute("SELECT email, setup_token, subscription_tier, max_products, subscription_status FROM users WHERE email = %s", (email,))
+                    row_raw = cursor.fetchone()
+                    if row_raw:
+                        row = dict(row_raw)  # Convert to dict
+                        print(f"💡 Verified in DB - Email: {row['email']}")
+                        print(f"   Setup token: {row['setup_token'][:10] if row['setup_token'] else 'NULL'}...")
+                        print(f"   Tier: {row['subscription_tier']}, Max products: {row['max_products']}")
+                        print(f"   Status: {row['subscription_status']}")
                     else:
                         print(f"⚠️ CRITICAL: No user found in DB after insert for {email}")
                         print("🔧 Checking if ANY users exist in database...")
-                        cursor.execute("SELECT COUNT(*) FROM users")
-                        count = cursor.fetchone()
-                        print(f"   Total users in database: {count[0] if count else 'ERROR'}")
+                        cursor.execute("SELECT COUNT(*) as count FROM users")
+                        count_row = cursor.fetchone()
+                        if count_row:
+                            print(f"   Total users in database: {dict(count_row)['count']}")
                         return '', 500
 
                 else:  # SQLite
