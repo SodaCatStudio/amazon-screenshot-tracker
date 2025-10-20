@@ -7178,15 +7178,19 @@ def stripe_webhook():
                 return '', 200
 
             print("🔔 Received checkout.session.completed event:")
-            print(json.dumps(event, indent=2))
+            print(f"   Email: {email}")
+            print(f"   Subscription ID: {subscription_id}")
+            print(f"   Customer ID: {customer_id}")
 
+            # Get subscription details with CORRECT path to price_id
+            price_id = None
             # Get subscription details
             try:
                 subscription = stripe.Subscription.retrieve(subscription_id)
-                price_id = subscription['lines']['data'][0]['price']['id']
+                price_id = subscription['items']['data'][0]['price']['id']
+                print(f"✅ Retrieved subscription. Price ID: {price_id}")
             except Exception as e:
                 print(f"⚠️ Error retrieving subscription details: {e}")
-                price_id = None
 
             # Map price IDs to tiers
             tier_map = {
@@ -7199,100 +7203,119 @@ def stripe_webhook():
             }
 
             tier, max_products = tier_map.get(price_id, ('author', 2))
+            print(f"📊 Mapped to tier: {tier}, max_products: {max_products}")
 
             # Generate setup token
             setup_token = secrets.token_urlsafe(32)
             subscription_expires = datetime.now() + timedelta(days=30)
             setup_token_expiry = datetime.now() + timedelta(hours=24)
 
+            print(f"🔑 Generated setup token: {setup_token[:10]}...")
+
             # CREATE USER IN DATABASE
-            if get_db_type() == 'postgresql':
-                cursor.execute("""
-                    INSERT INTO users (
-                        email, 
-                        password_hash,
-                        subscription_status,
-                        subscription_tier,
-                        stripe_subscription_id,
-                        stripe_customer_id,
-                        max_products,
-                        is_verified,
-                        subscription_expires,
-                        setup_token,
-                        setup_token_expiry
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (email) DO UPDATE SET
-                        subscription_tier = EXCLUDED.subscription_tier,
-                        subscription_status = EXCLUDED.subscription_status,
-                        stripe_subscription_id = EXCLUDED.stripe_subscription_id,
-                        stripe_customer_id = EXCLUDED.stripe_customer_id,
-                        max_products = EXCLUDED.max_products,
-                        setup_token = EXCLUDED.setup_token,
-                        setup_token_expiry = EXCLUDED.setup_token_expiry
-                """, (
-                    email,
-                    'PENDING_SETUP',
-                    'active',
-                    tier,
-                    subscription_id,
-                    customer_id,
-                    max_products,
-                    False,  # Not verified yet
-                    subscription_expires,
-                    setup_token,
-                    setup_token_expiry
-                ))
-
-                conn.commit()
-
-                # Query using PostgreSQL syntax
-                cursor.execute("SELECT setup_token FROM users WHERE email = %s", (email,))
-                
-            else:
-                cursor.execute("""
-                    INSERT OR REPLACE INTO users (
-                        email,
-                        stripe_customer_id,
-                        stripe_subscription_id,
-                        password_hash,
-                        is_verified,
-                        subscription_status,
-                        subscription_tier,
-                        max_products,
-                        subscription_expires,
-                        setup_token,
-                        setup_token_expiry
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            try:
+                if get_db_type() == 'postgresql':
+                    cursor.execute("""
+                        INSERT INTO users (
+                            email, 
+                            password_hash,
+                            subscription_status,
+                            subscription_tier,
+                            stripe_subscription_id,
+                            stripe_customer_id,
+                            max_products,
+                            is_verified,
+                            subscription_expires,
+                            setup_token,
+                            setup_token_expiry
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (email) DO UPDATE SET
+                            subscription_tier = EXCLUDED.subscription_tier,
+                            subscription_status = EXCLUDED.subscription_status,
+                            stripe_subscription_id = EXCLUDED.stripe_subscription_id,
+                            stripe_customer_id = EXCLUDED.stripe_customer_id,
+                            max_products = EXCLUDED.max_products,
+                            setup_token = EXCLUDED.setup_token,
+                            setup_token_expiry = EXCLUDED.setup_token_expiry
                     """, (
-                    email,
-                    customer_id,
-                    subscription_id,
-                    'PENDING_SETUP',
-                    0,
-                    'active',
-                    tier,
-                    max_products,
-                    subscription_expires,
-                    setup_token,
-                    setup_token_expiry
+                        email,
+                        'PENDING_SETUP',
+                        'active',
+                        tier,
+                        subscription_id,
+                        customer_id,
+                        max_products,
+                        False,
+                        subscription_expires,
+                        setup_token,
+                        setup_token_expiry
                     ))
 
-                conn.commit()
+                    conn.commit()
+                    print(f"✅ User created/updated in database for {email}")
 
-                # Query using SQLite syntax
-                cursor.execute("SELECT setup_token FROM users WHERE email = ?", (email,))
+                    # Verify the token was saved
+                    cursor.execute("SELECT setup_token, subscription_tier, max_products FROM users WHERE email = %s", (email,))
+                    row = cursor.fetchone()
+                    if row:
+                        token_in_db, tier_in_db, max_in_db = row
+                        print(f"💡 Verified in DB - Email: {email}")
+                        print(f"   Setup token: {token_in_db[:10]}...")
+                        print(f"   Tier: {tier_in_db}, Max products: {max_in_db}")
+                    else:
+                        print(f"⚠️ CRITICAL: No user found in DB after insert for {email}")
+                        return '', 500
 
-            print(f"✅ User created/updated in database for {email}")
+                else:  # SQLite
+                    cursor.execute("""
+                        INSERT OR REPLACE INTO users (
+                            email,
+                            stripe_customer_id,
+                            stripe_subscription_id,
+                            password_hash,
+                            is_verified,
+                            subscription_status,
+                            subscription_tier,
+                            max_products,
+                            subscription_expires,
+                            setup_token,
+                            setup_token_expiry
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        email,
+                        customer_id,
+                        subscription_id,
+                        'PENDING_SETUP',
+                        0,
+                        'active',
+                        tier,
+                        max_products,
+                        subscription_expires,
+                        setup_token,
+                        setup_token_expiry
+                    ))
 
-            # Verify the token was saved
-            row = cursor.fetchone()
-            if row:
-                token_in_db = row[0]
-                print(f"💡 Setup token in DB for {email}: {token_in_db}")
-            else:
-                print(f"⚠️ No user found in DB for {email} when trying to log setup_token")
-            
+                    conn.commit()
+                    print(f"✅ User created/updated in database for {email}")
+
+                    cursor.execute("SELECT setup_token FROM users WHERE email = ?", (email,))
+                    row = cursor.fetchone()
+                    if row:
+                        token_in_db = row[0]
+                        print(f"💡 Setup token in DB for {email}: {token_in_db[:10]}...")
+                    else:
+                        print(f"⚠️ CRITICAL: No user found in DB after insert for {email}")
+                        return '', 500
+
+            except Exception as e:
+                print(f"❌ DATABASE ERROR: {e}")
+                conn.rollback()
+                return str(e), 500
+
             # Send setup email
+            print(f"📧 Attempting to send setup email to {email}")
+            print(f"   Email notifier configured: {email_notifier.is_configured()}")
+
             if email_notifier.is_configured():
                 setup_link = f"https://screenshottracker.com/auth/complete-registration?email={email}&token={setup_token}"
 
@@ -7325,6 +7348,9 @@ def stripe_webhook():
                     print(f"✅ Setup email sent to {email}")
                 else:
                     print(f"❌ Failed to send setup email to {email}")
+
+            else:
+                print("⚠️ Email notifier not configured - skipping email")
 
         elif event['type'] == 'customer.subscription.deleted':
             # Handle cancellation
