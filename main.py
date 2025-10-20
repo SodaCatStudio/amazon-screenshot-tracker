@@ -7188,6 +7188,18 @@ def stripe_webhook():
     conn = get_db()
     cursor = conn.cursor()
 
+    print("🔧 DATABASE CONNECTION TEST")
+    print(f"   Connection object: {conn}")
+    print(f"   Cursor object: {cursor}")
+
+    # Try a simple query
+    try:
+        cursor.execute("SELECT 1")
+        result = cursor.fetchone()
+        print(f"   Test query result: {result}")
+    except Exception as e:
+        print(f"   Test query failed: {e}")
+
     try:
         if event['type'] == 'checkout.session.completed':
             session = event['data']['object']
@@ -7239,7 +7251,19 @@ def stripe_webhook():
 
             # CREATE USER IN DATABASE
             try:
+                print(f"🔧 Database type: {get_db_type()}")
+                print(f"🔧 About to insert user with email: {email}")
+                
                 if get_db_type() == 'postgresql':
+                    print(f"🔧 Using PostgreSQL path")
+                    print(f"🔧 Values to insert:")
+                    print(f"   - email: {email}")
+                    print(f"   - subscription_status: active")
+                    print(f"   - subscription_tier: {tier}")
+                    print(f"   - stripe_subscription_id: {subscription_id}")
+                    print(f"   - stripe_customer_id: {customer_id}")
+                    print(f"   - max_products: {max_products}")
+                    print(f"   - setup_token length: {len(setup_token)}")
                     cursor.execute("""
                         INSERT INTO users (
                             email, 
@@ -7276,24 +7300,30 @@ def stripe_webhook():
                         setup_token_expiry
                     ))
 
+                    print(f"🔧 Execute completed, rowcount: {cursor.rowcount}")
                     conn.commit()
+                    print("🔧 Commit completed")
                     print(f"✅ User created/updated in database for {email}")
 
                     # Verify the token was saved
+                    print("🔧 Querying to verify user was saved...")
                     cursor.execute("SELECT setup_token, subscription_tier, max_products FROM users WHERE email = %s", (email,))
                     row = cursor.fetchone()
                     if row:
-                        token_in_db = row[0]
-                        tier_in_db = row[1]
-                        max_in_db = row[2]    
-                        print(f"💡 Verified in DB - Email: {email}")
-                        print(f"   Setup token: {token_in_db[:10]}...")
-                        print(f"   Tier: {tier_in_db}, Max products: {max_in_db}")
+                        print(f"💡 Verified in DB - Email: {row[0]}")
+                        print(f"   Setup token: {row[1][:10] if row[1] else 'NULL'}...")
+                        print(f"   Tier: {row[2]}, Max products: {row[3]}")
+                        print(f"   Status: {row[4]}")
                     else:
                         print(f"⚠️ CRITICAL: No user found in DB after insert for {email}")
+                        print("🔧 Checking if ANY users exist in database...")
+                        cursor.execute("SELECT COUNT(*) FROM users")
+                        count = cursor.fetchone()
+                        print(f"   Total users in database: {count[0] if count else 'ERROR'}")
                         return '', 500
 
                 else:  # SQLite
+                    print("🔧 Using SQLite path")
                     cursor.execute("""
                         INSERT OR REPLACE INTO users (
                             email,
@@ -7336,6 +7366,11 @@ def stripe_webhook():
 
             except Exception as e:
                 print(f"❌ DATABASE ERROR: {e}")
+                print(f"❌ ERROR TYPE: {type(e)}")
+                print(f"❌ ERROR DETAILS: {str(e)}")
+                import traceback
+                print("❌ TRACEBACK:")
+                traceback.print_exc()
                 conn.rollback()
                 return str(e), 500
 
