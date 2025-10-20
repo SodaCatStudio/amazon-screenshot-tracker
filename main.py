@@ -11,6 +11,7 @@ import secrets
 import flask 
 import string
 import sqlite3
+from typing import Tuple
 import resend
 import requests
 from bs4 import BeautifulSoup, Tag
@@ -7164,7 +7165,7 @@ def create_checkout():
 
 @app.route('/stripe_webhook', methods=['POST'])
 @csrf.exempt
-def stripe_webhook():
+def stripe_webhook() -> Tuple[str, int]:
     """Handle Stripe subscription events"""
     payload = request.get_data(as_text=True)
     sig_header = request.headers.get('Stripe-Signature')
@@ -7188,358 +7189,334 @@ def stripe_webhook():
         else:
             return 'Webhook error', 400
 
+    # Handle each event type in its own try-catch block
+    if event['type'] == 'checkout.session.completed':
+        return handle_checkout_completed(event)
+    elif event['type'] == 'customer.subscription.deleted':
+        return handle_subscription_deleted(event)
+    elif event['type'] == 'invoice.payment_succeeded':
+        return handle_invoice_payment_succeeded(event)
+    elif event['type'] == 'invoice.payment_failed':
+        return handle_invoice_payment_failed(event)
+    else:
+        print(f"ℹ️ Unhandled event type: {event['type']}")
+        return '', 200
+
+
+def handle_checkout_completed(event) -> Tuple[str, int]:
+    """Handle checkout.session.completed event"""
     conn = get_db()
     cursor = conn.cursor()
 
-    print("🔧 DATABASE CONNECTION TEST")
-    print(f"   Connection object: {conn}")
-    print(f"   Cursor object: {cursor}")
-
-    # Try a simple query
     try:
-        cursor.execute("SELECT 1")
-        result = cursor.fetchone()
-        print(f"   Test query result: {result}")
-    except Exception as e:
-        print(f"   Test query failed: {e}")
+        session = event['data']['object']
+        email = (
+            session.get('customer_email')
+            or session.get('customer_details', {}).get('email')
+        )
+        subscription_id = session.get('subscription')
+        customer_id = session.get('customer')
 
-    try:
-        if event['type'] == 'checkout.session.completed':
-            session = event['data']['object']
-            email = (
-                session.get('customer_email')
-                or session.get('customer_details', {}).get('email')
-            )
-            subscription_id = session.get('subscription')
-            customer_id = session.get('customer')
-
-            if not email or not subscription_id:
-                print("⚠️ Missing email or subscription ID")
-                return '', 200
-
-            print("🔔 Received checkout.session.completed event:")
-            print(f"   Email: {email}")
-            print(f"   Subscription ID: {subscription_id}")
-            print(f"   Customer ID: {customer_id}")
-
-            # Get subscription details with CORRECT path to price_id
-            price_id = None
-            # Get subscription details
-            try:
-                subscription = stripe.Subscription.retrieve(subscription_id)
-                price_id = subscription['items']['data'][0]['price']['id']
-                print(f"✅ Retrieved subscription. Price ID: {price_id}")
-            except Exception as e:
-                print(f"⚠️ Error retrieving subscription details: {e}")
-
-            # Map price IDs to tiers
-            tier_map = {
-                os.environ.get('STRIPE_AUTHOR_WEEKLY_PRICE'): ('author', 2),
-                os.environ.get('STRIPE_AUTHOR_MONTHLY_PRICE'): ('author', 2),
-                os.environ.get('STRIPE_AUTHOR_YEARLY_PRICE'): ('author', 2),
-                os.environ.get('STRIPE_PUBLISHER_WEEKLY_PRICE'): ('publisher', 5),
-                os.environ.get('STRIPE_PUBLISHER_MONTHLY_PRICE'): ('publisher', 5),
-                os.environ.get('STRIPE_PUBLISHER_YEARLY_PRICE'): ('publisher', 5),
-            }
-
-            tier, max_products = tier_map.get(price_id, ('author', 2))
-            print(f"📊 Mapped to tier: {tier}, max_products: {max_products}")
-
-            # Generate setup token
-            setup_token = secrets.token_urlsafe(32)
-            subscription_expires = datetime.now() + timedelta(days=30)
-            setup_token_expiry = datetime.now() + timedelta(hours=24)
-
-            print(f"🔑 Generated setup token: {setup_token[:10]}...")
-
-            # CREATE USER IN DATABASE
-            try:
-                print(f"🔧 Database type: {get_db_type()}")
-                print(f"🔧 About to insert user with email: {email}")
-                
-                if get_db_type() == 'postgresql':
-                    print(f"🔧 Using PostgreSQL path")
-                    print(f"🔧 Values to insert:")
-                    print(f"   - email: {email}")
-                    print(f"   - subscription_status: active")
-                    print(f"   - subscription_tier: {tier}")
-                    print(f"   - stripe_subscription_id: {subscription_id}")
-                    print(f"   - stripe_customer_id: {customer_id}")
-                    print(f"   - max_products: {max_products}")
-                    print(f"   - setup_token length: {len(setup_token)}")
-                    cursor.execute("""
-                        INSERT INTO users (
-                            email, 
-                            password_hash,
-                            subscription_status,
-                            subscription_tier,
-                            stripe_subscription_id,
-                            stripe_customer_id,
-                            max_products,
-                            is_verified,
-                            subscription_expires,
-                            setup_token,
-                            setup_token_expiry
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (email) DO UPDATE SET
-                            subscription_tier = EXCLUDED.subscription_tier,
-                            subscription_status = EXCLUDED.subscription_status,
-                            stripe_subscription_id = EXCLUDED.stripe_subscription_id,
-                            stripe_customer_id = EXCLUDED.stripe_customer_id,
-                            max_products = EXCLUDED.max_products,
-                            setup_token = EXCLUDED.setup_token,
-                            setup_token_expiry = EXCLUDED.setup_token_expiry
-                    """, (
-                        email,
-                        'PENDING_SETUP',
-                        'active',
-                        tier,
-                        subscription_id,
-                        customer_id,
-                        max_products,
-                        False,
-                        subscription_expires,
-                        setup_token,
-                        setup_token_expiry
-                    ))
-
-                    print(f"🔧 Execute completed, rowcount: {cursor.rowcount}")
-                    conn.commit()
-                    print("🔧 Commit completed")
-                    print(f"✅ User created/updated in database for {email}")
-
-                    # Verify the token was saved
-                    print("🔧 Querying to verify user was saved...")
-                    cursor.execute("SELECT email, setup_token, subscription_tier, max_products, subscription_status FROM users WHERE email = %s", (email,))
-                    row_raw = cursor.fetchone()
-                    if row_raw:
-                        row = dict(row_raw)  # Convert to dict
-                        print(f"💡 Verified in DB - Email: {row['email']}")
-                        print(f"   Setup token: {row['setup_token'][:10] if row['setup_token'] else 'NULL'}...")
-                        print(f"   Tier: {row['subscription_tier']}, Max products: {row['max_products']}")
-                        print(f"   Status: {row['subscription_status']}")
-                    else:
-                        print(f"⚠️ CRITICAL: No user found in DB after insert for {email}")
-                        print("🔧 Checking if ANY users exist in database...")
-                        cursor.execute("SELECT COUNT(*) as count FROM users")
-                        count_row = cursor.fetchone()
-                        if count_row:
-                            print(f"   Total users in database: {dict(count_row)['count']}")
-                        return '', 500
-
-                else:  # SQLite
-                    print("🔧 Using SQLite path")
-                    cursor.execute("""
-                        INSERT OR REPLACE INTO users (
-                            email,
-                            stripe_customer_id,
-                            stripe_subscription_id,
-                            password_hash,
-                            is_verified,
-                            subscription_status,
-                            subscription_tier,
-                            max_products,
-                            subscription_expires,
-                            setup_token,
-                            setup_token_expiry
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (
-                        email,
-                        customer_id,
-                        subscription_id,
-                        'PENDING_SETUP',
-                        0,
-                        'active',
-                        tier,
-                        max_products,
-                        subscription_expires,
-                        setup_token,
-                        setup_token_expiry
-                    ))
-
-                    conn.commit()
-                    print(f"✅ User created/updated in database for {email}")
-
-                    cursor.execute("SELECT setup_token FROM users WHERE email = ?", (email,))
-                    row = cursor.fetchone()
-                    if row:
-                        token_in_db = row[0]
-                        print(f"💡 Setup token in DB for {email}: {token_in_db[:10]}...")
-                    else:
-                        print(f"⚠️ CRITICAL: No user found in DB after insert for {email}")
-                        return '', 500
-
-            except Exception as e:
-                print(f"❌ DATABASE ERROR: {e}")
-                print(f"❌ ERROR TYPE: {type(e)}")
-                print(f"❌ ERROR DETAILS: {str(e)}")
-                import traceback
-                print("❌ TRACEBACK:")
-                traceback.print_exc()
-                conn.rollback()
-                return str(e), 500
-
-            # Send setup email
-            print(f"📧 Attempting to send setup email to {email}")
-            print(f"   Email notifier configured: {email_notifier.is_configured()}")
-
-            if email_notifier.is_configured():
-                setup_link = f"https://screenshottracker.com/auth/complete-registration?email={email}&token={setup_token}"
-
-                html_content = f"""
-                <!DOCTYPE html>
-                <html>
-                <body>
-                    <h2>Welcome to Screenshot Tracker!</h2>
-                    <p>Your subscription is active! Please complete your account setup:</p>
-
-                    <p><a href="{setup_link}" style="background: #ff9900; color: white; padding: 12px 30px; 
-                          text-decoration: none; border-radius: 5px; display: inline-block;">
-                        Set Your Password
-                    </a></p>
-
-                    <p>Or copy this link: {setup_link}</p>
-
-                    <p>This link expires in 24 hours.</p>
-                </body>
-                </html>
-                """
-
-                success = email_notifier.send_email(
-                    email,
-                    "Complete Your Screenshot Tracker Setup",
-                    html_content
-                )
-
-                if success:
-                    print(f"✅ Setup email sent to {email}")
-                else:
-                    print(f"❌ Failed to send setup email to {email}")
-
-            else:
-                print("⚠️ Email notifier not configured - skipping email")
-
-        elif event['type'] == 'customer.subscription.deleted':
-            # Handle cancellation
-            subscription = event['data']['object']
-
-            # Set subscription_status to 'cancelled' and max_products to 0 so the user can't add more
-            if get_db_type() == 'postgresql':
-                cursor.execute("""
-                    UPDATE users 
-                    SET subscription_status = 'cancelled',
-                        max_products = 0
-                    WHERE stripe_subscription_id = %s
-                """, (subscription['id'],))
-            else:
-                cursor.execute("""
-                    UPDATE users 
-                    SET subscription_status = 'cancelled',
-                        max_products = 0
-                    WHERE stripe_subscription_id = ?
-                """, (subscription['id'],))
-            conn.commit()
-
-        elif event['type'] == 'invoice.payment_succeeded':
-            invoice = event['data']['object']
-
-            # Safely get subscription id and customer
-            subscription_id = invoice.get('subscription')
-            customer_id = invoice.get('customer')
-            customer_email = invoice.get('customer_email')  # may be None
-
-            print(f"✅ Invoice payment succeeded. Subscription: {subscription_id}, Customer: {customer_id}, Email: {customer_email}")
-
-            # If invoice has no subscription (one-off invoice), skip it
-            if not subscription_id:
-                print("⚠️ Invoice has no subscription field — skipping renewal handling.")
-                return '', 200
-
-            # Retrieve subscription safely (catch Stripe errors)
-            try:
-                subscription = stripe.Subscription.retrieve(subscription_id)
-            except Exception as e:
-                print(f"⚠️ Could not retrieve subscription {subscription_id}: {e}")
-                return '', 200
-
-            # Try to get price_id from invoice lines; fallback to subscription
-            try:
-                price_id = invoice['lines']['data'][0]['price']['id']
-            except (KeyError, IndexError, TypeError):
-                try:
-                    price_id = subscription['items']['data'][0]['price']['id']
-                except Exception:
-                    print(f"⚠️ Could not find a price_id for subscription {subscription_id}; defaulting duration")
-                    price_id = None
-
-            # Map to durations (your existing map)
-            duration_map = {
-                os.environ.get('STRIPE_AUTHOR_WEEKLY_PRICE'): timedelta(weeks=1),
-                os.environ.get('STRIPE_AUTHOR_MONTHLY_PRICE'): timedelta(days=30),
-                os.environ.get('STRIPE_AUTHOR_YEARLY_PRICE'): timedelta(days=365),
-                os.environ.get('STRIPE_PUBLISHER_WEEKLY_PRICE'): timedelta(weeks=1),
-                os.environ.get('STRIPE_PUBLISHER_MONTHLY_PRICE'): timedelta(days=30),
-                os.environ.get('STRIPE_PUBLISHER_YEARLY_PRICE'): timedelta(days=365),
-            }
-            expires_at = datetime.now() + duration_map.get(price_id, timedelta(days=30))
-
-            # Update only subscription_expires and subscription_status — do NOT touch setup_token or password_hash
-            try:
-                if get_db_type() == 'postgresql':
-                    cursor.execute("""
-                        UPDATE users
-                        SET subscription_expires = %s,
-                            subscription_status = 'active'
-                        WHERE stripe_subscription_id = %s
-                    """, (expires_at, subscription_id))
-                else:
-                    cursor.execute("""
-                        UPDATE users
-                        SET subscription_expires = ?,
-                            subscription_status = 'active'
-                        WHERE stripe_subscription_id = ?
-                    """, (expires_at, subscription_id))
-
-                conn.commit()
-                print(f"✅ Subscription renewed successfully until {expires_at}")
-            except Exception as e:
-                print(f"❌ Database update failed for subscription {subscription_id}: {e}")
-                conn.rollback()
-
+        if not email or not subscription_id:
+            print("⚠️ Missing email or subscription ID")
             return '', 200
 
-        elif event['type'] == 'invoice.payment_failed':
-            # Handle failed payment
-            invoice = event['data']['object']
-            subscription_id = invoice['subscription']
+        print("🔔 Received checkout.session.completed event:")
+        print(f"   Email: {email}")
+        print(f"   Subscription ID: {subscription_id}")
+        print(f"   Customer ID: {customer_id}")
 
-            if get_db_type() == 'postgresql':
-                cursor.execute("""
-                    UPDATE users 
-                    SET subscription_status = 'past_due'
-                    WHERE stripe_subscription_id = %s
-                """, (subscription_id,))
+        # Get subscription details
+        price_id = None
+        try:
+            subscription = stripe.Subscription.retrieve(subscription_id)
+            price_id = subscription['items']['data'][0]['price']['id']
+            print(f"✅ Retrieved subscription. Price ID: {price_id}")
+        except Exception as e:
+            print(f"⚠️ Error retrieving subscription details: {e}")
+
+        # Map price IDs to tiers
+        tier_map = {
+            os.environ.get('STRIPE_AUTHOR_WEEKLY_PRICE'): ('author', 2),
+            os.environ.get('STRIPE_AUTHOR_MONTHLY_PRICE'): ('author', 2),
+            os.environ.get('STRIPE_AUTHOR_YEARLY_PRICE'): ('author', 2),
+            os.environ.get('STRIPE_PUBLISHER_WEEKLY_PRICE'): ('publisher', 5),
+            os.environ.get('STRIPE_PUBLISHER_MONTHLY_PRICE'): ('publisher', 5),
+            os.environ.get('STRIPE_PUBLISHER_YEARLY_PRICE'): ('publisher', 5),
+        }
+
+        tier, max_products = tier_map.get(price_id, ('author', 2))
+        print(f"📊 Mapped to tier: {tier}, max_products: {max_products}")
+
+        # Generate setup token
+        setup_token = secrets.token_urlsafe(32)
+        subscription_expires = datetime.now() + timedelta(days=30)
+        setup_token_expiry = datetime.now() + timedelta(hours=24)
+
+        print(f"🔑 Generated setup token: {setup_token[:10]}...")
+
+        # CREATE USER IN DATABASE
+        cursor.execute("""
+            INSERT INTO users (
+                email, 
+                password_hash,
+                subscription_status,
+                subscription_tier,
+                stripe_subscription_id,
+                stripe_customer_id,
+                max_products,
+                is_verified,
+                subscription_expires,
+                setup_token,
+                setup_token_expiry
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (email) DO UPDATE SET
+                subscription_tier = EXCLUDED.subscription_tier,
+                subscription_status = EXCLUDED.subscription_status,
+                stripe_subscription_id = EXCLUDED.stripe_subscription_id,
+                stripe_customer_id = EXCLUDED.stripe_customer_id,
+                max_products = EXCLUDED.max_products,
+                setup_token = EXCLUDED.setup_token,
+                setup_token_expiry = EXCLUDED.setup_token_expiry
+        """, (
+            email,
+            'PENDING_SETUP',
+            'active',
+            tier,
+            subscription_id,
+            customer_id,
+            max_products,
+            False,
+            subscription_expires,
+            setup_token,
+            setup_token_expiry
+        ))
+
+        print(f"🔧 Execute completed, rowcount: {cursor.rowcount}")
+
+        # COMMIT IMMEDIATELY
+        conn.commit()
+        print("🔧 Commit completed")
+
+        # Verify in same connection
+        cursor.execute("SELECT email, setup_token, subscription_tier, max_products, subscription_status FROM users WHERE email = %s", (email,))
+        row_raw = cursor.fetchone()
+
+        if not row_raw:
+            print(f"⚠️ CRITICAL: No user found in DB after insert for {email}")
+            conn.close()
+            return '', 500
+
+        row = dict(row_raw)
+        print(f"💡 Verified in DB - Email: {row['email']}")
+        print(f"   Setup token: {row['setup_token'][:10] if row['setup_token'] else 'NULL'}...")
+        print(f"   Tier: {row['subscription_tier']}, Max products: {row['max_products']}")
+        print(f"   Status: {row['subscription_status']}")
+
+        # Verify from fresh connection
+        print("🔧 Opening FRESH connection to verify persistence...")
+        fresh_conn = get_db()
+        fresh_cursor = fresh_conn.cursor()
+        fresh_cursor.execute("SELECT email, setup_token FROM users WHERE email = %s", (email,))
+        fresh_row = fresh_cursor.fetchone()
+        fresh_conn.close()
+
+        if fresh_row:
+            print("✅ CONFIRMED: User exists in fresh connection!")
+        else:
+            print("❌ CRITICAL: User NOT in fresh connection - transaction issue!")
+            conn.close()
+            return '', 500
+
+        # Send setup email
+        print(f"📧 Attempting to send setup email to {email}")
+
+        if email_notifier.is_configured():
+            setup_link = f"https://screenshottracker.com/auth/complete-registration?email={email}&token={setup_token}"
+
+            print(f"   Setup link: {setup_link}")
+
+            html_content = f"""
+            <!DOCTYPE html>
+            <html>
+            <body>
+                <h2>Welcome to Screenshot Tracker!</h2>
+                <p>Your subscription is active! Please complete your account setup:</p>
+                <p><a href="{setup_link}" style="background: #ff9900; color: white; padding: 12px 30px; 
+                      text-decoration: none; border-radius: 5px; display: inline-block;">
+                    Set Your Password
+                </a></p>
+                <p>Or copy this link: {setup_link}</p>
+                <p>This link expires in 24 hours.</p>
+            </body>
+            </html>
+            """
+
+            success = email_notifier.send_email(
+                email,
+                "Complete Your Screenshot Tracker Setup",
+                html_content
+            )
+
+            if success:
+                print(f"✅ Setup email sent to {email}")
             else:
-                cursor.execute("""
-                    UPDATE users 
-                    SET subscription_status = 'past_due'
-                    WHERE stripe_subscription_id = ?
-                """, (subscription_id,))
-            conn.commit()
+                print(f"❌ Failed to send setup email to {email}")
+        else:
+            print("⚠️ Email notifier not configured")
 
-            print(f"⚠️ Payment failed for subscription: {subscription_id}")
+        print(f"✅ Checkout completed successfully for {email}")
+        return '', 200
+
+    except Exception as e:
+        print(f"❌ Error in checkout.session.completed: {e}")
+        import traceback
+        traceback.print_exc()
+        conn.rollback()
+        return str(e), 500
+    finally:
+        conn.close()
+
+def handle_subscription_deleted(event) -> Tuple[str, int]:
+    """Handle customer.subscription.deleted event"""
+    conn = get_db()
+    cursor = conn.cursor()
+
+    try:
+        subscription = event['data']['object']
+        cursor.execute("""
+            UPDATE users 
+            SET subscription_status = 'cancelled',
+                max_products = 0
+            WHERE stripe_subscription_id = %s
+        """, (subscription['id'],))
+        conn.commit()
+        print(f"✅ Subscription cancelled: {subscription['id']}")
+        return '', 200
+    except Exception as e:
+        print(f"❌ Error in subscription.deleted: {e}")
+        conn.rollback()
+        return str(e), 500
+    finally:
+        conn.close()
+
+def handle_invoice_payment_succeeded(event) -> Tuple[str, int]:
+    """Handle invoice.payment_succeeded event"""
+    conn = get_db()
+    cursor = conn.cursor()
+
+    try:
+        invoice = event['data']['object']
+
+        subscription_id = invoice.get('subscription')
+        customer_id = invoice.get('customer')
+        customer_email = invoice.get('customer_email')
+
+        print(f"✅ Invoice payment succeeded. Subscription: {subscription_id}, Customer: {customer_id}, Email: {customer_email}")
+
+        # If invoice has no subscription (one-off invoice), skip it
+        if not subscription_id:
+            print("⚠️ Invoice has no subscription field — skipping renewal handling.")
+            return '', 200
+
+        # Retrieve subscription safely
+        try:
+            subscription = stripe.Subscription.retrieve(subscription_id)
+        except Exception as e:
+            print(f"⚠️ Could not retrieve subscription {subscription_id}: {e}")
+            return '', 200
+
+        # Try to get price_id from invoice lines; fallback to subscription
+        price_id = None
+        try:
+            price_id = invoice['lines']['data'][0]['price']['id']
+        except (KeyError, IndexError, TypeError):
+            try:
+                price_id = subscription['items']['data'][0]['price']['id']
+            except Exception:
+                print(f"⚠️ Could not find a price_id for subscription {subscription_id}; using default duration")
+
+        # Map to durations
+        duration_map = {
+            os.environ.get('STRIPE_AUTHOR_WEEKLY_PRICE'): timedelta(weeks=1),
+            os.environ.get('STRIPE_AUTHOR_MONTHLY_PRICE'): timedelta(days=30),
+            os.environ.get('STRIPE_AUTHOR_YEARLY_PRICE'): timedelta(days=365),
+            os.environ.get('STRIPE_PUBLISHER_WEEKLY_PRICE'): timedelta(weeks=1),
+            os.environ.get('STRIPE_PUBLISHER_MONTHLY_PRICE'): timedelta(days=30),
+            os.environ.get('STRIPE_PUBLISHER_YEARLY_PRICE'): timedelta(days=365),
+        }
+        expires_at = datetime.now() + duration_map.get(price_id, timedelta(days=30))
+
+        print(f"🔧 Updating subscription expiry to {expires_at}")
+
+        # Update subscription_expires and subscription_status
+        cursor.execute("""
+            UPDATE users
+            SET subscription_expires = %s,
+                subscription_status = 'active'
+            WHERE stripe_subscription_id = %s
+        """, (expires_at, subscription_id))
+
+        rows_affected = cursor.rowcount
+        conn.commit()
+
+        if rows_affected > 0:
+            print(f"✅ Subscription renewed successfully until {expires_at} ({rows_affected} row(s) updated)")
+        else:
+            print(f"⚠️ No user found with subscription_id {subscription_id}")
 
         return '', 200
 
     except Exception as e:
+        print(f"❌ Error in invoice.payment_succeeded: {e}")
+        import traceback
+        traceback.print_exc()
         conn.rollback()
-        print(f"Stripe webhook error: {e}")
         return str(e), 500
     finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
+        conn.close()
+
+def handle_invoice_payment_failed(event) -> Tuple[str, int]:
+    """Handle invoice.payment_failed event"""
+    conn = get_db()
+    cursor = conn.cursor()
+
+    try:
+        invoice = event['data']['object']
+        subscription_id = invoice.get('subscription')
+        customer_email = invoice.get('customer_email')
+
+        if not subscription_id:
+            print("⚠️ Invoice has no subscription field — skipping payment failure handling.")
+            return '', 200
+
+        print(f"⚠️ Payment failed for subscription: {subscription_id}, Email: {customer_email}")
+
+        # Update subscription status to past_due
+        cursor.execute("""
+            UPDATE users 
+            SET subscription_status = 'past_due'
+            WHERE stripe_subscription_id = %s
+        """, (subscription_id,))
+
+        rows_affected = cursor.rowcount
+        conn.commit()
+
+        if rows_affected > 0:
+            print(f"✅ Subscription marked as past_due ({rows_affected} row(s) updated)")
+        else:
+            print(f"⚠️ No user found with subscription_id {subscription_id}")
+
+        return '', 200
+
+    except Exception as e:
+        print(f"❌ Error in invoice.payment_failed: {e}")
+        import traceback
+        traceback.print_exc()
+        conn.rollback()
+        return str(e), 500
+    finally:
+        conn.close()
 
 @app.route('/admin/fix_paid_user/<email>')
 @login_required  
@@ -8199,7 +8176,7 @@ def check_single_product(product_id, url=None, user_id=None, product_title=None,
         # SECOND CALL - With screenshot if achievement detected (25 credits)
         screenshot_files = None
         if achievements:
-            print(f"🎯 Achievements detected! Capturing screenshot...")
+            print("🎯 Achievements detected! Capturing screenshot...")
             screenshot_result = monitor.scrape_amazon_page(url, need_screenshot=True)
 
             if screenshot_result['success'] and screenshot_result['screenshot']:
