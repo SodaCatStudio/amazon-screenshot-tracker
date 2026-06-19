@@ -207,7 +207,7 @@
 
         .steps {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
             gap: 40px;
             margin-top: 50px;
         }
@@ -261,52 +261,118 @@
             background-color: white;
         }
 
-        .pricing-card {
-            background-color: #f8f9fa;
+        .pricing-container {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 40px;
+            margin-top: 50px;
+        }
+
+        .pricing-tier {
+            background: white;
             border-radius: 10px;
             padding: 40px;
-            max-width: 400px;
-            margin: 0 auto;
-            text-align: center;
+            box-shadow: 0 2px 20px rgba(0,0,0,0.08);
             border: 2px solid transparent;
             transition: all 0.3s;
         }
 
-        .pricing-card:hover {
+        .pricing-tier:hover {
             border-color: #ff9900;
             transform: translateY(-5px);
         }
 
-        .price {
-            font-size: 48px;
-            font-weight: bold;
-            color: #232f3e;
-            margin: 20px 0;
-        }
-
-        .price-period {
-            font-size: 18px;
+        .tier-subtitle {
             color: #666;
+            margin-bottom: 20px;
         }
 
-        .pricing-features {
+        .tier-features {
             list-style: none;
-            padding: 30px 0;
-            text-align: left;
+            padding: 20px 0;
+            border-bottom: 1px solid #eee;
+            margin-bottom: 30px;
         }
 
-        .pricing-features li {
-            padding: 10px 0;
+        .tier-features li {
+            padding: 8px 0;
             color: #666;
-            display: flex;
-            align-items: center;
         }
 
-        .pricing-features li:before {
+        .tier-features li:before {
             content: "✓";
             color: #28a745;
             font-weight: bold;
             margin-right: 10px;
+        }
+
+        .price-options {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        .price-option {
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 8px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            position: relative;
+        }
+
+        .price-option.featured {
+            background: linear-gradient(135deg, #ff9900 0%, #ff7700 100%);
+            color: white;
+        }
+
+        .price-option .price {
+            font-size: 24px;
+            font-weight: bold;
+        }
+
+        .price-option .period {
+            color: #666;
+        }
+
+        .price-option.featured .period {
+            color: white;
+            opacity: 0.9;
+        }
+
+        .badge {
+            position: absolute;
+            top: -10px;
+            right: 20px;
+            background: #28a745;
+            color: white;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+        }
+
+        .savings {
+            background: #28a745;
+            color: white;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+        }
+
+        /* Free signup banner */
+        .free-signup-note {
+            background-color: #d4edda;
+            border: 1px solid #c3e6cb;
+            color: #155724;
+            padding: 15px 20px;
+            border-radius: 8px;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        .free-signup-note strong {
+            color: #0d5524;
         }
 
         /* Contact */
@@ -391,6 +457,10 @@
                 padding: 8px 15px;
                 font-size: 14px;
             }
+
+            .pricing-container {
+                grid-template-columns: 1fr;
+            }
         }
     </style>
 </head>
@@ -401,7 +471,8 @@
             <a href="/" class="logo">🏆 Screenshot Tracker</a>
             <div class="nav-links">
                 <a href="{{ url_for('auth.login') }}" class="btn-login">Log In</a>
-                <a href="{{ url_for('pricing') }}" class="btn-signup">Sign Up</a>
+                <!-- CHANGED: Now goes to register, not pricing -->
+                <a href="{{ url_for('auth.register') }}" class="btn-signup">Sign Up Free</a>
             </div>
         </div>
     </nav>
@@ -411,7 +482,8 @@
         <h1>Never Miss Your Amazon Bestseller Moment</h1>
         <p>Automatically capture screenshots when your products achieve bestseller status. Get instant proof of your success, delivered to your inbox.</p>
         <div class="cta-buttons">
-            <a href="{{ url_for('pricing') }}" class="btn btn-primary">Get Started</a>
+            <!-- CHANGED: Primary CTA goes to register -->
+            <a href="{{ url_for('auth.register') }}" class="btn btn-primary">Create Free Account</a>
             <a href="#how-it-works" class="btn btn-secondary">See How It Works</a>
         </div>
     </section>
@@ -462,29 +534,35 @@
         </div>
     </section>
 
-    <!-- How It Works -->
+    <!-- How It Works - UPDATED with 4 steps -->
     <section class="how-it-works" id="how-it-works">
         <div class="container">
-            <h2 class="section-title">Simple as 1-2-3</h2>
+            <h2 class="section-title">Simple as 1-2-3-4</h2>
             <p class="section-subtitle">Get started in minutes, no technical knowledge required</p>
 
             <div class="steps">
                 <div class="step">
                     <div class="step-number">1</div>
-                    <h3>Add Your Products</h3>
-                    <p>Simply paste your Amazon product URL. We'll automatically detect the title and current ranking.</p>
+                    <h3>Create Free Account</h3>
+                    <p>Sign up with your email. No credit card required to create an account.</p>
                 </div>
 
                 <div class="step">
                     <div class="step-number">2</div>
-                    <h3>Set Your Goals</h3>
-                    <p>Choose which categories to track and set target rankings. Want to be #1 in "British Mystery"? We'll watch for it.</p>
+                    <h3>Choose Your Plan</h3>
+                    <p>When you're ready to track, select a plan that fits your needs.</p>
                 </div>
 
                 <div class="step">
                     <div class="step-number">3</div>
+                    <h3>Add Your Products</h3>
+                    <p>Paste your Amazon product URLs. Set target categories and rankings.</p>
+                </div>
+
+                <div class="step">
+                    <div class="step-number">4</div>
                     <h3>Get Notified</h3>
-                    <p>When your product achieves bestseller status, we capture a screenshot and email it to you instantly.</p>
+                    <p>We capture screenshots automatically and email them to you instantly.</p>
                 </div>
             </div>
         </div>
@@ -510,10 +588,16 @@
     </section>
 
     <!-- Pricing -->
-    <section class="pricing">
+    <section class="pricing" id="pricing">
         <div class="container">
             <h2 class="section-title">Choose Your Plan</h2>
-            <p class="section-subtitle">Flexible pricing to fit your needs</p>
+            <p class="section-subtitle">Create a free account first, then subscribe when you're ready to track</p>
+
+            <!-- Free signup note -->
+            <div class="free-signup-note">
+                <strong>✨ Free to Sign Up!</strong> Create your account now and explore the dashboard. 
+                You'll only need to subscribe when you want to start tracking products.
+            </div>
 
             <div class="pricing-container">
                 <div class="pricing-tier">
@@ -572,117 +656,16 @@
             </div>
 
             <div style="text-align: center; margin-top: 40px;">
-                <a href="{{ url_for('pricing') }}" class="btn btn-primary">Get Started</a>
+                <!-- CHANGED: Goes to register first -->
+                <a href="{{ url_for('auth.register') }}" class="btn btn-primary" style="background-color: #ff9900; color: white;">
+                    Create Free Account
+                </a>
+                <p style="margin-top: 15px; color: #666; font-size: 14px;">
+                    Already have an account? <a href="{{ url_for('auth.login') }}" style="color: #ff9900;">Log in</a>
+                </p>
             </div>
         </div>
     </section>
-
-    <style>
-    .pricing-container {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
-        gap: 40px;
-        margin-top: 50px;
-    }
-
-    .pricing-tier {
-        background: white;
-        border-radius: 10px;
-        padding: 40px;
-        box-shadow: 0 2px 20px rgba(0,0,0,0.08);
-        border: 2px solid transparent;
-        transition: all 0.3s;
-    }
-
-    .pricing-tier:hover {
-        border-color: #ff9900;
-        transform: translateY(-5px);
-    }
-
-    .tier-subtitle {
-        color: #666;
-        margin-bottom: 20px;
-    }
-
-    .tier-features {
-        list-style: none;
-        padding: 20px 0;
-        border-bottom: 1px solid #eee;
-        margin-bottom: 30px;
-    }
-
-    .tier-features li {
-        padding: 8px 0;
-        color: #666;
-    }
-
-    .tier-features li:before {
-        content: "✓";
-        color: #28a745;
-        font-weight: bold;
-        margin-right: 10px;
-    }
-
-    .price-options {
-        display: flex;
-        flex-direction: column;
-        gap: 15px;
-    }
-
-    .price-option {
-        padding: 15px;
-        background: #f8f9fa;
-        border-radius: 8px;
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        position: relative;
-    }
-
-    .price-option.featured {
-        background: linear-gradient(135deg, #ff9900 0%, #ff7700 100%);
-        color: white;
-    }
-
-    .price-option .price {
-        font-size: 24px;
-        font-weight: bold;
-    }
-
-    .price-option .period {
-        color: #666;
-    }
-
-    .price-option.featured .period {
-        color: white;
-        opacity: 0.9;
-    }
-
-    .badge {
-        position: absolute;
-        top: -10px;
-        right: 20px;
-        background: #28a745;
-        color: white;
-        padding: 4px 12px;
-        border-radius: 20px;
-        font-size: 12px;
-    }
-
-    .savings {
-        background: #28a745;
-        color: white;
-        padding: 4px 12px;
-        border-radius: 20px;
-        font-size: 12px;
-    }
-
-    @media (max-width: 768px) {
-        .pricing-container {
-            grid-template-columns: 1fr;
-        }
-    }
-    </style>
 
     <!-- Footer -->
     <footer>
@@ -691,7 +674,7 @@
             <p>We're here to help you track your Amazon success</p>
             <a href="mailto:support@screenshottracker.com">support@screenshottracker.com</a>
         </div>
-        
+
         <div class="container">
             <div class="footer-links">
                 <a href="/terms">Terms of Service</a> | 

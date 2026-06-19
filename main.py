@@ -1070,23 +1070,12 @@ class EmailNotifier:
     """Email notifications using Resend"""
     def __init__(self):
         self.use_resend = os.environ.get('USE_RESEND', 'false').lower() == 'true'
-        self.use_ses = os.environ.get('USE_SES', 'false').lower() == 'true'
 
         if self.use_resend:
             import resend
             resend.api_key = os.environ.get('RESEND_API_KEY')
             self.sender_email = 'noreply@screenshottracker.com'
         
-        if self.use_ses:
-            # Amazon SES setup
-            self.ses_client = boto3.client(
-                'ses',
-                region_name=os.environ.get('AWS_REGION', 'us-east-1'),
-                aws_access_key_id=os.environ.get('AWS_ACCESS_KEY_ID'),
-                aws_secret_access_key=os.environ.get('AWS_SECRET_ACCESS_KEY')
-            )
-            self.sender_email = os.environ.get('SES_FROM_EMAIL', 'noreply@example.com')
-            self.sender_name = os.environ.get('SENDER_NAME', 'Amazon Screenshot Tracker')
         else:
             # Fallback to SMTP (for development)
             self.smtp_server = os.environ.get('SMTP_SERVER')
@@ -1097,11 +1086,7 @@ class EmailNotifier:
             self.sender_name = os.environ.get('SENDER_NAME', 'Amazon Screenshot Tracker')
 
     def is_configured(self):
-        """Check if email is configured"""
-        if self.use_ses:
-            return bool(os.environ.get('AWS_ACCESS_KEY_ID'))
-        else:
-            return all([self.smtp_server, self.username, self.password])
+         return all([self.smtp_server, self.username, self.password])
 
     def _send_via_resend(self, recipient, subject, html_content, attachments=None):
         try:
@@ -1130,72 +1115,8 @@ class EmailNotifier:
 
         if self.use_resend:
             return self._send_via_resend(recipient, subject, html_content, attachments)
-        elif self.use_ses:
-            return self._send_via_ses(recipient, subject, html_content, attachments)
         else:
             return self._send_via_smtp(recipient, subject, html_content, attachments)
-
-    def _send_via_ses(self, recipient, subject, html_content, attachments=None):
-        """Send email using Amazon SES"""
-        try:
-            # For emails without attachments (most cases)
-            if not attachments:
-                response = self.ses_client.send_email(
-                    Source=f'{self.sender_name} <{self.sender_email}>',
-                    Destination={'ToAddresses': [recipient]},
-                    Message={
-                        'Subject': {'Data': subject},
-                        'Body': {'Html': {'Data': html_content}}
-                    }
-                )
-                print(f"Email sent via SES: {response['MessageId']}")
-                return True
-
-            else:
-                # For achievement screenshots with attachments
-                from email.mime.multipart import MIMEMultipart
-                from email.mime.text import MIMEText
-                from email.mime.application import MIMEApplication
-
-                msg = MIMEMultipart()
-                msg['Subject'] = subject
-                msg['From'] = f'{self.sender_name} <{self.sender_email}>'
-                msg['To'] = recipient
-
-                # HTML body
-                msg.attach(MIMEText(html_content, 'html'))
-
-                # Add attachments
-                for attachment in attachments:
-                    msg.attach(attachment)
-
-                # Send raw email
-                response = self.ses_client.send_raw_email(
-                    Source=self.sender_email,
-                    Destinations=[recipient],
-                    RawMessage={'Data': msg.as_string()}
-                )
-                print(f"Email with attachment sent via SES: {response['MessageId']}")
-                return True
-
-        except ClientError as e:
-            error_code = e.response['Error']['Code']
-            error_message = e.response['Error']['Message']
-
-            if error_code == 'MessageRejected':
-                print(f"SES rejected message: {error_message}")
-            elif error_code == 'MailFromDomainNotVerified':
-                print(f"Domain not verified in SES: {error_message}")
-            elif error_code == 'ConfigurationSetDoesNotExist':
-                print(f"SES configuration issue: {error_message}")
-            else:
-                print(f"SES error {error_code}: {error_message}")
-
-            return False
-
-        except Exception as e:
-            print(f"Failed to send email via SES: {e}")
-            return False
 
     def _send_via_smtp(self, recipient, subject, html_content, attachments=None):
         """Original SMTP implementation for development"""
@@ -2959,9 +2880,132 @@ def setup_account():
 # Authentication routes with best practices
 @auth.route('/register', methods=['GET', 'POST'])
 def register():
-    """Redirect to pricing since payment is required first"""
-    flash('Choose a plan to get started', 'info')
-    return redirect(url_for('pricing'))
+    """Free registration - no payment required"""
+    if request.method == 'POST':
+        email = request.form.get('email', '').lower().strip()
+        password = request.form.get('password')
+        confirm_password = request.form.get('confirm_password')
+        full_name = request.form.get('full_name', '').strip()
+
+        # Validation
+        if not email or not password or not full_name:
+            flash('All fields are required', 'error')
+            return render_template('register.html', email=email, full_name=full_name)
+
+        if password != confirm_password:
+            flash('Passwords do not match', 'error')
+            return render_template('register.html', email=email, full_name=full_name)
+
+        # Password strength validation
+        if len(password) < 8:
+            flash('Password must be at least 8 characters long', 'error')
+            return render_template('register.html', email=email, full_name=full_name)
+
+        conn = get_db()
+        cursor = conn.cursor()
+
+        try:
+            # Check if user already exists
+            if get_db_type() == 'postgresql':
+                cursor.execute("SELECT id FROM users WHERE email = %s", (email,))
+            else:
+                cursor.execute("SELECT id FROM users WHERE email = ?", (email,))
+
+            if cursor.fetchone():
+                flash('Email already registered. Please log in.', 'error')
+                conn.close()
+                return render_template('register.html', email=email, full_name=full_name)
+
+            # Generate verification token
+            verification_token = secrets.token_urlsafe(32)
+            verification_expiry = datetime.now() + timedelta(hours=24)
+            password_hash = generate_password_hash(password)
+
+            print(f"📝 Creating new user: {email}")
+            print(f"   Verification token: {verification_token[:20]}...")
+
+            # Create user with FREE tier (no subscription yet)
+            if get_db_type() == 'postgresql':
+                cursor.execute("""
+                    INSERT INTO users (
+                        email,
+                        password_hash,
+                        full_name,
+                        is_verified,
+                        verification_token,
+                        verification_token_expiry,
+                        subscription_status,
+                        subscription_tier,
+                        max_products
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    email,
+                    password_hash,
+                    full_name,
+                    False,
+                    verification_token,
+                    verification_expiry,
+                    'inactive',  # No subscription yet
+                    'free',      # Free tier
+                    0            # Can't add products yet
+                ))
+            else:
+                cursor.execute("""
+                    INSERT INTO users (
+                        email,
+                        password_hash,
+                        full_name,
+                        is_verified,
+                        verification_token,
+                        verification_token_expiry,
+                        subscription_status,
+                        subscription_tier,
+                        max_products
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    email,
+                    password_hash,
+                    full_name,
+                    0,
+                    verification_token,
+                    verification_expiry,
+                    'inactive',
+                    'free',
+                    0
+                ))
+
+            conn.commit()
+            print(f"✅ User registered: {email}")
+
+            # Send verification email
+            if email_notifier.is_configured():
+                print(f"📧 Sending verification email to {email}...")
+                success = email_notifier.send_verification_email(email, verification_token)
+
+                if success:
+                    print(f"✅ Verification email sent to {email}")
+                    flash('Account created! Please check your email to verify your account.', 'success')
+                else:
+                    print(f"❌ Failed to send verification email to {email}")
+                    flash('Account created but email verification failed. Please contact support.', 'warning')
+            else:
+                print("⚠️ Email system not configured")
+                flash('Account created! Email verification temporarily unavailable. Contact support.', 'warning')
+
+            conn.close()
+            return redirect(url_for('auth.login'))
+
+        except Exception as e:
+            print(f"❌ Registration error: {e}")
+            import traceback
+            traceback.print_exc()
+            conn.rollback()
+            conn.close()
+            flash('An error occurred during registration. Please try again.', 'error')
+            return render_template('register.html', email=email, full_name=full_name)
+
+    # GET request
+    return render_template('register.html')
 
 @app.route('/login_success')
 @login_required
@@ -5841,7 +5885,7 @@ def view_achievements(product_id):
 @app.route('/dashboard')
 @login_required
 def dashboard():
-    """Dashboard route"""
+    """Dashboard - accessible to all verified users"""
     print(f"📊 DASHBOARD: Accessed by {current_user.email} (ID: {current_user.id})")
     return dashboard_view()
 
