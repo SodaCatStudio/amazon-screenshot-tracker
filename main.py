@@ -45,11 +45,9 @@ import json
 import signal
 import sys
 import smtplib
-import boto3
 import hashlib
 import stripe
 from collections import OrderedDict
-from botocore.exceptions import ClientError
 from flask_talisman import Talisman
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -73,7 +71,17 @@ IS_PRODUCTION = os.environ.get('FLASK_ENV') == 'production'
 
 # ============= INITIALIZE FLASK APP FIRST =============
 app = Flask(__name__)
-app.secret_key = os.environ.get('FLASK_SECRET_KEY', secrets.token_hex(32))
+# Bug fix: previously fell back to secrets.token_hex(32) generated at import
+# time, which (a) silently invalidated ALL user sessions on every restart or
+# redeploy and (b) made the "FLASK_SECRET_KEY must be set" guard below
+# unreachable. Production now fails fast; dev gets a stable local-only key.
+app.secret_key = os.environ.get('FLASK_SECRET_KEY')
+if not app.secret_key:
+    if IS_PRODUCTION:
+        raise ValueError("FLASK_SECRET_KEY must be set in production!")
+    print("⚠️ FLASK_SECRET_KEY not set — using a fixed DEV-ONLY key. "
+          "Set FLASK_SECRET_KEY before deploying.")
+    app.secret_key = 'dev-only-insecure-key-do-not-use-in-production'
 
 # ============= BASIC APP CONFIGURATION =============
 app.config['WTF_CSRF_ENABLED'] = os.environ.get('WTF_CSRF_ENABLED', 'true').lower() == 'true'
@@ -209,6 +217,18 @@ def get_db():
 def get_db_type():
     """Determine if using PostgreSQL or SQLite"""
     return 'postgresql' if os.environ.get('DATABASE_URL') and POSTGRES_AVAILABLE else 'sqlite'
+
+def q(sql):
+    """Translate %s placeholders to ? when running on SQLite.
+
+    Lets a single SQL string work on both PostgreSQL and SQLite instead of
+    duplicating every statement in if/else branches. Only safe for
+    statements that contain no literal '%s' text, which is true for all
+    queries in this app.
+    """
+    if get_db_type() == 'postgresql':
+        return sql
+    return sql.replace('%s', '?')
 
 # ============= SCHEDULER FUNCTIONS =============
 def ensure_scheduler_running():
@@ -500,6 +520,11 @@ class DatabaseManager:
                 if not cursor.fetchone():
                     self.create_sqlite_tables(cursor)
                     conn.commit()
+                else:
+                    # Upgrade existing dev DBs (e.g. the committed .db file)
+                    # to the current schema, same as the Postgres branch.
+                    self.ensure_columns_exist(cursor)
+                    conn.commit()
         except Exception as e:
             print(f"❌ Error in init_db_if_needed: {e}")
             import traceback
@@ -509,21 +534,42 @@ class DatabaseManager:
             conn.close()
 
     def ensure_columns_exist(self, cursor):
-        """Add any missing columns without destroying data"""
-        # Only add columns that might be missing
+        """Add any missing columns without destroying data.
+
+        Extended to include the subscription/Stripe columns: production
+        originally got these via the one-off /admin/fix_stripe_columns
+        route, so any fresh or older database was missing them and the
+        whole payment flow crashed with 'no column' errors.
+        """
         self.add_column_if_not_exists(cursor, 'users', 'scrapingbee_api_key', 'TEXT')
+        self.add_column_if_not_exists(cursor, 'users', 'subscription_status', "VARCHAR(50) DEFAULT 'inactive'")
+        self.add_column_if_not_exists(cursor, 'users', 'subscription_tier', 'VARCHAR(50)')
+        self.add_column_if_not_exists(cursor, 'users', 'subscription_expires', 'TIMESTAMP')
+        self.add_column_if_not_exists(cursor, 'users', 'stripe_subscription_id', 'VARCHAR(100)')
+        self.add_column_if_not_exists(cursor, 'users', 'stripe_customer_id', 'VARCHAR(100)')
+        self.add_column_if_not_exists(cursor, 'users', 'setup_token', 'VARCHAR(255)')
+        self.add_column_if_not_exists(cursor, 'users', 'setup_token_expiry', 'TIMESTAMP')
 
     def add_column_if_not_exists(self, cursor, table_name, column_name, column_type):
-        """Safely add column if it doesn't exist"""
-        try:
-            cursor.execute("""
-                SELECT column_name 
-                FROM information_schema.columns 
-                WHERE table_name = %s AND column_name = %s
-            """, (table_name, column_name))
+        """Safely add column if it doesn't exist (works on both engines).
 
-            result = cursor.fetchone()
-            if not result:
+        Was Postgres-only (queried information_schema, which SQLite lacks),
+        so SQLite dev databases never received column migrations.
+        """
+        try:
+            if self.get_db_type() == 'postgresql':
+                cursor.execute("""
+                    SELECT column_name 
+                    FROM information_schema.columns 
+                    WHERE table_name = %s AND column_name = %s
+                """, (table_name, column_name))
+                exists = cursor.fetchone() is not None
+            else:
+                cursor.execute(f"PRAGMA table_info({table_name})")
+                cols = [r[1] if not isinstance(r, dict) else r['name'] for r in cursor.fetchall()]
+                exists = column_name in cols
+
+            if not exists:
                 cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
                 print(f"✅ Added column {column_name} to {table_name}")
             else:
@@ -557,7 +603,14 @@ class DatabaseManager:
                 two_factor_enabled BOOLEAN DEFAULT FALSE,
                 max_products INTEGER DEFAULT 10,
                 notification_preferences VARCHAR(50) DEFAULT 'instant',
-                scrapingbee_api_key TEXT
+                scrapingbee_api_key TEXT,
+                subscription_status VARCHAR(50) DEFAULT 'inactive',
+                subscription_tier VARCHAR(50),
+                subscription_expires TIMESTAMP,
+                stripe_subscription_id VARCHAR(100),
+                stripe_customer_id VARCHAR(100),
+                setup_token VARCHAR(255),
+                setup_token_expiry TIMESTAMP
             )
         ''')
 
@@ -771,7 +824,14 @@ class DatabaseManager:
                 two_factor_enabled BOOLEAN DEFAULT 0,
                 max_products INTEGER DEFAULT 10,
                 notification_preferences TEXT DEFAULT 'instant',
-                scrapingbee_api_key TEXT
+                scrapingbee_api_key TEXT,
+                subscription_status TEXT DEFAULT 'inactive',
+                subscription_tier TEXT,
+                subscription_expires TIMESTAMP,
+                stripe_subscription_id TEXT,
+                stripe_customer_id TEXT,
+                setup_token TEXT,
+                setup_token_expiry TIMESTAMP
             )
         ''')
 
@@ -1072,10 +1132,11 @@ class EmailNotifier:
         self.use_resend = os.environ.get('USE_RESEND', 'false').lower() == 'true'
 
         if self.use_resend:
+            # Resend is the primary/production path
             import resend
             resend.api_key = os.environ.get('RESEND_API_KEY')
             self.sender_email = 'noreply@screenshottracker.com'
-        
+            self.sender_name = os.environ.get('SENDER_NAME', 'Amazon Screenshot Tracker')
         else:
             # Fallback to SMTP (for development)
             self.smtp_server = os.environ.get('SMTP_SERVER')
@@ -1086,7 +1147,17 @@ class EmailNotifier:
             self.sender_name = os.environ.get('SENDER_NAME', 'Amazon Screenshot Tracker')
 
     def is_configured(self):
-         return all([self.smtp_server, self.username, self.password])
+        """Check that the SELECTED email path has its credentials set.
+
+        Bug fix: previously this never checked the Resend path, so with
+        USE_RESEND=true and no SMTP vars set, every send aborted with
+        'Email not configured' before Resend was even attempted.
+        (Amazon SES support removed per June-19 changes.)
+        """
+        if self.use_resend:
+            return bool(os.environ.get('RESEND_API_KEY'))
+        else:
+            return all([self.smtp_server, self.username, self.password])
 
     def _send_via_resend(self, recipient, subject, html_content, attachments=None):
         try:
@@ -1155,22 +1226,34 @@ class EmailNotifier:
             return False
 
     def send_verification_email_async(self, email, token):
-        """Send verification email in background thread"""
+        """Send verification email in background thread.
+
+        Bug fix: base_url must be captured HERE, while we are still inside
+        the request context. The background thread has no request context,
+        so request.host_url would raise and links silently fell back to
+        localhost/APP_URL.
+        """
         import threading
 
+        try:
+            base_url = request.host_url.rstrip('/')
+        except RuntimeError:
+            base_url = os.environ.get('APP_URL', 'http://localhost:5000')
+
         def _send():
-            self.send_verification_email(email, token)
+            self.send_verification_email(email, token, base_url=base_url)
 
         thread = threading.Thread(target=_send, daemon=True)
         thread.start()
         return True  # Return immediately
 
-    def send_verification_email(self, email, token):
+    def send_verification_email(self, email, token, base_url=None):
         """Send email verification link"""
-        try:
-            base_url = request.host_url.rstrip('/')
-        except RuntimeError:
-            base_url = os.environ.get('APP_URL', 'http://localhost:5000')
+        if not base_url:
+            try:
+                base_url = request.host_url.rstrip('/')
+            except RuntimeError:
+                base_url = os.environ.get('APP_URL', 'http://localhost:5000')
 
         verification_link = f"{base_url}/auth/verify_email?token={token}"
 
@@ -2814,68 +2897,19 @@ def create_enhanced_user_tables():
 
 @auth.route('/setup-account', methods=['GET', 'POST'])
 def setup_account():
+    """Legacy route, superseded by /auth/complete-registration.
 
-
-    if request.method == 'POST':
-        password = request.form.get('password')
-        full_name = request.form.get('full_name')
-        email = request.form.get('email')
-        token = request.form.get('token')
-
-        # Validate password exists
-        if not password:
-            flash('Password is required', 'error')
-            return render_template('setup_account.html', email=email, token=token)
-
-        conn = get_db()
-        cursor = conn.cursor()
-
-        # Verify token and email match
-        if get_db_type() == 'postgresql':
-            cursor.execute("""
-                SELECT id FROM users 
-                WHERE email = %s AND setup_token = %s 
-            """, (email, token))
-        else:
-            cursor.execute("""
-                SELECT id FROM users 
-                WHERE email = ? AND setup_token = ? 
-            """, (email, token))
-
-        user = cursor.fetchone()
-        if not user:
-            flash('Invalid or expired setup link', 'error')
-            conn.close()
-            return redirect(url_for('auth.login'))
-
-        # Now password is guaranteed to be a string
-        password_hash = generate_password_hash(password)
-
-        if get_db_type() == 'postgresql':
-            cursor.execute("""
-                UPDATE users 
-                SET password_hash = %s, full_name = %s, 
-                    is_verified = true, setup_token = NULL
-                WHERE id = %s
-            """, (password_hash, full_name or '', user[0]))
-        else:
-            cursor.execute("""
-                UPDATE users 
-                SET password_hash = ?, full_name = ?, 
-                    is_verified = 1, setup_token = NULL
-                WHERE id = ?
-            """, (password_hash, full_name or '', user[0]))
-
-        conn.commit()
-        conn.close()
-
-        flash('Account setup complete! You can now log in.', 'success')
-        return redirect(url_for('auth.login'))
-        
-    # GET request (display page)
-    email = request.args.get('email')
-    token = request.args.get('token')
-    return render_template('setup_account.html', email=email)
+    The old handler rendered setup_account.html (which doesn't exist → 500),
+    skipped token-expiry and subscription checks, and did a case-sensitive
+    email match. The registration form now posts directly to
+    complete_registration; this redirect only preserves any old emailed
+    links or bookmarks.
+    """
+    return redirect(url_for(
+        'auth.complete_registration',
+        email=(request.values.get('email') or ''),
+        token=(request.values.get('token') or '')
+    ))
 
 # Authentication routes with best practices
 @auth.route('/register', methods=['GET', 'POST'])
@@ -3321,14 +3355,17 @@ def reset_password():
         flash('Invalid or missing reset token', 'error')
         return redirect(url_for('auth.login'))
 
-    conn = sqlite3.connect('amazon_monitor.db')
+    # Bug fix: was hardcoded sqlite3.connect('amazon_monitor.db'), which in
+    # production read/wrote a stray local SQLite file instead of Postgres —
+    # password reset could never work for real users.
+    conn = get_db()
     cursor = conn.cursor()
 
     # Check if token is valid and not expired
-    cursor.execute('''
+    cursor.execute(q('''
         SELECT id, email FROM users 
-        WHERE reset_token = ? AND reset_token_expiry > ?
-    ''', (token, datetime.now()))
+        WHERE reset_token = %s AND reset_token_expiry > %s
+    '''), (token, datetime.now()))
 
     user_data = cursor.fetchone()
 
@@ -3337,7 +3374,10 @@ def reset_password():
         flash('Invalid or expired reset link. Please request a new one.', 'error')
         return redirect(url_for('auth.forgot_password'))
 
-    user_id, email = user_data
+    if isinstance(user_data, dict):
+        user_id, email = user_data['id'], user_data['email']
+    else:
+        user_id, email = user_data[0], user_data[1]
 
     if request.method == 'POST':
         password = request.form.get('password')
@@ -3360,12 +3400,12 @@ def reset_password():
         else:
             raise ValueError("Password cannot be None")
 
-        cursor.execute('''
+        cursor.execute(q('''
             UPDATE users 
-            SET password_hash = ?, reset_token = NULL, reset_token_expiry = NULL,
+            SET password_hash = %s, reset_token = NULL, reset_token_expiry = NULL,
                 failed_login_attempts = 0, account_locked_until = NULL
-            WHERE id = ?
-        ''', (new_password_hash, user_id))
+            WHERE id = %s
+        '''), (new_password_hash, user_id))
 
         conn.commit()
         conn.close()
@@ -3389,21 +3429,24 @@ def forgot_password():
             flash('Please enter a valid email address', 'error')
             return render_template('auth/forgot_password.html')
 
-        conn = sqlite3.connect('amazon_monitor.db')
+        # Bug fix: was hardcoded sqlite3.connect('amazon_monitor.db') — in
+        # production the reset token was written to a stray SQLite file, so
+        # the emailed link never matched a real (Postgres) user.
+        conn = get_db()
         cursor = conn.cursor()
 
         try:
-            cursor.execute('SELECT id FROM users WHERE LOWER(email) = LOWER(?)', (email,))
+            cursor.execute(q('SELECT id FROM users WHERE LOWER(email) = LOWER(%s)'), (email,))
             user = cursor.fetchone()
 
             if user:
                 reset_token = secrets.token_urlsafe(32)
                 expiry = datetime.now() + timedelta(hours=1)
 
-                cursor.execute('''
-                    UPDATE users SET reset_token = ?, reset_token_expiry = ?
-                    WHERE LOWER(email) = LOWER(?)
-                ''', (reset_token, expiry, email))
+                cursor.execute(q('''
+                    UPDATE users SET reset_token = %s, reset_token_expiry = %s
+                    WHERE LOWER(email) = LOWER(%s)
+                '''), (reset_token, expiry, email))
                 conn.commit()
 
                 # Send reset email
@@ -3645,12 +3688,18 @@ def resend_verification():
 
 @auth.route('/complete-registration', methods=['GET', 'POST'])
 def complete_registration():
-    email = request.args.get('email', '').lower()
-    token = request.args.get('token')
+    # Bug fixes:
+    # - GET now passes email to the template (the email field is readonly,
+    #   so without prefill it always submitted empty and setup ALWAYS failed).
+    # - POST now reads email/token from the submitted form (with query-string
+    #   fallback) instead of only the query string.
+    # - Email lowercased consistently; webhook stores lowercase too.
+    email = (request.form.get('email') or request.args.get('email', '')).strip().lower()
+    token = request.form.get('token') or request.args.get('token')
 
     if request.method == 'GET':
         # Show password setup form
-        return render_template('complete_registration.html', token=token)
+        return render_template('complete_registration.html', token=token, email=email)
 
     if request.method == 'POST':
         password = request.form.get('password')
@@ -3668,20 +3717,20 @@ def complete_registration():
         try:
             # Verify user exists with valid setup_token
             print(f"🔍 Looking up user with email: {email}")
-            cursor.execute("""
+            cursor.execute(q("""
                 SELECT id, email, subscription_status, setup_token_expiry
                     FROM users
                     WHERE setup_token = %s
-                    AND email = %s
+                    AND LOWER(email) = LOWER(%s)
                     AND setup_token_expiry > %s
-                """, (token, email, datetime.now()))
+                """), (token, email, datetime.now()))
             user_raw = cursor.fetchone()
 
             if not user_raw:
                 print(f"❌ No user found with token and email")
 
                 # Debug: Check if user exists at all
-                cursor.execute("SELECT email, setup_token, setup_token_expiry FROM users WHERE email = %s", (email,))
+                cursor.execute(q("SELECT email, setup_token, setup_token_expiry FROM users WHERE LOWER(email) = LOWER(%s)"), (email,))
                 debug_user_raw = cursor.fetchone()
                 if debug_user_raw:
                     debug_user = dict(debug_user_raw)
@@ -3703,15 +3752,15 @@ def complete_registration():
 
             # Update user with password and full name
             password_hash = generate_password_hash(password)
-            cursor.execute("""
+            cursor.execute(q("""
                 UPDATE users
                 SET password_hash = %s,
                     full_name = %s,
-                    is_verified = true,
+                    is_verified = TRUE,
                     setup_token = NULL,
                     setup_token_expiry = NULL
                 WHERE id = %s
-            """, (password_hash, full_name, user['id']))
+            """), (password_hash, full_name, user['id']))
             conn.commit()
             print(f"✅ User {email} registration completed successfully")
             
@@ -7188,12 +7237,15 @@ def create_checkout():
 
     try:
         # Build session parameters
+        # Bug fix: URLs were hardcoded to production, so test checkouts from
+        # dev bounced back to the live site. APP_URL drives both now.
+        base_url = os.environ.get('APP_URL', 'https://screenshottracker.com').rstrip('/')
         session_params = {
             'payment_method_types': ['card'],
             'line_items': [{'price': price_id, 'quantity': 1}],
             'mode': 'subscription',
-            'success_url': 'https://screenshottracker.com/success?session_id={CHECKOUT_SESSION_ID}',
-            'cancel_url': 'https://screenshottracker.com/pricing',
+            'success_url': f'{base_url}/success?session_id={{CHECKOUT_SESSION_ID}}',
+            'cancel_url': f'{base_url}/pricing',
              "allow_promotion_codes": True
         }
 
@@ -7238,6 +7290,8 @@ def stripe_webhook() -> Tuple[str, int]:
         return handle_checkout_completed(event)
     elif event['type'] == 'customer.subscription.deleted':
         return handle_subscription_deleted(event)
+    elif event['type'] == 'customer.subscription.updated':
+        return handle_subscription_updated(event)
     elif event['type'] == 'invoice.payment_succeeded':
         return handle_invoice_payment_succeeded(event)
     elif event['type'] == 'invoice.payment_failed':
@@ -7246,6 +7300,32 @@ def stripe_webhook() -> Tuple[str, int]:
         print(f"ℹ️ Unhandled event type: {event['type']}")
         return '', 200
 
+
+def get_plan_for_price(price_id):
+    """Map a Stripe price ID to (tier, max_products, duration).
+
+    Single source of truth — previously checkout, renewal, and
+    change_subscription each built their own map, and initial checkout
+    hardcoded a 30-day expiry for EVERY plan (weekly and annual included).
+    Logs loudly when the price ID is unrecognized instead of silently
+    defaulting, so env-var misconfiguration is visible.
+    """
+    plan_map = {
+        os.environ.get('STRIPE_AUTHOR_WEEKLY_PRICE'): ('author', 2, timedelta(weeks=1)),
+        os.environ.get('STRIPE_AUTHOR_MONTHLY_PRICE'): ('author', 2, timedelta(days=30)),
+        os.environ.get('STRIPE_AUTHOR_YEARLY_PRICE'): ('author', 2, timedelta(days=365)),
+        os.environ.get('STRIPE_PUBLISHER_WEEKLY_PRICE'): ('publisher', 5, timedelta(weeks=1)),
+        os.environ.get('STRIPE_PUBLISHER_MONTHLY_PRICE'): ('publisher', 5, timedelta(days=30)),
+        os.environ.get('STRIPE_PUBLISHER_YEARLY_PRICE'): ('publisher', 5, timedelta(days=365)),
+    }
+    plan_map.pop(None, None)  # drop entries for unset env vars
+
+    if price_id in plan_map:
+        return plan_map[price_id]
+
+    print(f"⚠️ UNRECOGNIZED STRIPE PRICE ID: {price_id!r} — check the six "
+          f"STRIPE_*_PRICE env vars. Falling back to (author, 2, 30 days).")
+    return ('author', 2, timedelta(days=30))
 
 def handle_checkout_completed(event) -> Tuple[str, int]:
     """Handle checkout.session.completed event"""
@@ -7265,6 +7345,10 @@ def handle_checkout_completed(event) -> Tuple[str, int]:
             print("⚠️ Missing email or subscription ID")
             return '', 200
 
+        # Normalize at ingestion so every later lookup (setup, login, reset)
+        # compares against a canonical lowercase address.
+        email = email.strip().lower()
+
         print("🔔 Received checkout.session.completed event:")
         print(f"   Email: {email}")
         print(f"   Subscription ID: {subscription_id}")
@@ -7279,28 +7363,41 @@ def handle_checkout_completed(event) -> Tuple[str, int]:
         except Exception as e:
             print(f"⚠️ Error retrieving subscription details: {e}")
 
-        # Map price IDs to tiers
-        tier_map = {
-            os.environ.get('STRIPE_AUTHOR_WEEKLY_PRICE'): ('author', 2),
-            os.environ.get('STRIPE_AUTHOR_MONTHLY_PRICE'): ('author', 2),
-            os.environ.get('STRIPE_AUTHOR_YEARLY_PRICE'): ('author', 2),
-            os.environ.get('STRIPE_PUBLISHER_WEEKLY_PRICE'): ('publisher', 5),
-            os.environ.get('STRIPE_PUBLISHER_MONTHLY_PRICE'): ('publisher', 5),
-            os.environ.get('STRIPE_PUBLISHER_YEARLY_PRICE'): ('publisher', 5),
-        }
+        # Map price ID to plan via the shared helper.
+        # Bug fix: subscription_expires was hardcoded to +30 days for ALL
+        # plans, so annual subscribers appeared expired after a month and
+        # weekly subscribers got 30 days on day one.
+        tier, max_products, plan_duration = get_plan_for_price(price_id)
+        print(f"📊 Mapped to tier: {tier}, max_products: {max_products}, duration: {plan_duration}")
 
-        tier, max_products = tier_map.get(price_id, ('author', 2))
-        print(f"📊 Mapped to tier: {tier}, max_products: {max_products}")
+        # RECONCILIATION with free registration (June-19 architecture):
+        # a user may already exist with a real password from /auth/register.
+        # Sending them a "complete your setup" email (and rotating a setup
+        # token that could reset their password) would be wrong — they just
+        # need their subscription activated. Detect them first.
+        existing_registered = False
+        cursor_check = conn.cursor()
+        cursor_check.execute(q("SELECT password_hash, is_verified FROM users WHERE LOWER(email) = LOWER(%s)"), (email,))
+        existing_raw = cursor_check.fetchone()
+        if existing_raw:
+            existing = dict(existing_raw)
+            has_real_password = existing.get('password_hash') not in (None, '', 'PENDING_SETUP')
+            existing_registered = bool(has_real_password)
+            print(f"👤 Existing user found (registered={existing_registered})")
 
-        # Generate setup token
-        setup_token = secrets.token_urlsafe(32)
-        subscription_expires = datetime.now() + timedelta(days=30)
-        setup_token_expiry = datetime.now() + timedelta(hours=24)
+        # Generate setup token (only used for brand-new checkout customers)
+        setup_token = None if existing_registered else secrets.token_urlsafe(32)
+        subscription_expires = datetime.now() + plan_duration
+        setup_token_expiry = None if existing_registered else datetime.now() + timedelta(hours=24)
 
-        print(f"🔑 Generated setup token: {setup_token[:10]}...")
+        if setup_token:
+            print(f"🔑 Generated setup token: {setup_token[:10]}...")
 
         # CREATE USER IN DATABASE
-        cursor.execute("""
+        # q() makes this upsert run on SQLite too (email is UNIQUE in both
+        # schemas, and SQLite >= 3.24 supports ON CONFLICT ... DO UPDATE),
+        # so the paid-signup flow is now testable locally.
+        cursor.execute(q("""
             INSERT INTO users (
                 email, 
                 password_hash,
@@ -7322,7 +7419,7 @@ def handle_checkout_completed(event) -> Tuple[str, int]:
                 max_products = EXCLUDED.max_products,
                 setup_token = EXCLUDED.setup_token,
                 setup_token_expiry = EXCLUDED.setup_token_expiry
-        """, (
+        """), (
             email,
             'PENDING_SETUP',
             'active',
@@ -7342,41 +7439,61 @@ def handle_checkout_completed(event) -> Tuple[str, int]:
         conn.commit()
         print("🔧 Commit completed")
 
-        # Verify in same connection
-        cursor.execute("SELECT email, setup_token, subscription_tier, max_products, subscription_status FROM users WHERE email = %s", (email,))
+        # Sanity-check read-back. NOTE: the commit above already succeeded,
+        # so a failure here is a diagnostics artifact, not lost data.
+        # Bug fix: this used to return 500, which made Stripe RETRY the
+        # webhook — each retry regenerated the setup token (via the upsert)
+        # and invalidated the link in any email already sent, plus sent the
+        # user duplicate emails. Now it logs a warning and continues.
+        cursor.execute(q("SELECT email, setup_token, subscription_tier, max_products, subscription_status FROM users WHERE LOWER(email) = LOWER(%s)"), (email,))
         row_raw = cursor.fetchone()
 
-        if not row_raw:
-            print(f"⚠️ CRITICAL: No user found in DB after insert for {email}")
-            conn.close()
-            return '', 500
-
-        row = dict(row_raw)
-        print(f"💡 Verified in DB - Email: {row['email']}")
-        print(f"   Setup token: {row['setup_token'][:10] if row['setup_token'] else 'NULL'}...")
-        print(f"   Tier: {row['subscription_tier']}, Max products: {row['max_products']}")
-        print(f"   Status: {row['subscription_status']}")
-
-        # Verify from fresh connection
-        print("🔧 Opening FRESH connection to verify persistence...")
-        fresh_conn = get_db()
-        fresh_cursor = fresh_conn.cursor()
-        fresh_cursor.execute("SELECT email, setup_token FROM users WHERE email = %s", (email,))
-        fresh_row = fresh_cursor.fetchone()
-        fresh_conn.close()
-
-        if fresh_row:
-            print("✅ CONFIRMED: User exists in fresh connection!")
+        if row_raw:
+            row = dict(row_raw)
+            print(f"💡 Verified in DB - Email: {row['email']}")
+            print(f"   Setup token: {row['setup_token'][:10] if row['setup_token'] else 'NULL'}...")
+            print(f"   Tier: {row['subscription_tier']}, Max products: {row['max_products']}")
+            print(f"   Status: {row['subscription_status']}")
         else:
-            print("❌ CRITICAL: User NOT in fresh connection - transaction issue!")
-            conn.close()
-            return '', 500
+            print(f"⚠️ WARNING: read-back after commit found no row for {email} — continuing anyway")
 
-        # Send setup email
-        print(f"📧 Attempting to send setup email to {email}")
+        # Send email — which one depends on whether this is a brand-new
+        # checkout customer (needs to set a password) or an existing
+        # registered user upgrading to paid (already has credentials).
+        print(f"📧 Attempting to send email to {email} (existing_registered={existing_registered})")
 
-        if email_notifier.is_configured():
-            setup_link = f"https://screenshottracker.com/auth/complete-registration?email={email}&token={setup_token}"
+        if email_notifier.is_configured() and existing_registered:
+            html_content = f"""
+            <!DOCTYPE html>
+            <html>
+            <body>
+                <h2>Your subscription is active!</h2>
+                <p>Thanks for subscribing to Screenshot Tracker ({tier} plan).</p>
+                <p>You can log in with your existing password and start adding
+                   Amazon product URLs to monitor right away.</p>
+                <p><a href="{os.environ.get('APP_URL', 'https://screenshottracker.com').rstrip('/')}/auth/login"
+                      style="background: #ff9900; color: white; padding: 12px 30px;
+                      text-decoration: none; border-radius: 5px; display: inline-block;">
+                    Log In
+                </a></p>
+            </body>
+            </html>
+            """
+            success = email_notifier.send_email(
+                email,
+                "Your Screenshot Tracker subscription is active",
+                html_content
+            )
+            print(f"{'✅' if success else '❌'} Activation email to {email}: {success}")
+
+        elif email_notifier.is_configured():
+            # Bug fixes: base URL from APP_URL env var (was hardcoded to prod,
+            # so dev/test links always pointed at production), and the email
+            # is URL-encoded (unencoded '+' in addresses like jane+books@...
+            # decoded as a space and broke the token lookup).
+            from urllib.parse import quote
+            base_url = os.environ.get('APP_URL', 'https://screenshottracker.com').rstrip('/')
+            setup_link = f"{base_url}/auth/complete-registration?email={quote(email)}&token={setup_token}"
 
             print(f"   Setup link: {setup_link}")
 
@@ -7421,6 +7538,66 @@ def handle_checkout_completed(event) -> Tuple[str, int]:
     finally:
         conn.close()
 
+def handle_subscription_updated(event) -> Tuple[str, int]:
+    """Handle customer.subscription.updated event.
+
+    New handler: previously plan changes made from the Stripe dashboard or
+    billing portal fell through to the unhandled-event no-op, so tier,
+    product limits, and status silently drifted from Stripe's reality.
+    """
+    conn = get_db()
+    cursor = conn.cursor()
+
+    try:
+        subscription = event['data']['object']
+        subscription_id = subscription['id']
+        status = subscription.get('status', 'active')
+
+        price_id = None
+        try:
+            price_id = subscription['items']['data'][0]['price']['id']
+        except (KeyError, IndexError, TypeError):
+            print(f"⚠️ subscription.updated: no price_id found for {subscription_id}")
+
+        # Map Stripe statuses onto the app's vocabulary
+        status_map = {
+            'active': 'active', 'trialing': 'active',
+            'past_due': 'past_due', 'unpaid': 'past_due',
+            'canceled': 'cancelled', 'incomplete_expired': 'cancelled',
+        }
+        app_status = status_map.get(status, status)
+
+        if price_id:
+            tier, max_products, plan_duration = get_plan_for_price(price_id)
+            cursor.execute(q("""
+                UPDATE users
+                SET subscription_status = %s,
+                    subscription_tier = %s,
+                    max_products = %s,
+                    subscription_expires = %s
+                WHERE stripe_subscription_id = %s
+            """), (app_status, tier, max_products,
+                   datetime.now() + plan_duration, subscription_id))
+        else:
+            cursor.execute(q("""
+                UPDATE users
+                SET subscription_status = %s
+                WHERE stripe_subscription_id = %s
+            """), (app_status, subscription_id))
+
+        rows = cursor.rowcount
+        conn.commit()
+        print(f"✅ subscription.updated processed for {subscription_id} "
+              f"(status={app_status}, rows={rows})")
+        return '', 200
+
+    except Exception as e:
+        print(f"❌ Error in subscription.updated: {e}")
+        conn.rollback()
+        return str(e), 500
+    finally:
+        conn.close()
+
 def handle_subscription_deleted(event) -> Tuple[str, int]:
     """Handle customer.subscription.deleted event"""
     conn = get_db()
@@ -7428,12 +7605,12 @@ def handle_subscription_deleted(event) -> Tuple[str, int]:
 
     try:
         subscription = event['data']['object']
-        cursor.execute("""
+        cursor.execute(q("""
             UPDATE users 
             SET subscription_status = 'cancelled',
                 max_products = 0
             WHERE stripe_subscription_id = %s
-        """, (subscription['id'],))
+        """), (subscription['id'],))
         conn.commit()
         print(f"✅ Subscription cancelled: {subscription['id']}")
         return '', 200
@@ -7480,26 +7657,19 @@ def handle_invoice_payment_succeeded(event) -> Tuple[str, int]:
             except Exception:
                 print(f"⚠️ Could not find a price_id for subscription {subscription_id}; using default duration")
 
-        # Map to durations
-        duration_map = {
-            os.environ.get('STRIPE_AUTHOR_WEEKLY_PRICE'): timedelta(weeks=1),
-            os.environ.get('STRIPE_AUTHOR_MONTHLY_PRICE'): timedelta(days=30),
-            os.environ.get('STRIPE_AUTHOR_YEARLY_PRICE'): timedelta(days=365),
-            os.environ.get('STRIPE_PUBLISHER_WEEKLY_PRICE'): timedelta(weeks=1),
-            os.environ.get('STRIPE_PUBLISHER_MONTHLY_PRICE'): timedelta(days=30),
-            os.environ.get('STRIPE_PUBLISHER_YEARLY_PRICE'): timedelta(days=365),
-        }
-        expires_at = datetime.now() + duration_map.get(price_id, timedelta(days=30))
+        # Shared plan helper (same mapping as checkout + subscription.updated)
+        _, _, plan_duration = get_plan_for_price(price_id)
+        expires_at = datetime.now() + plan_duration
 
         print(f"🔧 Updating subscription expiry to {expires_at}")
 
         # Update subscription_expires and subscription_status
-        cursor.execute("""
+        cursor.execute(q("""
             UPDATE users
             SET subscription_expires = %s,
                 subscription_status = 'active'
             WHERE stripe_subscription_id = %s
-        """, (expires_at, subscription_id))
+        """), (expires_at, subscription_id))
 
         rows_affected = cursor.rowcount
         conn.commit()
@@ -7537,11 +7707,11 @@ def handle_invoice_payment_failed(event) -> Tuple[str, int]:
         print(f"⚠️ Payment failed for subscription: {subscription_id}, Email: {customer_email}")
 
         # Update subscription status to past_due
-        cursor.execute("""
+        cursor.execute(q("""
             UPDATE users 
             SET subscription_status = 'past_due'
             WHERE stripe_subscription_id = %s
-        """, (subscription_id,))
+        """), (subscription_id,))
 
         rows_affected = cursor.rowcount
         conn.commit()
