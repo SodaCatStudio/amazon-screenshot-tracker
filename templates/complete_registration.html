@@ -296,7 +296,10 @@
             </ul>
         </div>
 
-        <form method="POST" action="{{ url_for('auth.setup_account') }}" id="registerForm">
+        <form method="POST" action="{{ url_for('auth.complete_registration') }}" id="registerForm">
+            <!-- Bug fix: previously posted to auth.setup_account, which skipped
+                 token-expiry and subscription checks and whose GET 500ed on a
+                 missing template. complete_registration is the validating handler. -->
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <input type="hidden" name="token" value="{{ token }}">
 

@@ -62,6 +62,41 @@
         .flash-close:hover {
             opacity: 1;
         }
+
+        .subscription-banner {
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 15px;
+        }
+        .subscription-banner.inactive {
+            background: linear-gradient(135deg, #fff3cd 0%, #ffeaa7 100%);
+            border: 2px solid #ff9900;
+        }
+        .subscription-banner.active {
+            background: linear-gradient(135deg, #d4edda 0%, #c3e6cb 100%);
+            border: 2px solid #28a745;
+        }
+        .subscription-banner.past_due {
+            background: linear-gradient(135deg, #f8d7da 0%, #f5c6cb 100%);
+            border: 2px solid #dc3545;
+        }
+        .subscription-info h3 {
+            margin: 0 0 5px 0;
+            color: #232f3e;
+        }
+        .subscription-info p {
+            margin: 0;
+            color: #666;
+        }
+        .subscription-cta {
+            display: flex;
+            gap: 10px;
+        }
         
         .dashboard-header {
             background: linear-gradient(135deg, #232f3e 0%, #ff9900 100%);
@@ -77,6 +112,7 @@
         .dashboard-header h1 {
             margin: 0 0 15px 0;
             font-size: 24px;
+            color: white;
         }
 
         .dashboard-header p {
@@ -84,7 +120,6 @@
             opacity: 0.9;
         }
         
-        /* Button container - ensure it stays within bounds */
         .dashboard-actions {
             display: flex;
             flex-wrap: wrap;
@@ -95,7 +130,6 @@
             box-sizing: border-box;
         }
 
-        /* Individual button styling */
         .dashboard-actions .btn {
             padding: 8px 16px;
             font-size: 14px;
@@ -108,6 +142,17 @@
             white-space: nowrap;
             box-sizing: border-box;
             min-width: fit-content;
+        }
+
+        .btn {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+            text-decoration: none;
+            display: inline-block;
+            transition: all 0.3s;
         }
 
         .btn-primary {
@@ -126,9 +171,34 @@
             color: white;
         }
 
+        .btn-success {
+            background-color: #28a745;
+            color: white;
+        }
+
+        .btn-warning {
+            background-color: #ffc107;
+            color: #212529;
+        }
+
         .btn-info {
             background-color: #17a2b8;
             color: white;
+        }
+
+        .btn:hover {
+            opacity: 0.8;
+            transform: translateY(-1px);
+        }
+
+        .btn-disabled {
+            background-color: #ccc;
+            color: #666;
+            cursor: not-allowed;
+        }
+        .btn-disabled:hover {
+            opacity: 1;
+            transform: none;
         }
 
         .user-info {
@@ -275,29 +345,7 @@
             display: inline-block;
             transition: all 0.3s;
         }
-        .btn-primary {
-            background-color: #007bff;
-            color: white;
-        }
-        .btn-success {
-            background-color: #28a745;
-            color: white;
-        }
-        .btn-warning {
-            background-color: #ffc107;
-            color: #212529;
-        }
-        .btn-danger {
-            background-color: #dc3545;
-            color: white;
-        }
-        .btn-secondary {
-            background-color: #6c757d;
-            color: white;
-        }
-        .btn:hover {
-            opacity: 0.8;
-        }
+
         .screenshots-section {
             background: white;
             padding: 30px;
@@ -628,19 +676,70 @@
                 </div>
             {% endif %}
         {% endwith %}
+
+        <!-- ========== SUBSCRIPTION STATUS BANNER ========== -->
+        {% if subscription_status != 'active' %}
+        <div class="subscription-banner inactive">
+            <div class="subscription-info">
+                <h3>🔒 Subscription Required</h3>
+                <p>Subscribe to start tracking your Amazon products. Choose a plan that fits your needs.</p>
+            </div>
+            <div class="subscription-cta">
+                <a href="{{ url_for('pricing') }}" class="btn btn-primary" style="background-color: #ff9900;">
+                    View Plans & Subscribe
+                </a>
+            </div>
+        </div>
+        {% elif subscription_status == 'past_due' %}
+        <div class="subscription-banner past_due">
+            <div class="subscription-info">
+                <h3>⚠️ Payment Issue</h3>
+                <p>Your last payment failed. Please update your payment method to continue tracking.</p>
+            </div>
+            <div class="subscription-cta">
+                <a href="{{ url_for('update_payment') }}" class="btn btn-danger">
+                    Update Payment Method
+                </a>
+            </div>
+        </div>
+        {% else %}
+        <div class="subscription-banner active">
+            <div class="subscription-info">
+                <h3>✅ {{ subscription_tier|title }} Plan Active</h3>
+                <p>You can track up to {{ max_products }} products. Currently tracking {{ product_count }} product(s).</p>
+            </div>
+            <div class="subscription-cta">
+                {% if product_count < max_products %}
+                <a href="{{ url_for('add_product_form') }}" class="btn btn-success">
+                    + Add Product
+                </a>
+                {% endif %}
+                <a href="{{ url_for('change_subscription') }}" class="btn btn-info">
+                    Manage Plan
+                </a>
+            </div>
+        </div>
+        {% endif %}
+        <!-- ========== END SUBSCRIPTION BANNER ========== -->
         
         <div class="dashboard-header">
             <h1>🏆 Your Amazon Dashboard</h1>
             <p>Welcome back, {{ email }}! Track your products and capture those bestseller moments.</p>
 
-            <!-- Properly contained button group -->
             <div class="dashboard-actions">
-                <a href="{{ url_for('add_product_form') }}" class="btn btn-primary">
-                    📦 Add New Product
-                </a>
+                <!-- Conditionally show Add Product button -->
+                {% if subscription_status == 'active' %}
+                    <a href="{{ url_for('add_product_form') }}" class="btn btn-primary">
+                        📦 Add New Product
+                    </a>
+                {% else %}
+                    <a href="{{ url_for('pricing') }}" class="btn btn-primary">
+                        📦 Subscribe to Add Products
+                    </a>
+                {% endif %}
 
                 <span class="btn btn-secondary" style="cursor: default;">
-                    🤖 Auto-Monitoring Active
+                    🤖 Auto-Monitoring {% if subscription_status == 'active' %}Active{% else %}Inactive{% endif %}
                 </span>
 
                 <a href="{{ url_for('auth.logout') }}" class="btn btn-danger">
@@ -649,12 +748,15 @@
             </div>
         </div>
 
-        <div class="next-check-widget" style="background: white; padding: 20px; border-radius: 10px; margin-bottom: 20px;">
+        {% if subscription_status == 'active' %}
+        <div class="next-check-widget">
             <h3>⏰ Next Check Times</h3>
             <div id="next-check-list" style="margin-top: 15px;">
                 <p style="color: #666;">Loading check times...</p>
             </div>
         </div>
+        {% endif %}
+        
 
         <h2>📦 Your Products</h2>
         {% if products %}
@@ -735,14 +837,19 @@
         </div>
         {% else %}
         <div style="background: white; padding: 40px; text-align: center; border-radius: 10px;">
+            {% if subscription_status == 'active' %}
             <p style="color: #666; font-size: 18px;">No products being monitored yet.</p>
             <a href="{{ url_for('add_product_form') }}" class="btn btn-success" style="margin-top: 20px;">Add Your First Product</a>
+            {% else %}
+            <p style="color: #666; font-size: 18px;">Subscribe to start tracking your Amazon products!</p>
+            <a href="{{ url_for('pricing') }}" class="btn btn-primary" style="margin-top: 20px; background-color: #ff9900;">View Plans & Subscribe</a>
+            {% endif %}
         </div>
         {% endif %}
 
+         {% if screenshots %}
         <div class="screenshots-section">
             <h2>🏆 Achievement Screenshots</h2>
-            {% if screenshots %}
             <div class="screenshot-grid">
                 {% for screenshot in screenshots %}
                 <div class="screenshot-card">
@@ -758,12 +865,8 @@
                 </div>
                 {% endfor %}
             </div>
-            {% else %}
-            <p style="text-align: center; color: #666; padding: 40px;">
-                No achievement screenshots yet. Keep monitoring your products!
-            </p>
-            {% endif %}
         </div>
+        {% endif %}
     </div>
 
     <!-- Add Category Modal -->
@@ -790,6 +893,40 @@
         </div>
     </div>
 
+    <!-- Footer -->
+    <footer style="margin-top: 50px; padding: 20px; text-align: center; color: #666;">
+        <p style="margin-bottom: 15px;">
+            Questions? Email us at 
+            <a href="mailto:support@screenshottracker.com" style="color: #ff9900; text-decoration: none;">
+                support@screenshottracker.com
+            </a>
+        </p>
+        <div style="margin: 20px 0;">
+            <a href="/terms" style="color: #666;">Terms of Service</a> | 
+            <a href="/privacy" style="color: #666;">Privacy Policy</a> | 
+            <a href="/refunds" style="color: #666;">Refund Policy</a>
+        </div>
+        <p style="font-size: 12px;">© 2025 Screenshot Tracker. Not affiliated with Amazon.com, Inc.</p>
+    </footer>
+
+    <!-- Subscription Management -->
+    {% if subscription_status == 'active' %}
+    <div style="margin-top: 50px; padding-top: 30px; border-top: 1px solid #eee; text-align: center;">
+        <p style="color: #666; margin-bottom: 10px;">
+            Need help? Email <a href="mailto:support@screenshottracker.com">support@screenshottracker.com</a>
+        </p>
+        <p>
+            <a href="{{ url_for('change_subscription') }}" style="color: #007bff; margin-right: 20px;">
+                Change Subscription
+            </a>
+            <a href="{{ url_for('cancel_subscription') }}" 
+               style="color: #dc3545; text-decoration: underline; font-size: 14px;">
+                Cancel Subscription
+            </a>
+        </p>
+    </div>
+    {% endif %}
+
     <!-- Image Comparison Modal -->
     <div id="comparisonModal" class="comparison-modal">
         <div class="comparison-content">
@@ -812,37 +949,25 @@
         </div>
     </div>
 
-    <!-- Footer -->
-    <footer style="margin-top: 50px; padding: 20px; text-align: center; color: #666;">
-        <p style="margin-bottom: 15px;">
-            Questions? Email us at 
-            <a href="mailto:support@screenshottracker.com" style="color: #ff9900; text-decoration: none;">
-                support@screenshottracker.com
-            </a>
-        </p>
-        <div style="margin: 20px 0;">
-            <a href="/terms" style="color: #666;">Terms of Service</a> | 
-            <a href="/privacy" style="color: #666;">Privacy Policy</a> | 
-            <a href="/refunds" style="color: #666;">Refund Policy</a>
-        </div>
-        <p style="font-size: 12px;">© 2025 Screenshot Tracker. Not affiliated with Amazon.com, Inc.</p>
-    </footer>
-
     <script>
         // Store email globally for use in functions
         const userEmail = "{{ email }}";
         const csrfToken = document.querySelector('meta[name="csrf-token"]').getAttribute('content');
+        const subscriptionStatus = "{{ subscription_status }}";
 
-        // Load target categories and achievement counts for each product
+        // Load data on page load
         document.addEventListener('DOMContentLoaded', function() {
-            const productCards = document.querySelectorAll('.product-card');
-            productCards.forEach(card => {
-                const productId = card.id.replace('product-', '');
-                if (productId) {
-                    loadTargetCategories(productId);
-                    loadAchievementCount(productId);
-                }
-            });
+            if (subscriptionStatus === 'active') {
+                const productCards = document.querySelectorAll('.product-card');
+                productCards.forEach(card => {
+                    const productId = card.id.replace('product-', '');
+                    if (productId) {
+                        loadTargetCategories(productId);
+                        loadAchievementCount(productId);
+                    }
+                });
+                loadNextCheckTimes();
+            }
         });
 
         function loadAchievementCount(productId) {
@@ -854,16 +979,15 @@
                     if (countElement && data.count > 0) {
                         countElement.innerHTML = `
                             <a href="/achievements/${productId}" 
-                               class="screenshot-link achievement"
+                               class="screenshot-link"
+                               style="border-color: #28a745; color: #28a745;"
                                title="View all achievement screenshots">
                                 🏆 ${data.count} Achievement${data.count > 1 ? 's' : ''}
                             </a>
                         `;
                     }
                 })
-                .catch(error => {
-                    console.error('Error loading achievement count:', error);
-                });
+                .catch(error => console.error('Error:', error));
         }
 
         function compareScreenshots(productId) {
@@ -890,6 +1014,7 @@
                     console.error('Error loading comparison:', error);
                     alert('Error loading screenshots for comparison');
                 });
+            alert('Compare feature - opening comparison view');
         }
 
         function closeComparisonModal() {
@@ -914,21 +1039,20 @@
                         container.innerHTML = categories.map(cat => `
                             <div class="target-category-item">
                                 <span class="category-name">${cat.category_name}</span>
-                                <span class="category-status">
-                                    ${cat.is_achieved 
-                                        ? `<span class="achieved">✅ Achieved #${cat.best_rank_achieved}</span>`
-                                        : cat.best_rank_achieved 
-                                            ? `<span class="progress">Best: #${cat.best_rank_achieved} (Target: #${cat.target_rank})</span>`
-                                            : `<span style="color: #666;">Target: #${cat.target_rank}</span>`
-                                    }
-                                </span>
+                                    <span class="category-status">
+                                        ${cat.is_achieved 
+                                            ? `<span class="achieved">✅ Achieved #${cat.best_rank_achieved}</span>`
+                                            : cat.best_rank_achieved 
+                                                ? `<span class="progress">Best: #${cat.best_rank_achieved}</span>`
+                                                : `<span style="color: #666;">Target: #${cat.target_rank}</span>`
+                                        }
+                                    </span>
+                                </div>
                             </div>
                         `).join('');
                     }
                 })
-                .catch(error => {
-                    console.error('Error loading categories:', error);
-                });
+                .catch(error => console.error('Error:', error));
         }
 
         function showAddCategoryModal(productId) {
@@ -956,8 +1080,6 @@
                 closeComparisonModal();
             }
         }
-
-        // Add these missing functions for the other operations
 
         document.getElementById('addCategoryForm').addEventListener('submit', function(e) {
             e.preventDefault();
@@ -989,13 +1111,11 @@
                     alert('Error: ' + (data.error || 'Unknown error'));
                 }
             })
-            .catch(error => {
-                alert('Error adding category: ' + error);
-            });
+            .catch(error => alert('Error: ' + error));
         });
 
         function toggleMonitoring(productId) {
-            if (!confirm('Are you sure you want to toggle monitoring for this product?')) {
+            if (!confirm('Toggle monitoring for this product?')) {
                 return;
             }
 
@@ -1007,19 +1127,16 @@
             .then(response => response.json())
             .then(data => {
                 if (data.status) {
-                    alert(data.status);
                     location.reload();
                 } else {
                     alert('Error: ' + (data.error || 'Unknown error'));
                 }
             })
-            .catch(error => {
-                alert('Error toggling monitoring: ' + error);
-            });
+            .catch(error => alert('Error: ' + error));
         }
 
         function deleteProduct(productId) {
-            if (!confirm('Are you sure you want to delete this product? This action cannot be undone.')) {
+            if (!confirm('Delete this product? This cannot be undone.')) {
                 return;
             }
 
@@ -1037,9 +1154,7 @@
                     alert('Error: ' + (data.error || 'Unknown error'));
                 }
             })
-            .catch(error => {
-                alert('Error deleting product: ' + error);
-            });
+            .catch(error => alert('Error: ' + error));
         }
 
         // Mobile-friendly touch handling
@@ -1095,6 +1210,7 @@
                 .then(response => response.json())
                 .then(products => {
                     const container = document.getElementById('next-check-list');
+                    if (!container) return;
 
                     if (products.length === 0) {
                         container.innerHTML = '<p style="color: #666;">No products added yet</p>';
@@ -1114,13 +1230,7 @@
                         } else if (product.minutes_until_check !== null) {
                             const hours = Math.floor(product.minutes_until_check / 60);
                             const minutes = product.minutes_until_check % 60;
-
-                            if (hours > 0) {
-                                timeText = `in ${hours}h ${minutes}m`;
-                            } else {
-                                timeText = `in ${minutes} minutes`;
-                            }
-
+                            timeText = hours > 0 ? `in ${hours}h ${minutes}m` : `in ${minutes} minutes`;
                             statusBadge = '<span style="color: #28a745;">✅ Active</span>';
                         } else {
                             statusBadge = '<span style="color: #6c757d;">🆕 New</span>';
@@ -1140,9 +1250,7 @@
 
                     container.innerHTML = html;
                 })
-                .catch(error => {
-                    console.error('Error loading check times:', error);
-                });
+                 .catch(error => console.error('Error:', error));
         }
 
         // Load on page load
