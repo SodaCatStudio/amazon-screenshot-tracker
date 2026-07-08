@@ -7621,6 +7621,22 @@ def handle_subscription_deleted(event) -> Tuple[str, int]:
     finally:
         conn.close()
 
+def _invoice_subscription_id(invoice):
+    """Extract the subscription ID from an invoice event payload.
+
+    Stripe API versions from 2025-03-31 ('basil') onward moved
+    invoice.subscription to invoice.parent.subscription_details.subscription.
+    A freshly created webhook endpoint defaults to the LATEST API version,
+    so reading only the old location silently skips every renewal/failure
+    event. Check both locations, old first.
+    """
+    sub_id = invoice.get('subscription')
+    if not sub_id:
+        parent = invoice.get('parent') or {}
+        details = parent.get('subscription_details') or {}
+        sub_id = details.get('subscription')
+    return sub_id
+
 def handle_invoice_payment_succeeded(event) -> Tuple[str, int]:
     """Handle invoice.payment_succeeded event"""
     conn = get_db()
@@ -7629,7 +7645,7 @@ def handle_invoice_payment_succeeded(event) -> Tuple[str, int]:
     try:
         invoice = event['data']['object']
 
-        subscription_id = invoice.get('subscription')
+        subscription_id = _invoice_subscription_id(invoice)
         customer_id = invoice.get('customer')
         customer_email = invoice.get('customer_email')
 
@@ -7697,7 +7713,7 @@ def handle_invoice_payment_failed(event) -> Tuple[str, int]:
 
     try:
         invoice = event['data']['object']
-        subscription_id = invoice.get('subscription')
+        subscription_id = _invoice_subscription_id(invoice)
         customer_email = invoice.get('customer_email')
 
         if not subscription_id:
