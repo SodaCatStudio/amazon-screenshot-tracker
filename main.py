@@ -2924,16 +2924,16 @@ def register():
         # Validation
         if not email or not password or not full_name:
             flash('All fields are required', 'error')
-            return render_template('register.html', email=email, full_name=full_name)
+            return render_template('auth/register.html', email=email, full_name=full_name)
 
         if password != confirm_password:
             flash('Passwords do not match', 'error')
-            return render_template('register.html', email=email, full_name=full_name)
+            return render_template('auth/register.html', email=email, full_name=full_name)
 
         # Password strength validation
         if len(password) < 8:
             flash('Password must be at least 8 characters long', 'error')
-            return render_template('register.html', email=email, full_name=full_name)
+            return render_template('auth/register.html', email=email, full_name=full_name)
 
         conn = get_db()
         cursor = conn.cursor()
@@ -2948,7 +2948,7 @@ def register():
             if cursor.fetchone():
                 flash('Email already registered. Please log in.', 'error')
                 conn.close()
-                return render_template('register.html', email=email, full_name=full_name)
+                return render_template('auth/register.html', email=email, full_name=full_name)
 
             # Generate verification token
             verification_token = secrets.token_urlsafe(32)
@@ -3036,10 +3036,10 @@ def register():
             conn.rollback()
             conn.close()
             flash('An error occurred during registration. Please try again.', 'error')
-            return render_template('register.html', email=email, full_name=full_name)
+            return render_template('auth/register.html', email=email, full_name=full_name)
 
     # GET request
-    return render_template('register.html')
+    return render_template('auth/register.html')
 
 @app.route('/login_success')
 @login_required
@@ -6438,7 +6438,7 @@ def debug_all_screenshots():
 @login_required
 def settings():
     """Simple account settings page"""
-    return render_template('account_settings.html', user=current_user)
+    return render_template('settings.html', user=current_user)
 
 @app.route('/terms')
 def terms():
