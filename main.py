@@ -5954,6 +5954,24 @@ def dashboard_view():
         cursor = conn.cursor()
 
         try:
+            # Fetch subscription fields — the June-19 dashboard template keys
+            # its banners and add-product UI on subscription_status /
+            # subscription_tier / max_products, but the view never passed
+            # them, so the undefined variable made EVERY user (active
+            # subscribers included) see the 'Subscription Required' banner.
+            cursor.execute(q('''
+                SELECT subscription_status, subscription_tier, max_products
+                FROM users WHERE id = %s
+            '''), (user_id,))
+            sub_raw = cursor.fetchone()
+            if sub_raw:
+                sub = dict(sub_raw)
+                subscription_status = sub.get('subscription_status') or 'inactive'
+                subscription_tier = sub.get('subscription_tier')
+                max_products = sub.get('max_products') or 0
+            else:
+                subscription_status, subscription_tier, max_products = 'inactive', None, 0
+
             # Get products
             if get_db_type() == 'postgresql':
                 cursor.execute('''
@@ -6043,7 +6061,11 @@ def dashboard_view():
             return render_template('dashboard.html',
                                  email=user_email,
                                  products=products,
-                                 screenshots=screenshots)
+                                 screenshots=screenshots,
+                                 subscription_status=subscription_status,
+                                 subscription_tier=subscription_tier,
+                                 max_products=max_products,
+                                 product_count=len(products))
 
         except Exception as e:
             print(f"❌ DASHBOARD_VIEW: Database error: {e}")
