@@ -230,6 +230,24 @@ def q(sql):
         return sql
     return sql.replace('%s', '?')
 
+def admin_required(f):
+    """Restrict a route to admin accounts.
+
+    Admins are defined by the ADMIN_EMAILS env var (comma-separated).
+    Replaces two inconsistent hardcoded in-route lists found in the
+    security audit, and closes the hole where @login_required-only
+    admin routes (e.g. create_paid_user) were reachable by ANY
+    signed-up customer.
+    """
+    @wraps(f)
+    def admin_wrapper(*args, **kwargs):
+        admin_emails = [e.strip().lower() for e in os.environ.get('ADMIN_EMAILS', '').split(',') if e.strip()]
+        if not current_user.is_authenticated or (current_user.email or '').lower() not in admin_emails:
+            return "Unauthorized", 403
+        return f(*args, **kwargs)
+    return admin_wrapper
+
+
 # ============= SCHEDULER FUNCTIONS =============
 def ensure_scheduler_running():
     """Ensure scheduler is running - thread-safe"""
@@ -351,8 +369,7 @@ def check_due_products():
                     p.last_checked,
                     p.created_at,
                     p.user_id,
-                    u.email,
-                    u.scrapingbee_api_key
+                    u.email
                 FROM products p
                 JOIN users u ON p.user_id = u.id
                 WHERE p.active = true
@@ -378,8 +395,7 @@ def check_due_products():
                     p.last_checked,
                     p.created_at,
                     p.user_id,
-                    u.email,
-                    u.scrapingbee_api_key
+                    u.email
                 FROM products p
                 JOIN users u ON p.user_id = u.id
                 WHERE p.active = 1
@@ -2173,11 +2189,12 @@ csp = {
 }
 
 @app.route('/admin/test_email_config')
+@admin_required
 @login_required
 def test_email_config():
     """Test and diagnose email configuration"""
     # Security check
-    ADMIN_EMAILS = ['amazonscreenshottracker@gmail.com']
+    ADMIN_EMAILS = [e.strip().lower() for e in os.environ.get('ADMIN_EMAILS', '').split(',') if e.strip()]  # env-driven; was hardcoded
     if current_user.email not in ADMIN_EMAILS:
         return "Unauthorized", 403
 
@@ -2242,10 +2259,11 @@ def test_email_config():
     return "<pre>" + "\n".join(diagnostics) + "</pre>"
 
 @app.route('/admin/manual_verify', methods=['GET', 'POST'])
+@admin_required
 @login_required
 def manual_verify():
     """Manual verification page for admin"""
-    ADMIN_EMAILS = ['amazonscreenshottracker@gmail.com']
+    ADMIN_EMAILS = [e.strip().lower() for e in os.environ.get('ADMIN_EMAILS', '').split(',') if e.strip()]  # env-driven; was hardcoded
     if current_user.email not in ADMIN_EMAILS:
         return "Unauthorized", 403
 
@@ -2367,6 +2385,7 @@ def manual_verify():
 
 # Add this temporary admin route to fix your account:
 @app.route('/admin/fix_subscription/<email>')
+@admin_required
 @login_required
 def fix_subscription(email):
 
@@ -2676,19 +2695,6 @@ def my_usage_stats():
         'remaining': remaining,
         'percentage_used': round((usage_today / APIRateLimiter.DAILY_LIMIT_PER_USER) * 100, 1)
     })
-
-@app.route('/csrf-test')
-def csrf_test():
-    return """
-    <form method="POST" action="/csrf-test-post">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-        <button type="submit">Test CSRF</button>
-    </form>
-    """
-
-@app.route('/csrf-test-post', methods=['POST'])
-def csrf_test_post():
-    return "CSRF token validated successfully!"
 
 # Print email configuration status
 if email_notifier.is_configured():
@@ -3254,10 +3260,6 @@ def login():
 
 
 # Add a simple test route first
-@auth.route('/test')
-def test_auth():
-    return "Auth blueprint is working!"
-
 @auth.route('/logout')
 @login_required
 def logout():
@@ -3272,11 +3274,12 @@ def logout():
     return redirect(url_for('index'))
 
 @auth.route('/admin/resend_setup/<email>')
+@admin_required
 def resend_setup(email):
     """Admin route to resend setup email to a paid user"""
 
     # List of admin emails
-    ADMIN_EMAILS = ['josh.matern@gmail.com']
+    ADMIN_EMAILS = [e.strip().lower() for e in os.environ.get('ADMIN_EMAILS', '').split(',') if e.strip()]  # env-driven; was hardcoded
     if not current_user.is_authenticated or current_user.email not in ADMIN_EMAILS:
         return "Unauthorized", 403
 
@@ -3784,6 +3787,7 @@ def complete_registration():
 app.register_blueprint(auth, url_prefix='/auth')
 
 @app.route('/debug/products')
+@admin_required
 def debug_products():
     try:
         conn = get_db()
@@ -3855,86 +3859,8 @@ def status():
         'time': datetime.now().isoformat()
     })
 
-@app.route('/debug/persistence-test')
-def persistence_test():
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-
-        # Create test table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS deployment_test (
-                id SERIAL PRIMARY KEY,
-                deployed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                deployment_count INTEGER DEFAULT 1
-            )
-        ''')
-
-        # Count existing records
-        cursor.execute('SELECT COUNT(*) FROM deployment_test')
-        result = cursor.fetchone()
-        count = result[0] if result is not None else 0
-
-        # Add new record
-        cursor.execute('INSERT INTO deployment_test (deployment_count) VALUES (%s)', (count + 1,))
-        conn.commit()
-
-        # Get all records
-        cursor.execute('SELECT * FROM deployment_test ORDER BY deployed_at DESC')
-        deployments = cursor.fetchall()
-        conn.close()
-
-        return f"""
-        <h2>Persistence Test</h2>
-        <p><strong>Total deployments recorded:</strong> {len(deployments)}</p>
-        <p><strong>This should increase with each deployment, not reset to 1</strong></p>
-        <h3>Deployment History:</h3>
-        <ul>{''.join([f'<li>ID: {d[0]}, Count: {d[2]}, Time: {d[1]}</li>' for d in deployments])}</ul>
-        """
-
-    except Exception as e:
-        return f"Persistence test error: {str(e)}"
-
-@app.route('/debug/basic-env')
-def debug_basic_env():
-    """Check basic environment without database"""
-    try:
-        database_url = os.environ.get('DATABASE_URL')
-        flask_env = os.environ.get('FLASK_ENV')
-
-        # Test if we can import psycopg2
-        try:
-            import psycopg2
-            psycopg2_available = True
-        except ImportError:
-            psycopg2_available = False
-
-        # Test basic database connection without queries
-        connection_test = "Unknown"
-        try:
-            if database_url:
-                import psycopg2
-                conn = psycopg2.connect(database_url)
-                conn.close()
-                connection_test = "SUCCESS"
-            else:
-                connection_test = "NO DATABASE_URL"
-        except Exception as e:
-            connection_test = f"FAILED: {str(e)}"
-
-        return f"""
-        <h2>Basic Environment Check</h2>
-        <p><strong>DATABASE_URL exists:</strong> {'Yes' if database_url else 'No'}</p>
-        <p><strong>DATABASE_URL preview:</strong> {database_url[:50] + '...' if database_url else 'Not set'}</p>
-        <p><strong>FLASK_ENV:</strong> {flask_env}</p>
-        <p><strong>psycopg2 available:</strong> {psycopg2_available}</p>
-        <p><strong>Connection test:</strong> {connection_test}</p>
-        """
-
-    except Exception as e:
-        return f"Basic env check failed: {str(e)}"
-
 @app.route('/debug/check_screenshots/<int:product_id>')
+@admin_required
 @login_required
 def debug_check_screenshots(product_id):
     """Debug route to check what screenshots exist for a product"""
@@ -4071,10 +3997,11 @@ def debug_check_screenshots(product_id):
         return f"<pre>{traceback.format_exc()}</pre>", 500
 
 @app.route('/admin/check_tokens')
+@admin_required
 @login_required
 def check_tokens():
     """Debug route to check verification tokens"""
-    ADMIN_EMAILS = ['amazonscreenshottracker@gmail.com']
+    ADMIN_EMAILS = [e.strip().lower() for e in os.environ.get('ADMIN_EMAILS', '').split(',') if e.strip()]  # env-driven; was hardcoded
     if current_user.email not in ADMIN_EMAILS:
         return "Unauthorized", 403
 
@@ -4173,9 +4100,10 @@ def check_tokens():
     return html
 
 @app.route('/admin/generate_verification_link/<email>')
+@admin_required
 def generate_verification_link(email):
     """Generate a manual verification link for testing"""
-    ADMIN_EMAILS = ['amazonscreenshottracker@gmail.com']
+    ADMIN_EMAILS = [e.strip().lower() for e in os.environ.get('ADMIN_EMAILS', '').split(',') if e.strip()]  # env-driven; was hardcoded
     if current_user.email not in ADMIN_EMAILS:
         return "Unauthorized", 403
 
@@ -4265,6 +4193,7 @@ def generate_verification_link(email):
         return f"Error: {str(e)}", 500
 
 @app.route('/debug/email_config')
+@admin_required
 @login_required
 def debug_email_config():
     """Check email configuration"""
@@ -4284,6 +4213,7 @@ def debug_email_config():
     """
 
 @app.route('/emergency_stop')
+@admin_required
 @login_required
 def emergency_stop():
     """Emergency stop all API usage"""
@@ -4537,6 +4467,7 @@ def credit_leak_detector():
         return f"<pre>{traceback.format_exc()}</pre>", 500
 
 @app.route('/admin/resend_verification_to/<email>')
+@admin_required
 @login_required
 def admin_resend_verification(email):
     """Admin tool to resend verification email"""
@@ -4598,6 +4529,7 @@ def admin_resend_verification(email):
         return f"Error: {str(e)}", 500
 
 @app.route('/kill_scheduler')
+@admin_required
 @login_required
 def kill_scheduler():
     """Attempt to kill the scheduler"""
@@ -4641,49 +4573,8 @@ def kill_scheduler():
     except Exception as e:
         return "Error: {str(e)}", 500
 
-@app.route('/debug/db-connection')
-def debug_db_connection():
-    database_url = os.environ.get('DATABASE_URL', 'NOT SET')
-
-    # Check if it's really PostgreSQL
-    is_postgresql = 'postgresql' in database_url.lower()
-
-    if is_postgresql:
-        try:
-            conn = get_db()
-            cursor = conn.cursor()
-
-            # Get PostgreSQL version and database name
-            cursor.execute('SELECT version(), current_database()')
-            db_info = cursor.fetchone()
-
-            # Check if tables exist
-            cursor.execute("""
-                SELECT table_name 
-                FROM information_schema.tables 
-                WHERE table_schema = 'public'
-                ORDER BY table_name
-            """)
-            tables = cursor.fetchall()
-
-            conn.close()
-
-            return f"""
-            <h2>Database Connection Debug</h2>
-            <p><strong>Database URL:</strong> {database_url[:50]}...</p>
-            <p><strong>PostgreSQL:</strong> {is_postgresql}</p>
-            <p><strong>Version:</strong> {db_info[0][:100] if db_info else 'Unknown'}</p>
-            <p><strong>Database:</strong> {db_info[1] if db_info else 'Unknown'}</p>
-            <p><strong>Tables:</strong> {[t[0] for t in tables]}</p>
-            """
-
-        except Exception as e:
-            return f"Database error: {str(e)}"
-    else:
-        return f"Using SQLite (not PostgreSQL): {database_url}"
-
-
 @app.route('/test-email')
+@admin_required
 @login_required
 def test_email():
     """Test email configuration"""
@@ -4737,13 +4628,8 @@ def index():
         # If there's an error, show landing page
         return render_template('landing.html')
 
-@app.route('/test')
-def test_route():
-    """Simple test route to verify basic functionality"""
-    print("🔍 TEST: Simple test route called")
-    return "✅ Test route working! App is alive.", 200
-
 @app.route('/debug/baseline_screenshots')
+@admin_required
 @login_required
 def debug_baseline_screenshots():
     """Debug route to check baseline screenshots"""
@@ -4928,6 +4814,7 @@ def capture_baseline(product_id):
 
 
 @app.route('/test_scrapingbee_screenshot')
+@admin_required
 @login_required
 def test_scrapingbee_screenshot():
     """Test if ScrapingBee can capture screenshots - FIXED"""
@@ -4999,6 +4886,7 @@ def test_scrapingbee_screenshot():
 
 
 @app.route('/test_product_scrape')
+@admin_required
 @login_required
 def test_product_scrape():
     """Test scraping a specific product"""
@@ -5051,6 +4939,7 @@ def test_product_scrape():
         return f"Test failed: {traceback.format_exc()}", 500
 
 @app.route('/test_resend')
+@admin_required
 @login_required
 def test_resend():
     if current_user.email not in ['josh.matern@gmail.com']:
@@ -5065,6 +4954,7 @@ def test_resend():
     return f"Email {'sent' if success else 'failed'}! Check logs for details."
 
 @app.route('/fix_product/<int:product_id>')
+@admin_required
 @login_required
 def fix_product(product_id):
     """Re-scrape a product to fix missing information"""
@@ -5175,6 +5065,7 @@ def fix_product(product_id):
         return redirect(url_for('dashboard'))
 
 @app.route('/fix_baseline/<int:product_id>')
+@admin_required
 @login_required
 def fix_baseline(product_id):
     """Move the first achievement screenshot to be the baseline"""
@@ -5688,10 +5579,11 @@ def send_cancellation_email(email):
 
 # Add route to reset rate limits (admin only)
 @app.route('/admin/reset_rate_limits')
+@admin_required
 @login_required
 def reset_rate_limits():
     """Reset rate limits for debugging"""
-    ADMIN_EMAILS = ['amazonscreenshottracker@gmail.com', 'josh.matern@gmail.com']
+    ADMIN_EMAILS = [e.strip().lower() for e in os.environ.get('ADMIN_EMAILS', '').split(',') if e.strip()]  # env-driven; was hardcoded
     if current_user.email not in ADMIN_EMAILS:
         return "Unauthorized", 403
 
@@ -6109,6 +6001,7 @@ def dashboard_view():
         """, 500
 
 @app.route('/test_dashboard')
+@admin_required
 @login_required
 def test_dashboard():
     """Test route to debug dashboard issues"""
@@ -6139,6 +6032,7 @@ def clear_session():
     return redirect(url_for('auth.login'))
 
 @app.route('/emergency_dashboard')
+@admin_required
 @login_required
 def emergency_dashboard():
     """Emergency dashboard that doesn't use database or templates"""
@@ -6240,6 +6134,7 @@ def check_api_key():
         return f"Error: {str(e)}", 500
 
 @app.route('/debug_session')
+@admin_required
 @login_required
 def debug_session():
     """Debug session and authentication state"""
@@ -6272,6 +6167,7 @@ def debug_session():
     """
 
 @app.route('/debug/all_screenshots')
+@admin_required
 @login_required
 def debug_all_screenshots():
     """Show all screenshots in the database for current user"""
@@ -6480,6 +6376,7 @@ def refunds():
     return render_template('refunds.html')
 
 @app.route('/test_encryption')
+@admin_required
 @login_required
 def test_encryption():
     """Test the encryption/decryption system"""
@@ -6797,33 +6694,20 @@ def send_feedback():
         would_pay = request.form.get('would_pay')
         price_point = request.form.get('price_point', 'N/A')
 
-        # Save to database for tracking
-        conn = sqlite3.connect('amazon_monitor.db')
+        # Save to database for tracking.
+        # Bug fix: was hardcoded sqlite3.connect — in production, customer
+        # feedback silently vanished into a stray local SQLite file.
+        # The feedback table exists in both schema definitions, so the
+        # inline SQLite-dialect CREATE TABLE is no longer needed.
+        conn = get_db()
         cursor = conn.cursor()
 
-        # Create feedback table if it doesn't exist
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS feedback (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                user_email TEXT,
-                rating INTEGER,
-                love TEXT,
-                improve TEXT,
-                bugs TEXT,
-                would_pay TEXT,
-                price_point TEXT,
-                submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (user_id) REFERENCES users (id)
-            )
-        ''')
-
         # Insert feedback
-        cursor.execute('''
+        cursor.execute(q('''
             INSERT INTO feedback 
             (user_id, user_email, rating, love, improve, bugs, would_pay, price_point)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        '''), (
             current_user.id,
             current_user.email,
             int(rating) if rating else None,
@@ -6897,16 +6781,6 @@ def send_feedback():
         flash('Error submitting feedback. Please try again.', 'error')
 
     return redirect(url_for('dashboard'))
-
-@app.route('/deployment-test')
-def deployment_test():
-    """Simple test to verify deployment is working"""
-    return jsonify({
-        'status': 'ok',
-        'message': 'App is deployed and running',
-        'timestamp': datetime.now().isoformat(),
-        'scheduler_enabled': os.environ.get('ENABLE_SCHEDULER', 'false')
-    })
 
 @app.route('/toggle_monitoring/<int:product_id>')
 @login_required
@@ -7773,6 +7647,7 @@ def handle_invoice_payment_failed(event) -> Tuple[str, int]:
         conn.close()
 
 @app.route('/admin/fix_paid_user/<email>')
+@admin_required
 @login_required  
 def fix_paid_user(email):
     if current_user.email not in ['josh.matern@gmail.com']:
@@ -7808,6 +7683,7 @@ def fix_paid_user(email):
     """
 
 @app.route('/admin/create_paid_user/<email>')
+@admin_required
 @login_required
 def create_paid_user(email):
     if current_user.email not in ['josh.matern@gmail.com']:
@@ -7869,6 +7745,7 @@ def create_paid_user(email):
     return f"User created for {email}. Setup link: {setup_link}"
 
 @app.route('/admin/fix_stripe_columns')
+@admin_required
 @login_required
 def fix_stripe_columns():
     if current_user.email not in ['josh.matern@gmail.com']:
