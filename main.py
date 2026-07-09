@@ -356,7 +356,8 @@ def check_due_products():
                 FROM products p
                 JOIN users u ON p.user_id = u.id
                 WHERE p.active = true
-                  AND u.scrapingbee_api_key IS NOT NULL
+                  AND u.subscription_status = 'active'
+                  AND (u.subscription_expires IS NULL OR u.subscription_expires > %s)
                   AND (
                       p.last_checked IS NULL 
                       OR p.last_checked <= %s
@@ -364,7 +365,7 @@ def check_due_products():
                 ORDER BY 
                     COALESCE(p.last_checked, p.created_at) ASC
                 LIMIT 10
-            ''', (check_threshold,))
+            ''', (current_time, check_threshold,))
         else:
             cursor.execute('''
                 SELECT 
@@ -382,7 +383,8 @@ def check_due_products():
                 FROM products p
                 JOIN users u ON p.user_id = u.id
                 WHERE p.active = 1
-                  AND u.scrapingbee_api_key IS NOT NULL
+                  AND u.subscription_status = 'active'
+                  AND (u.subscription_expires IS NULL OR u.subscription_expires > ?)
                   AND (
                       p.last_checked IS NULL 
                       OR p.last_checked <= ?
@@ -390,7 +392,7 @@ def check_due_products():
                 ORDER BY 
                     COALESCE(p.last_checked, p.created_at) ASC
                 LIMIT 10
-            ''', (check_threshold,))
+            ''', (current_time, check_threshold,))
 
         due_products = cursor.fetchall()
 
