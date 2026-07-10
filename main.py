@@ -8209,25 +8209,22 @@ def check_single_product(product_id, url=None, user_id=None, product_title=None,
 
         monitor = AmazonMonitor.for_user(user_id)
 
-        # Get previous state (with safe defaults for missing columns)
-        if get_db_type() == 'postgresql':
-            cursor.execute("""
-                SELECT 
-                    COALESCE(last_rank, current_rank) as last_rank,
-                    COALESCE(has_bestseller_badge, is_bestseller, FALSE) as has_bestseller_badge,
-                    baseline_rank,
-                    last_achievement_date
-                FROM products WHERE id = %s
-            """, (product_id,))
-        else:
-            cursor.execute("""
-                SELECT 
-                    COALESCE(last_rank, current_rank) as last_rank,
-                    COALESCE(has_bestseller_badge, is_bestseller, 0) as has_bestseller_badge,
-                    baseline_rank,
-                    last_achievement_date
-                FROM products WHERE id = ?
-            """, (product_id,))
+        # Get previous state (with safe defaults for missing columns).
+        # Bug fix: COALESCE(last_rank, current_rank) crashed on Postgres —
+        # last_rank is INTEGER, current_rank is VARCHAR, and Postgres
+        # refuses mixed-type COALESCE (SQLite's dynamic typing masked it).
+        # The hourly re-check therefore failed for EVERY product in
+        # production. Select both raw and coalesce in Python instead,
+        # which also tolerates non-numeric text in current_rank.
+        cursor.execute(q("""
+            SELECT 
+                last_rank,
+                current_rank,
+                COALESCE(has_bestseller_badge, is_bestseller, FALSE) as has_bestseller_badge,
+                baseline_rank,
+                last_achievement_date
+            FROM products WHERE id = %s
+        """), (product_id,))
 
         prev_data = cursor.fetchone()
         if not prev_data:
@@ -8238,14 +8235,20 @@ def check_single_product(product_id, url=None, user_id=None, product_title=None,
         # Handle both dict and tuple with safe defaults
         if isinstance(prev_data, dict):
             prev_rank = prev_data.get('last_rank')
+            fallback_rank = prev_data.get('current_rank')
             had_badge = bool(prev_data.get('has_bestseller_badge', False))
             baseline_rank = prev_data.get('baseline_rank')
             last_achievement = prev_data.get('last_achievement_date')
         else:
-            prev_rank = prev_data[0] if prev_data[0] is not None else None
-            had_badge = bool(prev_data[1]) if prev_data[1] is not None else False
-            baseline_rank = prev_data[2] if len(prev_data) > 2 else None
-            last_achievement = prev_data[3] if len(prev_data) > 3 else None
+            prev_rank = prev_data[0]
+            fallback_rank = prev_data[1] if len(prev_data) > 1 else None
+            had_badge = bool(prev_data[2]) if len(prev_data) > 2 and prev_data[2] is not None else False
+            baseline_rank = prev_data[3] if len(prev_data) > 3 else None
+            last_achievement = prev_data[4] if len(prev_data) > 4 else None
+
+        # Python-side coalesce: prefer last_rank, fall back to current_rank
+        if prev_rank is None:
+            prev_rank = fallback_rank
 
         # Convert rank strings to integers safely
         if prev_rank and isinstance(prev_rank, str):
