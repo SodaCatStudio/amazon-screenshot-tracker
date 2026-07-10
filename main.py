@@ -441,6 +441,25 @@ def check_due_products():
 
             if success:
                 products_checked += 1
+            else:
+                # Cost protection: a FAILED check must still stamp
+                # last_checked, or the product stays eternally "due" and
+                # retries every scheduler cycle (~1/min). Observed live as
+                # a retry storm; harmless when the failure precedes the
+                # scrape, but a post-scrape failure (e.g. dead URL → 404,
+                # which ScrapingBee bills) would burn ~14k credits/day on
+                # one product under the global-key model. This caps any
+                # failing product at one attempt per hour.
+                try:
+                    fail_conn = get_db()
+                    fail_cur = fail_conn.cursor()
+                    fail_cur.execute(q("UPDATE products SET last_checked = %s WHERE id = %s"),
+                                     (datetime.now(), product_id))
+                    fail_conn.commit()
+                    fail_conn.close()
+                    print(f"⏸️ Check failed for product {product_id}; next attempt in ~60 min")
+                except Exception as stamp_err:
+                    print(f"⚠️ Could not stamp last_checked for product {product_id}: {stamp_err}")
 
             time.sleep(2)  # Rate limiting between products
 
