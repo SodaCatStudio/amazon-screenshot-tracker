@@ -5274,8 +5274,33 @@ def add_product():
         url = request.form.get('url', '').strip()
         target_categories_input = request.form.get('target_categories', '').strip()
 
-        if not url or 'amazon.' not in url.lower():
-            flash('Please provide a valid Amazon product URL', 'error')
+        # Bug fix (found by the first live customer, on mobile): the check
+        # was `'amazon.' in url`, which rejects the Amazon APP's Share
+        # links (https://a.co/d/XXXX — no 'amazon.' substring) and fails
+        # if the user pastes the app's whole share text around the link.
+        # Now: extract the first URL from whatever was pasted, tolerate a
+        # missing scheme, and accept Amazon's real domain family. a.co /
+        # amzn.* short links are fine as-is — ScrapingBee follows the
+        # redirect to the full product page.
+        m = re.search(r'https?://\S+', url)
+        if m:
+            url = m.group(0).rstrip('.,;:)>]\'"')
+        elif url and not url.lower().startswith(('http://', 'https://')):
+            url = 'https://' + url
+
+        from urllib.parse import urlparse as _urlparse
+        host = (_urlparse(url).hostname or '').lower()
+        is_amazon_url = (
+            host.startswith('amazon.') or '.amazon.' in host
+            or host in ('a.co', 'amzn.to', 'amzn.eu', 'amzn.asia', 'amzn.com')
+        )
+
+        if not url or not is_amazon_url:
+            # Log the rejected value so support doesn't fly blind — the
+            # first live rejection left no trace in the logs at all.
+            print(f"❌ Rejected product URL (host={host!r}): {url[:120]!r}")
+            flash('Please provide an Amazon product link — the full page URL, '
+                  'or a share link like a.co/... from the Amazon app', 'error')
             conn.close()
             return redirect(url_for('add_product_form'))
 
