@@ -1909,12 +1909,18 @@ class AmazonMonitor:
                 
                 product_info['title'] = 'Unknown Product'
 
-            # Check for bestseller badges
+            # Check for bestseller badges.
+            # Bug fix (first live badge event, missed): Amazon awards more
+            # than one badge species. 'new release' covers both
+            # "#1 New Release in ..." and "Top New Release in ..." — the
+            # badge our first customer earned while the detector only knew
+            # bestseller vocabulary.
             badge_patterns = [
                 'best seller',
                 'best-seller', 
                 'bestseller',
                 '#1 best seller',
+                'new release',
                 'amazon\'s choice'
             ]
 
@@ -1926,13 +1932,26 @@ class AmazonMonitor:
                     return any('badge' in str(c).lower() for c in x)
                 return 'badge' in str(x).lower()
 
+            _unknown_badges_seen = set()  # dedupe unknown-badge logging per page
+
             for element in soup.find_all(['span', 'div', 'a'], class_=has_badge_class):
                 text = element.get_text().strip().lower()
+                matched = False
                 for pattern in badge_patterns:
                     if pattern in text:
                         product_info['is_bestseller'] = True
                         print(f"🏆 Found bestseller badge: {text}")
+                        matched = True
                         break
+                # Safety net: badge-shaped element with UNKNOWN text.
+                # Keywords stay the trigger (structure-only would false-
+                # positive on deal/eco badges and on OTHER books' badges in
+                # recommendation carousels), but unknown species must
+                # announce themselves in logs instead of being silently
+                # missed like the first New Release badge was.
+                if not matched and 0 < len(text) <= 80 and text not in _unknown_badges_seen:
+                    _unknown_badges_seen.add(text)
+                    print(f"🔎 Unrecognized badge-like text (not triggering): {text!r}")
 
             # Extract ranking - search entire page
             print("🔍 Searching for ranking information...")
