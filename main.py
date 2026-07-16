@@ -147,6 +147,14 @@ resend.api_key = os.environ.get('RESEND_API_KEY')
 
 # ScrapingBee configuration - using environment variables for security
 SCRAPINGBEE_API_KEY = os.environ.get('SCRAPINGBEE_SECRET_KEY')
+
+# Client timeout for ScrapingBee calls. Was 25s, which abandoned renders on
+# the slow side of NORMAL (JS + premium proxy on Amazon routinely takes
+# 30-90s per ScrapingBee's own docs) — the source of occasional "Request
+# timed out" check failures. 55s covers the vast majority of renders while
+# keeping add_product's two-call worst case (2 x 55s = 110s, inside a web
+# request) under the 120s gunicorn timeout. Env-overridable.
+SCRAPINGBEE_TIMEOUT = int(os.environ.get('SCRAPINGBEE_TIMEOUT', '55'))
 SCRAPINGBEE_URL = 'https://app.scrapingbee.com/api/v1/'
 SCREENSHOT_DIR = os.path.join(os.path.dirname(__file__), 'screenshots')
 if not os.path.exists(SCREENSHOT_DIR):
@@ -1715,7 +1723,7 @@ class AmazonMonitor:
 
         try:
             print("📊 Fetching HTML content...")
-            html_response = requests.get('https://app.scrapingbee.com/api/v1/', params=html_params, timeout=25)
+            html_response = requests.get('https://app.scrapingbee.com/api/v1/', params=html_params, timeout=SCRAPINGBEE_TIMEOUT)
 
             if html_response.status_code != 200:
                 print(f"❌ Failed to get HTML: {html_response.status_code}")
@@ -1750,7 +1758,7 @@ class AmazonMonitor:
 
                 try:
                     screenshot_response = requests.get('https://app.scrapingbee.com/api/v1/', 
-                                                      params=screenshot_params, timeout=25)
+                                                      params=screenshot_params, timeout=SCRAPINGBEE_TIMEOUT)
 
                     if screenshot_response.status_code == 200:
                         screenshot_data = screenshot_response.content
