@@ -1949,7 +1949,14 @@ class AmazonMonitor:
                 # recommendation carousels), but unknown species must
                 # announce themselves in logs instead of being silently
                 # missed like the first New Release badge was.
-                if not matched and 0 < len(text) <= 80 and text not in _unknown_badges_seen:
+                # Known non-achievements are filtered so the log stays
+                # signal: 'just released' is Amazon's recency label (every
+                # check, forever) and '-NN%' are carousel discount stickers
+                # — both observed live, neither an achievement.
+                is_known_noise = (text == 'just released'
+                                  or re.fullmatch(r'-?\d{1,2}%', text) is not None)
+                if (not matched and not is_known_noise
+                        and 0 < len(text) <= 80 and text not in _unknown_badges_seen):
                     _unknown_badges_seen.add(text)
                     print(f"🔎 Unrecognized badge-like text (not triggering): {text!r}")
 
@@ -6579,15 +6586,21 @@ def force_start_scheduler():
 
 @app.route('/screenshot/<int:screenshot_id>')
 def view_screenshot(screenshot_id):
-    conn = sqlite3.connect('amazon_monitor.db')
+    # Bug fix: was hardcoded sqlite3.connect('amazon_monitor.db') — the
+    # phantom-database class again; in production this read an empty local
+    # file, so stored screenshots were unviewable from the dashboard.
+    conn = get_db()
     cursor = conn.cursor()
 
-    cursor.execute('''
-        SELECT screenshot_data FROM bestseller_screenshots WHERE id = ?
-    ''', (screenshot_id,))
+    cursor.execute(q('''
+        SELECT screenshot_data FROM bestseller_screenshots WHERE id = %s
+    '''), (screenshot_id,))
 
     result = cursor.fetchone()
     conn.close()
+
+    if result:
+        result = (dict(result).get('screenshot_data'),) if isinstance(result, dict) or hasattr(result, 'keys') else result
 
     if result and result[0]:
         try:
@@ -8063,52 +8076,32 @@ def manual_check_product(product_id):
         return jsonify({'error': str(e)}), 500
 
 def process_achievement_screenshot(screenshot_data, product_id, user_id, achievement_type):
-    """Process full screenshot into badge and rank sections"""
-    try:
-        # Check if PIL is available
-        if not PIL_AVAILABLE or Image is None:
-            print("⚠️  PIL not available, skipping screenshot processing")
-            return {
-                'full': None,
-                'badge': None,
-                'rank': None
-            }
-        
-        # Load screenshot (Image is guaranteed to be available here)
-        img = Image.open(io.BytesIO(screenshot_data))
-        width, height = img.size
+    """Save the FULL page screenshot and return it as base64.
 
+    Simplified per S97/S98: the fixed-pixel badge/rank crops misfired on
+    Amazon layout variants (a customer received a crop showing a different
+    book), and crop FILES lived on Railway's ephemeral disk. The baseline
+    pattern — full page, base64, stored in the database — is what survives
+    and what customers can verify.
+    """
+    try:
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
-        # Save full screenshot first (for reference)
+        # Keep a full-page file briefly on disk for the email attachment
         full_filename = f'screenshot_{product_id}_full_{timestamp}.png'
         full_path = os.path.join(SCREENSHOT_DIR, full_filename)
-        img.save(full_path)
+        with open(full_path, 'wb') as f:
+            f.write(screenshot_data)
         print(f"💾 Saved full screenshot: {full_filename}")
 
-        # Create badge section (top 1200px)
-        badge_section = img.crop((0, 0, width, min(1200, height)))
-        badge_filename = f'screenshot_{product_id}_badge_{timestamp}.png'
-        badge_path = os.path.join(SCREENSHOT_DIR, badge_filename)
-        badge_section.save(badge_path)
-        print(f"💾 Saved badge section: {badge_filename}")
-
-        # Create rank section (from 1800px to end, max 1500px height)
-        if height > 1800:
-            rank_start = 1800
-            rank_end = min(rank_start + 1500, height)
-            rank_section = img.crop((0, rank_start, width, rank_end))
-            rank_filename = f'screenshot_{product_id}_rank_{timestamp}.png'
-            rank_path = os.path.join(SCREENSHOT_DIR, rank_filename)
-            rank_section.save(rank_path)
-            print(f"💾 Saved rank section: {rank_filename}")
-        else:
-            rank_filename = None
+        full_b64 = base64.b64encode(screenshot_data).decode('utf-8')
+        print(f"📸 Full screenshot encoded for DB storage ({len(full_b64)} chars base64)")
 
         return {
             'full': full_filename,
-            'badge': badge_filename,
-            'rank': rank_filename
+            'full_b64': full_b64,
+            'badge': None,
+            'rank': None
         }
 
     except Exception as e:
@@ -8376,7 +8369,24 @@ def check_single_product(product_id, url=None, user_id=None, product_title=None,
             print("🎯 Achievements detected! Capturing screenshot...")
             screenshot_result = monitor.scrape_amazon_page(url, need_screenshot=True)
 
-            if screenshot_result['success'] and screenshot_result['screenshot']:
+            # EVIDENCE VERIFICATION (bug found by first live customer):
+            # the badge was detected in request #1's HTML, but the
+            # screenshot comes from a SEPARATE request whose page render
+            # can differ (different proxy session; Amazon A/B and layout
+            # variants). She received crops showing another book and no
+            # badge. Rule: the emailed evidence must prove itself — parse
+            # the screenshot request's OWN html and require the badge
+            # there before saving or emailing anything.
+            evidence_verified = True
+            if 'bestseller_badge' in achievements and screenshot_result.get('success'):
+                evidence_info = monitor.extract_product_info(screenshot_result.get('html') or '')
+                if not evidence_info.get('is_bestseller'):
+                    evidence_verified = False
+                    print("⚠️ Evidence rejected: the screenshot render does not show the "
+                          "badge (Amazon served a different page variant). No email sent; "
+                          "badge state left unset so the capture retries next hour.")
+
+            if evidence_verified and screenshot_result['success'] and screenshot_result['screenshot']:
                 # Process the screenshot into sections
                 screenshot_files = process_achievement_screenshot(
                     screenshot_result['screenshot'],
@@ -8394,14 +8404,15 @@ def check_single_product(product_id, url=None, user_id=None, product_title=None,
                             'target_reached': f"Reached target rank #{current_rank}"
                         }.get(achievement_type, "Achievement unlocked")
 
-                        # Save with appropriate screenshot
-                        screenshot_to_use = screenshot_files['badge'] if 'badge' in achievement_type else screenshot_files['rank']
-
+                        # Store the base64 image itself (baseline pattern) —
+                        # previously a FILENAME went into screenshot_data,
+                        # pointing at ephemeral disk: broken on dashboard,
+                        # gone at next redeploy.
                         save_achievement(
                             product_id,
                             user_id,
                             achievement_type,
-                            screenshot_to_use or screenshot_files['full'],
+                            screenshot_files['full_b64'],
                             description
                         )
 
@@ -8413,22 +8424,28 @@ def check_single_product(product_id, url=None, user_id=None, product_title=None,
                         screenshot_files
                     )
 
-        # Update product status
-        if get_db_type() == 'postgresql':
-            cursor.execute("""
-                UPDATE products 
-                SET last_rank = %s,
-                    has_bestseller_badge = %s,
-                    last_checked = %s,
-                    last_achievement_date = %s
-                WHERE id = %s
-            """, (
-                current_rank, 
-                product_info['is_bestseller'], 
-                datetime.now(),
-                datetime.now() if achievements else last_achievement,
-                product_id
-            ))
+        # Update product status.
+        # If badge evidence was rejected, persist has_bestseller_badge as
+        # False so the badge reads as "newly appeared" next hour and the
+        # capture retries. Also: this UPDATE previously had no SQLite
+        # branch at all (silently skipped on the fallback) — now q()'d.
+        persist_badge = product_info['is_bestseller']
+        if 'bestseller_badge' in achievements and not evidence_verified:
+            persist_badge = False
+        cursor.execute(q("""
+            UPDATE products 
+            SET last_rank = %s,
+                has_bestseller_badge = %s,
+                last_checked = %s,
+                last_achievement_date = %s
+            WHERE id = %s
+        """), (
+            current_rank, 
+            persist_badge, 
+            datetime.now(),
+            datetime.now() if (achievements and evidence_verified) else last_achievement,
+            product_id
+        ))
 
         conn.commit()
         print(f"✅ Product check complete. Credits used: {10 if not achievements else 35}")
@@ -8499,20 +8516,18 @@ def send_achievement_email_with_sections(user_id, product_title, achievements, s
     html_content = f"""
     <h2>🎉 Achievement Unlocked!</h2>
     <p>Your product <strong>{product_title}</strong> has achieved: {achievement_text}</p>
+    <p><em>Captured {datetime.utcnow().strftime('%B %d, %Y at %H:%M')} UTC</em></p>
 
-    <h3>Product Badge Area:</h3>
-    <p>Screenshot showing the product image and any bestseller badges</p>
-
-    <h3>Ranking Details:</h3>
-    <p>Screenshot showing the Best Sellers Rank in product details</p>
-
-    <p>View your dashboard for more details!</p>
+    <p>The full page screenshot is attached — your badge and ranking as they
+    appeared on Amazon at the moment of capture. It's also saved to your
+    dashboard.</p>
     """
 
-    # Attach both screenshots if available
+    # Full page only — the fixed-pixel crops misfired on Amazon layout
+    # variants (S97) and are no longer produced.
     attachments = []
     if screenshot_files:
-        for key in ['badge', 'rank']:
+        for key in ['full']:
             if screenshot_files.get(key):
                 filepath = os.path.join(SCREENSHOT_DIR, screenshot_files[key])
                 if os.path.exists(filepath):
