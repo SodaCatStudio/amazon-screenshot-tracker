@@ -569,23 +569,301 @@
     </section>
 
     <!-- Screenshot Demo -->
-    <section class="demo-section">
-        <div class="container">
-            <h2 class="section-title">Capture Your Success</h2>
-            <p class="section-subtitle">High-quality screenshots perfect for marketing, social media, and your website</p>
+    <!--
+      ============================================================================
+      PROOF SECTION — drop-in replacement for the "Screenshot Demo" placeholder
+      ============================================================================
 
-            <div style="background: linear-gradient(45deg, #ff9900, #232f3e); padding: 4px; border-radius: 10px; max-width: 800px; margin: 50px auto;">
-                <div style="background: white; padding: 20px; border-radius: 8px;">
-                    <p style="text-align: center; color: #666; font-style: italic;">
-                        Screenshot preview would appear here showing a bestseller badge
-                    </p>
-                    <div style="height: 400px; background: #f8f9fa; border-radius: 5px; display: flex; align-items: center; justify-content: center;">
-                        <span style="font-size: 48px;">🏆</span>
-                    </div>
-                </div>
+      HOW TO USE
+      1. Delete the block marked "PREVIEW ONLY" below. It exists so this file
+         renders correctly on its own; your site already defines .container,
+         .section-title and .section-subtitle.
+      2. Copy the <style> block marked "KEEP" into your stylesheet (or leave it
+         inline in landing.html — it's scoped to .proof-* so it won't collide).
+      3. Replace the whole existing <section class="demo-section">...</section>
+         with the markup marked "KEEP" at the bottom.
+
+      4. Copy the three files in /img/ into your Flask static folder at
+         static/img/. The template uses url_for(); if you're pasting into a plain
+         HTML page instead, change the src values to /static/img/<filename>.
+
+      BEFORE YOU SHIP — four things to change:
+      - The sender address is a placeholder. Put your real Resend "from" address in.
+      - Confirm you have permission to name this book and author publicly.
+      - The email says "Bestseller Badge" but the capture shows "#1 New Release."
+        Side by side on one page, that mismatch is visible. Either relabel in the
+        email template or pick a matched pair.
+      - Re-export the images from the original attachment if you can — see the
+        decision log, R3.1. The current ones came from a phone screenshot and are
+        softer than they need to be.
+      ============================================================================
+    -->
+
+    <!-- ============ KEEP: STYLES ============ -->
+    <style>
+      .proof-frame {
+        background: linear-gradient(45deg, #ff9900, #232f3e);
+        padding: 4px;
+        border-radius: 12px;
+        max-width: 720px;
+        margin: 44px auto 0;
+        box-shadow: 0 12px 32px rgba(35, 47, 62, 0.16);
+      }
+      .proof-inner {
+        background: #fff;
+        border-radius: 9px;
+        overflow: hidden;
+      }
+
+      /* inbox chrome — makes it read as a delivered email, not a text block */
+      .proof-mailhead {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 14px 18px;
+        border-bottom: 1px solid #ececec;
+        background: #fafafa;
+      }
+      .proof-avatar {
+        flex: 0 0 auto;
+        width: 38px;
+        height: 38px;
+        border-radius: 50%;
+        background: #232f3e;
+        color: #ff9900;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 19px;
+      }
+      .proof-meta { flex: 1 1 auto; min-width: 0; }
+      .proof-from {
+        font-size: 0.85rem;
+        font-weight: 600;
+        color: #232f3e;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .proof-from span { font-weight: 400; color: #8a8a8a; }
+      .proof-subject {
+        font-size: 0.85rem;
+        color: #666;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .proof-time {
+        flex: 0 0 auto;
+        font-size: 0.8rem;
+        color: #8a8a8a;
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* email body — reproduces your actual notification */
+      .proof-body { padding: 26px 24px 22px; }
+      .proof-h {
+        margin: 0 0 18px;
+        font-size: 1.45rem;
+        line-height: 1.25;
+        color: #1a1a1a;
+      }
+      .proof-body p {
+        margin: 0 0 14px;
+        font-size: 1rem;
+        line-height: 1.6;
+        color: #333;
+      }
+      .proof-body p:last-of-type { margin-bottom: 0; }
+      .proof-body strong { color: #1a1a1a; }
+      .proof-stamp {
+        font-style: italic;
+        color: #555 !important;
+      }
+
+      /* attachment row */
+      .proof-attach {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-top: 20px;
+        padding: 12px 14px;
+        border: 1px solid #e4e4e4;
+        border-radius: 7px;
+        background: #fbfbfb;
+      }
+      .proof-file {
+        font-size: 0.9rem;
+        font-weight: 600;
+        color: #232f3e;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .proof-size {
+        margin-left: auto;
+        flex: 0 0 auto;
+        font-size: 0.8rem;
+        color: #8a8a8a;
+      }
+
+      /* the captured screenshot itself */
+      .proof-shot {
+        max-width: 720px;
+        margin: 22px auto 0;
+        border: 1px solid #e4e4e4;
+        border-radius: 10px;
+        overflow: hidden;
+        background: #fff;
+      }
+      .proof-shot img {
+        display: block;
+        width: 100%;
+        height: auto;
+      }
+      .proof-shot figcaption {
+        padding: 12px 16px;
+        font-size: 0.85rem;
+        color: #666;
+        border-top: 1px solid #ececec;
+        background: #fafafa;
+      }
+
+      /* "the whole page, not just the badge" */
+      .proof-archive {
+        display: flex;
+        align-items: center;
+        gap: 22px;
+        max-width: 720px;
+        margin: 22px auto 0;
+        padding: 18px;
+        border: 1px solid #ececec;
+        border-radius: 10px;
+        background: #fafafa;
+      }
+      .proof-archive-img {
+        flex: 0 0 auto;
+        width: 132px;
+        height: 190px;
+        overflow: hidden;
+        border: 1px solid #ddd;
+        border-radius: 5px;
+        background: #fff;
+        -webkit-mask-image: linear-gradient(to bottom, #000 62%, transparent 100%);
+        mask-image: linear-gradient(to bottom, #000 62%, transparent 100%);
+      }
+      .proof-archive-img img {
+        display: block;
+        width: 100%;
+        height: auto;
+      }
+      .proof-archive-text {
+        font-size: 0.95rem;
+        line-height: 1.6;
+        color: #555;
+      }
+      .proof-archive-text strong { color: #232f3e; }
+      .proof-archive-text a { color: #232f3e; }
+
+      .proof-caption {
+        max-width: 640px;
+        margin: 26px auto 0;
+        text-align: center;
+        font-size: 0.98rem;
+        line-height: 1.65;
+        color: #555;
+      }
+      .proof-caption strong { color: #232f3e; }
+
+      @media (max-width: 600px) {
+        .proof-frame { margin-top: 32px; }
+        .proof-body { padding: 20px 16px 18px; }
+        .proof-h { font-size: 1.2rem; }
+        .proof-body p { font-size: 0.95rem; }
+        .proof-mailhead { padding: 12px 14px; gap: 10px; }
+        .proof-avatar { width: 32px; height: 32px; font-size: 16px; }
+        .proof-time { display: none; }
+        .proof-size { display: none; }
+      }
+    </style>
+    <!-- ============ END STYLES ============ -->
+
+
+    <!-- ============ KEEP: MARKUP — replaces the old demo-section ============ -->
+    <section class="demo-section">
+      <div class="container">
+        <h2 class="section-title">Capture Your Success</h2>
+        <p class="section-subtitle">
+          This is what lands in your inbox the moment a badge appears — with the full
+          page screenshot attached and archived to your dashboard.
+        </p>
+
+        <div class="proof-frame">
+          <div class="proof-inner">
+
+            <div class="proof-mailhead">
+              <div class="proof-avatar" aria-hidden="true">🏆</div>
+              <div class="proof-meta">
+                <!-- TODO: replace with your real Resend sending address -->
+                <div class="proof-from">Screenshot Tracker <span>&lt;noreply@screenshottracker.com&gt;</span></div>
+                <div class="proof-subject">🎉 Achievement Unlocked! — Bestseller Badge captured</div>
+              </div>
+              <div class="proof-time">2:26 AM</div>
             </div>
+
+            <div class="proof-body">
+              <h3 class="proof-h">🎉 Achievement Unlocked!</h3>
+              <p>
+                Your book <strong>Murder In Cavendish Square: A Dodo Dorchester Mystery
+                Book 15</strong> has achieved: <strong>#1 New Release</strong>
+              </p>
+              <p class="proof-stamp">Captured July 31, 2026 at 02:26 UTC</p>
+              <p>
+                The full page screenshot is attached — your badge and ranking as they
+                appeared on Amazon at the moment of capture. It's also saved to your
+                dashboard.
+              </p>
+
+              <div class="proof-attach">
+                <span aria-hidden="true">📎</span>
+                <span class="proof-file">bestseller-badge-2026-07-31.png</span>
+                <span class="proof-size">Full page capture</span>
+              </div>
+            </div>
+
+          </div>
         </div>
+
+        <!-- The attached capture. Files are in /img/ — copy to your static folder. -->
+        <figure class="proof-shot">
+          <img src="{{ url_for('static', filename='screenshots/badge-hero.webp') }}"
+               width="738" height="294" loading="lazy"
+               alt="Amazon listing for Murder In Cavendish Square by Ann Sutton, showing the orange #1 New Release badge in British &amp; Irish Humor &amp; Satire.">
+          <figcaption>The attachment — the badge exactly as Amazon displayed it at 02:26 UTC.</figcaption>
+        </figure>
+
+        <div class="proof-archive">
+          <div class="proof-archive-img">
+            <img src="{{ url_for('static', filename='screenshots/full-capture-thumb.webp') }}"
+                 width="520" height="942" loading="lazy"
+                 alt="The full Amazon product page as captured, from the header down to the author bio.">
+          </div>
+          <p class="proof-archive-text">
+            <strong>The whole page, not just the badge.</strong> Every capture archives
+            the complete listing — rankings, review count, categories and all — so you
+            have the full context months later, when the badge is long gone and you
+            need it for a newsletter or a cover.
+          </p>
+        </div>
+
+        <p class="proof-caption">
+          A real capture, sent at <strong>2:26 in the morning</strong>. Amazon never
+          announces these badges and gives no warning before they disappear — this one
+          was caught and archived while the author slept.
+        </p>
+      </div>
     </section>
+    <!-- ============ END MARKUP ============ -->
 
     <!-- Pricing -->
     <section class="pricing" id="pricing">
