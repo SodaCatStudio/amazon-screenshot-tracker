@@ -18,7 +18,7 @@ Covers, in checklist order:
 """
 import os, sys, re, tempfile, traceback
 
-print("SUITE VERSION 7 (admin gate + cleanup) — expect 41 checks. "
+print("SUITE VERSION 15 (full-page durable screenshots) — expect 61 checks. "
       "If this line is missing from your output, you are running the old suite.")
 
 os.chdir(tempfile.mkdtemp(prefix="ast_test_"))
@@ -323,6 +323,222 @@ try:
     row = dict(row) if row else None
     check("T23 feedback written to real DB", row is not None and row["user_email"] == "jane+books@example.com",
           str(row))
+    client.get("/auth/logout")
+
+
+    # T24: check_single_product's real DB path (the COALESCE crash zone).
+    # Stub only the monitor; every query runs for real. Note: the original
+    # crash was Postgres-strictness that SQLite masks — this test proves
+    # the rewritten query executes and the Python-side coalesce works,
+    # not Postgres typing itself (that was verified by the prod deploy).
+    class StubMonitor:
+        def scrape_amazon_page(self, url, need_screenshot=False):
+            return {"success": True, "html": "<html></html>", "screenshot": None}
+        def extract_product_info(self, html):
+            return {"title": "Jane Book", "rank": "1200", "category": "Kindle Store",
+                    "is_bestseller": False, "bestseller_categories": []}
+    real_for_user = main.AmazonMonitor.for_user
+    main.AmazonMonitor.for_user = classmethod(lambda cls, uid: StubMonitor())
+    try:
+        c = db(); cur = c.cursor()
+        cur.execute("SELECT id, product_url, user_id FROM products WHERE product_url LIKE '%TESTJANE%'")
+        prow = dict(cur.fetchone()); c.close()
+        ok = main.check_single_product(prow["id"], prow["product_url"], prow["user_id"], "Jane Book", "Kindle Store", None)
+        check("T24 hourly-check DB path completes", bool(ok), str(ok))
+    finally:
+        main.AmazonMonitor.for_user = real_for_user
+
+
+    # T25: a FAILING product must be stamped so it retries hourly, not every cycle
+    c = db(); cur = c.cursor()
+    cur.execute("UPDATE products SET last_checked = NULL WHERE product_url LIKE '%TESTJANE%'")
+    c.commit(); c.close()
+    real_csp2, real_sleep2 = main.check_single_product, main.time.sleep
+    main.check_single_product = lambda *a, **k: False      # simulate persistent failure
+    main.time.sleep = lambda s: None
+    try:
+        main.check_due_products()
+    finally:
+        main.check_single_product, main.time.sleep = real_csp2, real_sleep2
+    c = db(); cur = c.cursor()
+    cur.execute("SELECT last_checked FROM products WHERE product_url LIKE '%TESTJANE%'")
+    lc = cur.fetchone(); lc = dict(lc)["last_checked"] if lc else None
+    check("T25a failed check stamps last_checked", lc is not None, str(lc))
+    # second pass immediately: product must NOT be due again
+    picked = []
+    main.check_single_product = lambda pid, url, *a, **k: (picked.append(url), False)[1]
+    main.time.sleep = lambda s: None
+    try:
+        main.check_due_products()
+    finally:
+        main.check_single_product, main.time.sleep = real_csp2, real_sleep2
+    c.close()
+    check("T25b failing product not retried within the hour", not any("TESTJANE" in u for u in picked), str(picked))
+
+
+    # T26: URL validation accepts mobile/share formats, rejects garbage.
+    # Found live: the Amazon APP's share link (a.co) was rejected as invalid.
+    c = db(); cur = c.cursor()
+    cur.execute("DELETE FROM products")  # free jane's 2-product limit
+    c.commit(); c.close()
+
+    scraped = []
+    class URLStubMonitor:
+        def __init__(self, *a, **k): pass
+        def scrape_amazon_page(self, url, need_screenshot=True):
+            scraped.append(url)
+            return {"success": True, "html": "<html></html>", "screenshot": b"png"}
+        def extract_product_info(self, html):
+            return {"title": "T26 Book", "rank": "500", "category": "Kindle Store",
+                    "is_bestseller": False, "bestseller_categories": []}
+    real_am = main.AmazonMonitor
+    main.AmazonMonitor = URLStubMonitor
+    client.post("/auth/login", data={"email": "jane+books@example.com", "password": "N3w!Passw0rd##"})
+    try:
+        r = client.post("/add_product", data={"url": "definitely not a link", "target_categories": ""})
+        check("T26a garbage rejected", not scraped and r.status_code == 302, f"{r.status_code} scraped={scraped}")
+
+        r = client.post("/add_product", data={
+            "url": "Check out this book! https://a.co/d/8xYzAbC via @amazon", "target_categories": ""})
+        check("T26b app share-text with a.co link accepted",
+              scraped and scraped[-1] == "https://a.co/d/8xYzAbC", str(scraped))
+
+        c = db(); cur = c.cursor(); cur.execute("DELETE FROM products"); c.commit(); c.close()
+        r = client.post("/add_product", data={
+            "url": "https://www.amazon.com/gp/aw/d/B0TESTASIN", "target_categories": ""})
+        check("T26c mobile-web /gp/aw/d/ URL accepted",
+              scraped and "gp/aw/d" in scraped[-1], str(scraped[-1:]))
+
+        c = db(); cur = c.cursor(); cur.execute("DELETE FROM products"); c.commit(); c.close()
+        r = client.post("/add_product", data={
+            "url": "amazon.co.uk/dp/B0TESTASIN", "target_categories": ""})
+        check("T26d schemeless international URL accepted",
+              scraped and scraped[-1] == "https://amazon.co.uk/dp/B0TESTASIN", str(scraped[-1:]))
+    finally:
+        main.AmazonMonitor = real_am
+        client.get("/auth/logout")
+
+
+    # T27: badge vocabulary — parser must recognize all badge species
+    mon = main.AmazonMonitor("fake-key")
+    def parse(badge_text):
+        html = f'<html><body><span id="productTitle">Badge Test Book</span>' \
+               f'<span class="badge-wrapper">{badge_text}</span>' \
+               f'<p>Best Sellers Rank: #42 in Kindle Store</p></body></html>'
+        return mon.extract_product_info(html)
+    check("T27a 'Top New Release' badge detected",
+          parse("Top New Release in British &amp; Irish Humor &amp; Satire")["is_bestseller"])
+    check("T27b '#1 New Release' badge detected",
+          parse("#1 New Release in Mystery")["is_bestseller"])
+    check("T27c plain page (no badge) not flagged",
+          not parse("Ships from Amazon")["is_bestseller"])
+
+
+    # T28: unknown badge species must LOG but not trigger
+    import io, contextlib
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        info = parse("Editors' Pick in Literary Fiction")
+    out = buf.getvalue()
+    check("T28a unknown badge does not trigger", not info["is_bestseller"])
+    check("T28b unknown badge is logged for vocabulary review",
+          "Unrecognized badge-like text" in out and "editors' pick" in out, out[-200:])
+
+
+    # T29: watchdog noise filter — known non-achievements stay silent,
+    # genuinely unknown text still logs
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        parse("Just Released"); parse("-61%")
+    check("T29a known noise (just released, -NN%) not logged",
+          "Unrecognized badge-like text" not in buf.getvalue(), buf.getvalue()[-150:])
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        parse("Editors' Pick in Cozy Mystery")
+    check("T29b genuinely unknown text still logs",
+          "Unrecognized badge-like text" in buf.getvalue(), buf.getvalue()[-150:])
+
+
+    # T30: badge evidence must be verified in the SCREENSHOT request's own page
+    from PIL import Image as _Img
+    _pngbuf = io.BytesIO(); _Img.new("RGB", (1300, 2000), "white").save(_pngbuf, "PNG")
+    REAL_PNG = _pngbuf.getvalue()
+    BADGE_HTML = ('<html><body><span id="productTitle">Evidence Book</span>'
+                  '<span class="badge-wrapper">#1 New Release in Cozy Mystery</span>'
+                  '<p>#77 in Kindle Store</p></body></html>')
+    PLAIN_HTML = ('<html><body><span id="productTitle">Evidence Book</span>'
+                  '<p>#77 in Kindle Store</p></body></html>')
+
+    c = db(); cur = c.cursor()
+    cur.execute("DELETE FROM products")
+    cur.execute("INSERT INTO products (user_id, user_email, product_url, product_title) VALUES (?,?,?,?)",
+                (ujane["id"], ujane["email"], "https://amazon.com/dp/EVIDENCE", "Evidence Book"))
+    c.commit()
+    cur.execute("SELECT id FROM products WHERE product_url LIKE '%EVIDENCE%'")
+    evid = dict(cur.fetchone())["id"]; c.close()
+
+    class EvidenceMonitor:
+        def __init__(self, screenshot_html): self.sh = screenshot_html; self.calls = 0
+        def scrape_amazon_page(self, url, need_screenshot=False):
+            self.calls += 1
+            if need_screenshot:
+                return {"success": True, "html": self.sh, "screenshot": REAL_PNG}
+            return {"success": True, "html": BADGE_HTML, "screenshot": None}
+        def extract_product_info(self, html):
+            return main.AmazonMonitor("k").extract_product_info(html)
+
+    real_fu = main.AmazonMonitor.for_user
+    n0 = len(sent_emails)
+
+    # T30a: screenshot render LACKS the badge -> reject, no email, retriable
+    main.AmazonMonitor.for_user = classmethod(lambda cls, uid: EvidenceMonitor(PLAIN_HTML))
+    main.time.sleep = lambda s: None
+    try:
+        ok = main.check_single_product(evid, "https://amazon.com/dp/EVIDENCE", ujane["id"], "Evidence Book", "Kindle Store", None)
+    finally:
+        main.AmazonMonitor.for_user = real_fu
+    c = db(); cur = c.cursor()
+    cur.execute("SELECT has_bestseller_badge FROM products WHERE id=?", (evid,))
+    hb = dict(cur.fetchone())["has_bestseller_badge"]; c.close()
+    check("T30a mismatched render: no achievement email sent", len(sent_emails) == n0, str(len(sent_emails)-n0))
+    check("T30b mismatched render: badge state stays unset (retries next hour)", not hb, str(hb))
+
+    # T30c: screenshot render CONTAINS the badge -> email with full attachment
+    c = db(); cur = c.cursor()
+    cur.execute("UPDATE products SET last_checked = NULL WHERE id=?", (evid,)); c.commit(); c.close()
+    main.AmazonMonitor.for_user = classmethod(lambda cls, uid: EvidenceMonitor(BADGE_HTML))
+    try:
+        ok = main.check_single_product(evid, "https://amazon.com/dp/EVIDENCE", ujane["id"], "Evidence Book", "Kindle Store", None)
+    finally:
+        main.AmazonMonitor.for_user = real_fu
+    new_mails = sent_emails[n0:]
+    check("T30c verified render: achievement email sent", any("Achievement" in e["subject"] for e in new_mails),
+          str([e["subject"] for e in new_mails]))
+    c = db(); cur = c.cursor()
+    cur.execute("SELECT has_bestseller_badge FROM products WHERE id=?", (evid,))
+    hb = dict(cur.fetchone())["has_bestseller_badge"]; c.close()
+    check("T30d verified render: badge state persisted", bool(hb), str(hb))
+
+
+    # T31: achievement screenshot stored as base64 in DB (baseline pattern)
+    # and servable via /view_screenshot — riding on T30c's verified capture
+    c = db(); cur = c.cursor()
+    cur.execute("SELECT id, screenshot_data FROM bestseller_screenshots ORDER BY id DESC LIMIT 1")
+    row = cur.fetchone(); c.close()
+    row = dict(row) if row else None
+    import base64 as _b64
+    is_png_b64 = False
+    if row and row["screenshot_data"]:
+        try:
+            is_png_b64 = _b64.b64decode(row["screenshot_data"])[:4] == b"\x89PNG"
+        except Exception:
+            is_png_b64 = False
+    check("T31a achievement stored as base64 PNG in DB", bool(is_png_b64),
+          str(row["screenshot_data"][:30] if row and row["screenshot_data"] else row))
+    client.post("/auth/login", data={"email": "jane+books@example.com", "password": "N3w!Passw0rd##"})
+    r = client.get(f"/screenshot/{row["id"]}")
+    check("T31b /view_screenshot serves it from the real DB",
+          r.status_code == 200 and r.data[:4] == b"\x89PNG", f"{r.status_code} {r.data[:8]}")
     client.get("/auth/logout")
 
 except Exception:
