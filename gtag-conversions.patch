@@ -1,0 +1,165 @@
+diff --git a/main.py b/main.py
+index 96a70d5..b5250d6 100644
+--- a/main.py
++++ b/main.py
+@@ -3767,6 +3767,10 @@ def verify_email():
+         conn.commit()
+         print(f"✅ User {email} verified successfully!")
+         flash('Email verified successfully! You can now log in.', 'success')
++        # Redirect with ?verified=1 so the login page fires the Google Ads
++        # signup conversion exactly once, only on a genuinely verified account.
++        # (finally: below still runs and closes the connection.)
++        return redirect(url_for('auth.login', verified='1'))
+ 
+     except Exception as e:
+         print(f"❌ Email verification error: {e}")
+@@ -8101,8 +8105,29 @@ def fix_stripe_columns():
+ @app.route('/success')
+ def subscription_success():
+     """Page after successful payment"""
+-    return render_template('success.html', 
+-        message="Payment successful! Check your email to complete setup.")
++    # Google Ads purchase conversion: verify the payment with Stripe before the
++    # template is allowed to fire the conversion tag. amount_total is pulled from
++    # the verified session so each plan (weekly/monthly/annual) reports its real
++    # price, and the session id is passed as transaction_id to dedupe reloads.
++    conversion = {'fire': False}
++    session_id = request.args.get('session_id')
++    if session_id:
++        try:
++            cs = stripe.checkout.Session.retrieve(session_id)
++            if cs.payment_status == 'paid':
++                conversion = {
++                    'fire': True,
++                    'value': (cs.amount_total or 0) / 100.0,  # cents -> currency units
++                    'currency': (cs.currency or 'usd').upper(),
++                    'txn_id': cs.id,
++                    'email': (cs.customer_details.email if cs.customer_details else ''),
++                }
++        except Exception as e:
++            print(f"⚠️ Could not verify checkout session for conversion: {e}")
++
++    return render_template('success.html',
++        message="Payment successful! Check your email to complete setup.",
++        conversion=conversion)
+ 
+ @app.route('/cancel')
+ def subscription_cancel():
+diff --git a/templates/auth/login.html b/templates/auth/login.html
+index 5db2f5f..b59dadf 100644
+--- a/templates/auth/login.html
++++ b/templates/auth/login.html
+@@ -4,6 +4,7 @@
+     <meta charset="UTF-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+     <meta name="robots" content="noindex, nofollow">
++    {% include 'partials/gtag.html' %}
+     <title>Login - Amazon Bestseller Monitor</title>
+     <style>
+         * {
+@@ -344,5 +345,15 @@
+             loginBtn.textContent = 'Logging in...';
+         });
+     </script>
++
++    {% if request.args.get('verified') %}
++    <!-- Google Ads: free-signup conversion. verify_email redirects here with
++         ?verified=1 after an account is activated, so this fires once per
++         verified signup. Optimize the campaign toward this while purchase
++         volume is still too low for Google to learn on purchases. -->
++    <script>
++      gtag('event', 'conversion', { 'send_to': 'AW-18437322624/SIGNUP_LABEL' });
++    </script>
++    {% endif %}
+ </body>
+ </html>
+\ No newline at end of file
+diff --git a/templates/auth/register.html b/templates/auth/register.html
+index 85d7c41..5058e4d 100644
+--- a/templates/auth/register.html
++++ b/templates/auth/register.html
+@@ -4,6 +4,7 @@
+     <meta charset="UTF-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+     <meta name="robots" content="noindex, nofollow">
++    {% include 'partials/gtag.html' %}
+     <title>Sign Up - Amazon Bestseller Monitor</title>
+     <style>
+         * {
+diff --git a/templates/landing.html b/templates/landing.html
+index ac852d8..d7dfddc 100644
+--- a/templates/landing.html
++++ b/templates/landing.html
+@@ -3,6 +3,7 @@
+ <head>
+     <meta charset="UTF-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1.0">
++    {% include 'partials/gtag.html' %}
+     <title>Amazon Screenshot Tracker - Capture Your Success Automatically</title>
+     <meta name="description" content="Automatically capture screenshots when your Amazon products achieve bestseller status. Track rankings, set category goals, and get instant notifications.">
+     <meta name="facebook-domain-verification" content="rkch02n9yb1lb25ncudpl8hafli0bo" />
+diff --git a/templates/partials/gtag.html b/templates/partials/gtag.html
+new file mode 100644
+index 0000000..2c9cd94
+--- /dev/null
++++ b/templates/partials/gtag.html
+@@ -0,0 +1,13 @@
++{# Google tag (gtag.js) base — Google Ads ID AW-18437322624 (already set below).
++   Included in the <head> of every funnel page. Because these templates don't
++   share a base layout, add this same one-line {% include 'partials/gtag.html' %}
++   to the <head> of any other page you want covered for remarketing (dashboard,
++   index, add_product, etc.). The per-conversion LABELS live in success.html and
++   auth/login.html — replace PURCHASE_LABEL / SIGNUP_LABEL there. #}
++<script async src="https://www.googletagmanager.com/gtag/js?id=AW-18437322624"></script>
++<script>
++  window.dataLayer = window.dataLayer || [];
++  function gtag(){dataLayer.push(arguments);}
++  gtag('js', new Date());
++  gtag('config', 'AW-18437322624');
++</script>
+diff --git a/templates/pricing.html b/templates/pricing.html
+index 98fc979..2362deb 100644
+--- a/templates/pricing.html
++++ b/templates/pricing.html
+@@ -4,6 +4,7 @@
+     <title>Pricing - Screenshot Tracker</title>
+     <meta charset="UTF-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1.0">
++    {% include 'partials/gtag.html' %}
+     <script src="https://cdn.paddle.com/paddle/paddle.js"></script>
+     <style>
+         * {
+diff --git a/templates/success.html b/templates/success.html
+index e14ae4b..cc63285 100644
+--- a/templates/success.html
++++ b/templates/success.html
+@@ -4,6 +4,7 @@
+     <title>Payment Successful - Screenshot Tracker</title>
+     <meta charset="UTF-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1.0">
++    {% include 'partials/gtag.html' %}
+     <style>
+         body {
+             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+@@ -56,5 +57,20 @@
+ 
+         <p>Questions? Email us at <a href="mailto:support@screenshottracker.com">support@screenshottracker.com</a></p>
+     </div>
++
++    {% if conversion and conversion.fire %}
++    <!-- Google Ads: purchase conversion. Only rendered when the Stripe session
++         was retrieved server-side and payment_status == 'paid', so a page
++         reload or a direct hit on /success never counts a false sale. -->
++    <script>
++      gtag('set', 'user_data', { "email": "{{ conversion.email }}" });
++      gtag('event', 'conversion', {
++        'send_to': 'AW-18437322624/PURCHASE_LABEL',
++        'value': {{ conversion.value }},
++        'currency': '{{ conversion.currency }}',
++        'transaction_id': '{{ conversion.txn_id }}'
++      });
++    </script>
++    {% endif %}
+ </body>
+ </html>
+\ No newline at end of file

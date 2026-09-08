@@ -3767,6 +3767,10 @@ def verify_email():
         conn.commit()
         print(f"✅ User {email} verified successfully!")
         flash('Email verified successfully! You can now log in.', 'success')
+        # Redirect with ?verified=1 so the login page fires the Google Ads
+        # signup conversion exactly once, only on a genuinely verified account.
+        # (finally: below still runs and closes the connection.)
+        return redirect(url_for('auth.login', verified='1'))
 
     except Exception as e:
         print(f"❌ Email verification error: {e}")
@@ -8101,8 +8105,29 @@ def fix_stripe_columns():
 @app.route('/success')
 def subscription_success():
     """Page after successful payment"""
-    return render_template('success.html', 
-        message="Payment successful! Check your email to complete setup.")
+    # Google Ads purchase conversion: verify the payment with Stripe before the
+    # template is allowed to fire the conversion tag. amount_total is pulled from
+    # the verified session so each plan (weekly/monthly/annual) reports its real
+    # price, and the session id is passed as transaction_id to dedupe reloads.
+    conversion = {'fire': False}
+    session_id = request.args.get('session_id')
+    if session_id:
+        try:
+            cs = stripe.checkout.Session.retrieve(session_id)
+            if cs.payment_status == 'paid':
+                conversion = {
+                    'fire': True,
+                    'value': (cs.amount_total or 0) / 100.0,  # cents -> currency units
+                    'currency': (cs.currency or 'usd').upper(),
+                    'txn_id': cs.id,
+                    'email': (cs.customer_details.email if cs.customer_details else ''),
+                }
+        except Exception as e:
+            print(f"⚠️ Could not verify checkout session for conversion: {e}")
+
+    return render_template('success.html',
+        message="Payment successful! Check your email to complete setup.",
+        conversion=conversion)
 
 @app.route('/cancel')
 def subscription_cancel():

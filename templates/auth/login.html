@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="robots" content="noindex, nofollow">
+    {% include 'partials/gtag.html' %}
     <title>Login - Amazon Bestseller Monitor</title>
     <style>
         * {
@@ -344,5 +345,15 @@
             loginBtn.textContent = 'Logging in...';
         });
     </script>
+
+    {% if request.args.get('verified') %}
+    <!-- Google Ads: free-signup conversion. verify_email redirects here with
+         ?verified=1 after an account is activated, so this fires once per
+         verified signup. Optimize the campaign toward this while purchase
+         volume is still too low for Google to learn on purchases. -->
+    <script>
+      gtag('event', 'conversion', { 'send_to': 'AW-18437322624/SIGNUP_LABEL' });
+    </script>
+    {% endif %}
 </body>
 </html>

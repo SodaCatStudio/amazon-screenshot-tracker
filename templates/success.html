@@ -4,6 +4,7 @@
     <title>Payment Successful - Screenshot Tracker</title>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    {% include 'partials/gtag.html' %}
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -56,5 +57,20 @@
 
         <p>Questions? Email us at <a href="mailto:support@screenshottracker.com">support@screenshottracker.com</a></p>
     </div>
+
+    {% if conversion and conversion.fire %}
+    <!-- Google Ads: purchase conversion. Only rendered when the Stripe session
+         was retrieved server-side and payment_status == 'paid', so a page
+         reload or a direct hit on /success never counts a false sale. -->
+    <script>
+      gtag('set', 'user_data', { "email": "{{ conversion.email }}" });
+      gtag('event', 'conversion', {
+        'send_to': 'AW-18437322624/PURCHASE_LABEL',
+        'value': {{ conversion.value }},
+        'currency': '{{ conversion.currency }}',
+        'transaction_id': '{{ conversion.txn_id }}'
+      });
+    </script>
+    {% endif %}
 </body>
 </html>

@@ -1,0 +1,13 @@
+{# Google tag (gtag.js) base — Google Ads ID AW-18437322624 (already set below).
+   Included in the <head> of every funnel page. Because these templates don't
+   share a base layout, add this same one-line {% include 'partials/gtag.html' %}
+   to the <head> of any other page you want covered for remarketing (dashboard,
+   index, add_product, etc.). The per-conversion LABELS live in success.html and
+   auth/login.html — replace PURCHASE_LABEL / SIGNUP_LABEL there. #}
+<script async src="https://www.googletagmanager.com/gtag/js?id=AW-18437322624"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+  gtag('config', 'AW-18437322624');
+</script>
