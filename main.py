@@ -315,6 +315,12 @@ def ensure_scheduler_running():
 # daily job runs (server local time). Both overridable via env vars.
 RENEWAL_REMINDER_DAYS = int(os.environ.get('RENEWAL_REMINDER_DAYS', '3'))
 RENEWAL_REMINDER_TIME = os.environ.get('RENEWAL_REMINDER_TIME', '13:00')
+# Master switch for the CUSTOM renewal reminder EMAIL. OFF by default so that
+# Stripe's built-in "upcoming renewals" email stays the single source of
+# renewal emails and customers don't get two. The dashboard renewal banner is
+# independent of this flag and always shows. Set ENABLE_RENEWAL_REMINDERS=true
+# to turn the custom email on (and disable Stripe's to avoid duplicates).
+ENABLE_RENEWAL_REMINDERS = os.environ.get('ENABLE_RENEWAL_REMINDERS', 'false').lower() == 'true'
 
 
 def _build_renewal_reminder_html(tier, renewal_date_str, days_left):
@@ -355,6 +361,11 @@ def send_renewal_reminders():
     scheduled cancellation (cancel_at_period_end) are skipped, since their
     subscription won't renew.
     """
+    if not ENABLE_RENEWAL_REMINDERS:
+        # Custom reminder email disabled — Stripe's built-in renewal email is
+        # the source of truth. The dashboard banner still shows independently.
+        return 0
+
     if not email_notifier.is_configured():
         print("📧 Renewal reminders skipped: email not configured")
         return 0
