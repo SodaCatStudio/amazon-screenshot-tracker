@@ -85,6 +85,25 @@
             background: linear-gradient(135deg, #f8d7da 0%, #f5c6cb 100%);
             border: 2px solid #dc3545;
         }
+        .subscription-banner.renewal {
+            background: linear-gradient(135deg, #e7f1ff 0%, #cfe2ff 100%);
+            border: 2px solid #0d6efd;
+        }
+        .subscription-banner.ending {
+            background: linear-gradient(135deg, #f1f3f5 0%, #e2e6ea 100%);
+            border: 2px solid #adb5bd;
+        }
+        .banner-dismiss {
+            background: none;
+            border: none;
+            font-size: 22px;
+            line-height: 1;
+            cursor: pointer;
+            color: #333;
+            opacity: 0.5;
+            padding: 0 4px;
+        }
+        .banner-dismiss:hover { opacity: 1; }
         .subscription-info h3 {
             margin: 0 0 5px 0;
             color: #232f3e;
@@ -721,6 +740,57 @@
         </div>
         {% endif %}
         <!-- ========== END SUBSCRIPTION BANNER ========== -->
+
+        <!-- ========== RENEWAL / CANCELLATION NOTICE ========== -->
+        {% if subscription_status == 'active' and cancel_at_period_end and renewal_date_str %}
+        <div class="subscription-banner ending">
+            <div class="subscription-info">
+                <h3>Subscription ending</h3>
+                <p>Your plan is set to cancel and won't renew. You keep full access until <strong>{{ renewal_date_str }}</strong>.</p>
+            </div>
+            <div class="subscription-cta">
+                <a href="{{ url_for('change_subscription') }}" class="btn btn-info">Resume / Change Plan</a>
+            </div>
+        </div>
+        {% elif subscription_status == 'active' and not cancel_at_period_end
+                and days_until_renewal is not none
+                and days_until_renewal >= 0
+                and days_until_renewal <= renewal_reminder_days
+                and renewal_date_str %}
+        <div class="subscription-banner renewal" id="renewal-reminder-banner" data-renewal="{{ renewal_date_str }}">
+            <div class="subscription-info">
+                <h3>🔔 Your subscription renews soon</h3>
+                <p>Your {{ subscription_tier|title }} plan will automatically renew on <strong>{{ renewal_date_str }}</strong>
+                   ({% if days_until_renewal == 0 %}today{% elif days_until_renewal == 1 %}in 1 day{% else %}in {{ days_until_renewal }} days{% endif %}).
+                   No action needed to continue.</p>
+            </div>
+            <div class="subscription-cta" style="display:flex; align-items:center; gap:10px;">
+                <a href="{{ url_for('cancel_subscription') }}" class="btn btn-secondary">Manage / Cancel</a>
+                <button type="button" class="banner-dismiss" title="Dismiss" onclick="dismissRenewalBanner()">&times;</button>
+            </div>
+        </div>
+        <script>
+            // Keep the reminder dismissed for this browser session only, keyed
+            // to the renewal date so a new cycle shows a fresh reminder.
+            (function () {
+                var banner = document.getElementById('renewal-reminder-banner');
+                if (!banner) return;
+                try {
+                    var key = 'renewalDismissed:' + banner.dataset.renewal;
+                    if (sessionStorage.getItem(key) === '1') banner.style.display = 'none';
+                } catch (e) { /* storage unavailable — just show the banner */ }
+            })();
+            function dismissRenewalBanner() {
+                var banner = document.getElementById('renewal-reminder-banner');
+                if (!banner) return;
+                banner.style.display = 'none';
+                try {
+                    sessionStorage.setItem('renewalDismissed:' + banner.dataset.renewal, '1');
+                } catch (e) { /* ignore */ }
+            }
+        </script>
+        {% endif %}
+        <!-- ========== END RENEWAL / CANCELLATION NOTICE ========== -->
         
         <div class="dashboard-header">
             <h1>🏆 Your Amazon Dashboard</h1>

@@ -310,12 +310,132 @@ def ensure_scheduler_running():
             scheduler_running = False
             return False
 
+# ============= RENEWAL REMINDERS =============
+# How many days before renewal to send the reminder, and what time of day the
+# daily job runs (server local time). Both overridable via env vars.
+RENEWAL_REMINDER_DAYS = int(os.environ.get('RENEWAL_REMINDER_DAYS', '3'))
+RENEWAL_REMINDER_TIME = os.environ.get('RENEWAL_REMINDER_TIME', '13:00')
+
+
+def _build_renewal_reminder_html(tier, renewal_date_str, days_left):
+    """HTML body for the 'your subscription renews soon' email."""
+    tier_label = (tier or 'subscription').title()
+    day_word = 'day' if days_left == 1 else 'days'
+    manage_url = os.environ.get('APP_BASE_URL', '').rstrip('/')
+    manage_link = (
+        f'<p><a href="{manage_url}/dashboard">Manage your subscription</a></p>'
+        if manage_url else ''
+    )
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <body>
+        <h2>Your subscription renews in {days_left} {day_word}</h2>
+        <p>This is a friendly heads-up that your <strong>{tier_label}</strong>
+           plan on Screenshot Tracker will <strong>automatically renew on
+           {renewal_date_str}</strong>.</p>
+        <p>You don't need to do anything &mdash; your monitoring will keep
+           running without interruption.</p>
+        <p>If you'd rather not renew, you can cancel any time before that date
+           from your dashboard, and you'll keep access until the renewal date.</p>
+        {manage_link}
+        <p>Thanks for using Screenshot Tracker!</p>
+    </body>
+    </html>
+    """
+
+
+def send_renewal_reminders():
+    """Email active subscribers ~RENEWAL_REMINDER_DAYS before auto-renewal.
+
+    Runs once daily from the scheduler thread. Safe to run repeatedly: the
+    renewal_reminder_sent_for column records which renewal date each user was
+    last reminded about, so a user gets exactly ONE reminder per billing cycle
+    even though this fires every day within the reminder window. Users who have
+    scheduled cancellation (cancel_at_period_end) are skipped, since their
+    subscription won't renew.
+    """
+    if not email_notifier.is_configured():
+        print("📧 Renewal reminders skipped: email not configured")
+        return 0
+
+    now = datetime.now()
+    window_end = now + timedelta(days=RENEWAL_REMINDER_DAYS)
+    sent = 0
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(q("""
+            SELECT id, email, subscription_tier, subscription_expires
+            FROM users
+            WHERE subscription_status = 'active'
+              AND (cancel_at_period_end IS NULL OR cancel_at_period_end = FALSE)
+              AND subscription_expires IS NOT NULL
+              AND subscription_expires > %s
+              AND subscription_expires <= %s
+              AND (renewal_reminder_sent_for IS NULL
+                   OR renewal_reminder_sent_for <> subscription_expires)
+        """), (now, window_end))
+        due = cursor.fetchall()
+        print(f"📧 Renewal reminders: {len(due)} user(s) due")
+
+        for row in due:
+            user_id = row['id']
+            email = row['email']
+            tier = row['subscription_tier']
+            expires = row['subscription_expires']
+            try:
+                renewal_dt = expires if hasattr(expires, 'strftime') \
+                    else datetime.fromisoformat(str(expires))
+                days_left = max(1, (renewal_dt.date() - now.date()).days)
+                date_str = renewal_dt.strftime('%B %d, %Y').replace(' 0', ' ')
+
+                email_notifier.send_email(
+                    email,
+                    f"Your Screenshot Tracker subscription renews in "
+                    f"{days_left} day{'s' if days_left != 1 else ''}",
+                    _build_renewal_reminder_html(tier, date_str, days_left),
+                )
+                # Record the exact renewal date we reminded about, so we don't
+                # remind again for this cycle.
+                cursor.execute(q("""
+                    UPDATE users
+                    SET renewal_reminder_sent_for = %s
+                    WHERE id = %s
+                """), (expires, user_id))
+                conn.commit()
+                sent += 1
+                print(f"   ✅ Reminder sent to {email} (renews {date_str})")
+            except Exception as e:
+                conn.rollback()
+                print(f"   ❌ Failed to send renewal reminder to {email}: {e}")
+        return sent
+    except Exception as e:
+        print(f"❌ send_renewal_reminders error: {e}")
+        import traceback
+        traceback.print_exc()
+        return sent
+    finally:
+        conn.close()
+
+
 def run_scheduler():
     """Per-product intelligent scheduler - checks each product 60 minutes after last check"""
     global scheduler_running, scheduler_initialized, scheduler_thread
 
     print("🎯 Intelligent Per-Product Scheduler Started")
     print("📊 Each product will be checked 60 minutes after its last check")
+
+    # Register the daily renewal-reminder job. tag() lets us clear only this
+    # job on a scheduler restart so we never stack duplicates.
+    try:
+        schedule.clear('renewal-reminders')
+        schedule.every().day.at(RENEWAL_REMINDER_TIME).do(
+            send_renewal_reminders
+        ).tag('renewal-reminders')
+        print(f"📧 Renewal-reminder job scheduled daily at {RENEWAL_REMINDER_TIME}")
+    except Exception as e:
+        print(f"⚠️ Could not register renewal-reminder job: {e}")
 
     scheduler_running = True
     consecutive_errors = 0
@@ -326,6 +446,9 @@ def run_scheduler():
             if not os.environ.get('ENABLE_SCHEDULER', 'true').lower() == 'true':
                 print("🛑 Scheduler disabled via environment variable")
                 break
+
+            # Fire any due time-based jobs (e.g. the daily renewal reminder).
+            schedule.run_pending()
 
             products_checked = check_due_products()
 
@@ -590,6 +713,15 @@ class DatabaseManager:
         self.add_column_if_not_exists(cursor, 'users', 'subscription_status', "VARCHAR(50) DEFAULT 'inactive'")
         self.add_column_if_not_exists(cursor, 'users', 'subscription_tier', 'VARCHAR(50)')
         self.add_column_if_not_exists(cursor, 'users', 'subscription_expires', 'TIMESTAMP')
+        # Renewal-reminder + graceful-cancel support:
+        #   cancel_at_period_end      -> user has scheduled cancellation; keeps
+        #                                access until subscription_expires, and
+        #                                must NOT receive a renewal reminder.
+        #   renewal_reminder_sent_for -> the subscription_expires value we last
+        #                                emailed a reminder about, so the daily
+        #                                job sends exactly one reminder per cycle.
+        self.add_column_if_not_exists(cursor, 'users', 'cancel_at_period_end', 'BOOLEAN DEFAULT FALSE')
+        self.add_column_if_not_exists(cursor, 'users', 'renewal_reminder_sent_for', 'TIMESTAMP')
         self.add_column_if_not_exists(cursor, 'users', 'stripe_subscription_id', 'VARCHAR(100)')
         self.add_column_if_not_exists(cursor, 'users', 'stripe_customer_id', 'VARCHAR(100)')
         self.add_column_if_not_exists(cursor, 'users', 'setup_token', 'VARCHAR(255)')
@@ -5589,36 +5721,60 @@ def cancel_subscription():
             flash('Incorrect password', 'error')
             return render_template('cancel_subscription.html')
 
-        # Cancel in Stripe
+        # Schedule cancellation at period end in Stripe.
+        # IMPORTANT: we no longer delete the subscription outright, and we no
+        # longer zero out access here. The user keeps full access until the
+        # paid period ends; Stripe then fires customer.subscription.deleted,
+        # which flips status='cancelled'/max_products=0 (see
+        # handle_subscription_deleted). This matches what the confirmation
+        # email/flash promise and avoids charging-vs-access contradictions.
         try:
+            access_until = None
             if subscription_id:
-                stripe.Subscription.delete(subscription_id)
-                print(f"✅ Cancelled Stripe subscription {subscription_id}")
-
-            # Update database
-            if get_db_type() == 'postgresql':
-                cursor.execute("""
-                    UPDATE users 
-                    SET subscription_status = 'cancelled',
-                        max_products = 0
-                    WHERE id = %s
-                """, (current_user.id,))
+                updated_sub = stripe.Subscription.modify(
+                    subscription_id, cancel_at_period_end=True
+                )
+                access_until = _sub_period_end(updated_sub)
+                print(f"✅ Scheduled cancellation for Stripe subscription "
+                      f"{subscription_id} at period end ({access_until})")
             else:
-                cursor.execute("""
-                    UPDATE users 
-                    SET subscription_status = 'cancelled',
-                        max_products = 0
-                    WHERE id = ?
-                """, (current_user.id,))
+                print("⚠️ No stripe_subscription_id on user; marking "
+                      "cancel_at_period_end without a Stripe call.")
 
+            # Mark scheduled-to-cancel. Keep subscription_status/max_products
+            # intact. Sync subscription_expires to Stripe's real period end
+            # when we have it, otherwise leave the existing value alone.
+            cursor.execute(q("""
+                UPDATE users
+                SET cancel_at_period_end = TRUE,
+                    subscription_expires = COALESCE(%s, subscription_expires)
+                WHERE id = %s
+            """), (access_until, current_user.id))
             conn.commit()
+
+            # Read back the effective end date for user-facing messaging.
+            cursor.execute(
+                q("SELECT subscription_expires FROM users WHERE id = %s"),
+                (current_user.id,)
+            )
+            row = cursor.fetchone()
             conn.close()
 
-            # Send cancellation email
-            if email_notifier.is_configured():
-                send_cancellation_email(current_user.email)
+            end_dt = row['subscription_expires'] if row else None
+            end_str = end_dt.strftime('%B %d, %Y').replace(' 0', ' ') \
+                if hasattr(end_dt, 'strftime') else None
 
-            flash('Your subscription has been cancelled. You will not be charged again.', 'success')
+            # Send cancellation confirmation email
+            if email_notifier.is_configured():
+                send_cancellation_email(current_user.email, end_str)
+
+            if end_str:
+                flash(f'Your subscription is set to cancel and will not renew. '
+                      f'You keep full access until {end_str}.', 'success')
+            else:
+                flash('Your subscription is set to cancel and will not renew. '
+                      'You keep access until the end of your current billing '
+                      'period.', 'success')
             return redirect(url_for('dashboard'))
 
         except Exception as e:
@@ -5630,15 +5786,27 @@ def cancel_subscription():
     # GET request - show cancellation form
     return render_template('cancel_subscription.html')
 
-def send_cancellation_email(email):
-    """Send cancellation confirmation email"""
-    html_content = """
+def send_cancellation_email(email, access_until=None):
+    """Send cancellation confirmation email.
+
+    access_until: optional human-readable date string (e.g. 'March 5, 2026')
+    for when the user's access ends. When provided, the email states it
+    explicitly so the promise matches the actual cancel-at-period-end behavior.
+    """
+    access_line = (
+        f"<p>You will not be charged again. You keep full access until "
+        f"<strong>{access_until}</strong>, when your subscription ends.</p>"
+        if access_until else
+        "<p>You will not be charged again, but you can continue using the "
+        "service until the end of your current billing period.</p>"
+    )
+    html_content = f"""
     <!DOCTYPE html>
     <html>
     <body>
-        <h2>Subscription Cancelled</h2>
-        <p>Your Screenshot Tracker subscription has been cancelled.</p>
-        <p>You will not be charged again, but you can continue using the service until the end of your current billing period.</p>
+        <h2>Subscription Cancellation Scheduled</h2>
+        <p>Your Screenshot Tracker subscription is set to cancel and will not renew.</p>
+        {access_line}
 
         <h3>Refund Policy</h3>
         <p>If you cancelled within 7 days of your initial purchase, you may be eligible for a refund. 
@@ -5932,17 +6100,34 @@ def dashboard_view():
             # them, so the undefined variable made EVERY user (active
             # subscribers included) see the 'Subscription Required' banner.
             cursor.execute(q('''
-                SELECT subscription_status, subscription_tier, max_products
+                SELECT subscription_status, subscription_tier, max_products,
+                       subscription_expires, cancel_at_period_end
                 FROM users WHERE id = %s
             '''), (user_id,))
             sub_raw = cursor.fetchone()
+            subscription_expires = None
+            cancel_at_period_end = False
             if sub_raw:
                 sub = dict(sub_raw)
                 subscription_status = sub.get('subscription_status') or 'inactive'
                 subscription_tier = sub.get('subscription_tier')
                 max_products = sub.get('max_products') or 0
+                subscription_expires = sub.get('subscription_expires')
+                cancel_at_period_end = bool(sub.get('cancel_at_period_end'))
             else:
                 subscription_status, subscription_tier, max_products = 'inactive', None, 0
+
+            # Compute renewal-reminder display state for the dashboard banner.
+            renewal_date_str = None
+            days_until_renewal = None
+            if subscription_expires is not None:
+                try:
+                    exp_dt = subscription_expires if hasattr(subscription_expires, 'strftime') \
+                        else datetime.fromisoformat(str(subscription_expires))
+                    renewal_date_str = exp_dt.strftime('%B %d, %Y').replace(' 0', ' ')
+                    days_until_renewal = (exp_dt.date() - datetime.now().date()).days
+                except Exception:
+                    renewal_date_str, days_until_renewal = None, None
 
             # Get products
             if get_db_type() == 'postgresql':
@@ -6037,7 +6222,11 @@ def dashboard_view():
                                  subscription_status=subscription_status,
                                  subscription_tier=subscription_tier,
                                  max_products=max_products,
-                                 product_count=len(products))
+                                 product_count=len(products),
+                                 cancel_at_period_end=cancel_at_period_end,
+                                 renewal_date_str=renewal_date_str,
+                                 days_until_renewal=days_until_renewal,
+                                 renewal_reminder_days=RENEWAL_REMINDER_DAYS)
 
         except Exception as e:
             print(f"❌ DASHBOARD_VIEW: Database error: {e}")
@@ -7400,7 +7589,11 @@ def handle_checkout_completed(event) -> Tuple[str, int]:
                 stripe_customer_id = EXCLUDED.stripe_customer_id,
                 max_products = EXCLUDED.max_products,
                 setup_token = EXCLUDED.setup_token,
-                setup_token_expiry = EXCLUDED.setup_token_expiry
+                setup_token_expiry = EXCLUDED.setup_token_expiry,
+                -- Re-arm reminders and clear any prior scheduled-cancel when a
+                -- returning user subscribes again.
+                cancel_at_period_end = FALSE,
+                renewal_reminder_sent_for = NULL
         """), (
             email,
             'PENDING_SETUP',
@@ -7549,23 +7742,38 @@ def handle_subscription_updated(event) -> Tuple[str, int]:
         }
         app_status = status_map.get(status, status)
 
+        # Capture the scheduled-cancel flag so the app knows a still-'active'
+        # subscription won't renew (and must not get a renewal reminder).
+        cap = bool(subscription.get('cancel_at_period_end', False))
+
+        # Prefer Stripe's real period end for subscription_expires. The old
+        # code recomputed datetime.now() + plan_duration on EVERY update, so
+        # merely toggling cancel-at-period-end shoved the renewal date a full
+        # period into the future — corrupting both the "access until X" promise
+        # and the reminder timing. current_period_end is the source of truth.
+        period_end = _sub_period_end(subscription)
+
         if price_id:
             tier, max_products, plan_duration = get_plan_for_price(price_id)
+            expires_at = period_end or (datetime.now() + plan_duration)
             cursor.execute(q("""
                 UPDATE users
                 SET subscription_status = %s,
                     subscription_tier = %s,
                     max_products = %s,
-                    subscription_expires = %s
+                    subscription_expires = %s,
+                    cancel_at_period_end = %s
                 WHERE stripe_subscription_id = %s
             """), (app_status, tier, max_products,
-                   datetime.now() + plan_duration, subscription_id))
+                   expires_at, cap, subscription_id))
         else:
             cursor.execute(q("""
                 UPDATE users
-                SET subscription_status = %s
+                SET subscription_status = %s,
+                    subscription_expires = COALESCE(%s, subscription_expires),
+                    cancel_at_period_end = %s
                 WHERE stripe_subscription_id = %s
-            """), (app_status, subscription_id))
+            """), (app_status, period_end, cap, subscription_id))
 
         rows = cursor.rowcount
         conn.commit()
@@ -7587,10 +7795,13 @@ def handle_subscription_deleted(event) -> Tuple[str, int]:
 
     try:
         subscription = event['data']['object']
+        # This fires at the real end of the period under cancel-at-period-end,
+        # so access lapses here. Clear the scheduled-cancel flag for tidiness.
         cursor.execute(q("""
-            UPDATE users 
+            UPDATE users
             SET subscription_status = 'cancelled',
-                max_products = 0
+                max_products = 0,
+                cancel_at_period_end = FALSE
             WHERE stripe_subscription_id = %s
         """), (subscription['id'],))
         conn.commit()
@@ -7602,6 +7813,27 @@ def handle_subscription_deleted(event) -> Tuple[str, int]:
         return str(e), 500
     finally:
         conn.close()
+
+def _sub_period_end(subscription):
+    """Return a subscription's current period end as a naive datetime, or None.
+
+    Newer Stripe API versions (2025-03-31 'basil' onward) moved
+    current_period_end off the subscription object and onto each item, so we
+    check the top level first and fall back to items[0]. A freshly created
+    webhook endpoint defaults to the latest API version, so reading only the
+    old location would silently return None.
+    """
+    end = subscription.get('current_period_end')
+    if not end:
+        try:
+            end = subscription['items']['data'][0]['current_period_end']
+        except (KeyError, IndexError, TypeError):
+            end = None
+    try:
+        return datetime.fromtimestamp(end) if end else None
+    except (TypeError, ValueError, OSError):
+        return None
+
 
 def _invoice_subscription_id(invoice):
     """Extract the subscription ID from an invoice event payload.
