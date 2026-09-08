@@ -160,3 +160,7 @@ cython_debug/
 #.idea/
 pyproject.toml
 uv.lock
+
+# Local SQLite databases
+*.db
+amazon_monitor.db
