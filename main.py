@@ -27,6 +27,7 @@ except ImportError:
 import io
 from datetime import datetime, timedelta
 import threading
+import concurrent.futures
 import time
 import schedule
 import re
@@ -156,6 +157,101 @@ SCRAPINGBEE_API_KEY = os.environ.get('SCRAPINGBEE_SECRET_KEY')
 # request) under the 120s gunicorn timeout. Env-overridable.
 SCRAPINGBEE_TIMEOUT = int(os.environ.get('SCRAPINGBEE_TIMEOUT', '55'))
 SCRAPINGBEE_URL = 'https://app.scrapingbee.com/api/v1/'
+
+# --- Monitoring reliability knobs (all env-overridable) -------------------
+# Why: a TRANSIENT failure (ScrapingBee timeout, 429, 5xx) used to cost the
+# product a FULL HOUR of monitoring, because check_due_products stamped
+# last_checked=now on every failure to stop a dead-URL retry storm. That
+# threw away an hour — and any bestseller badge that appeared in it — for
+# what was usually a 1-off network blip. We now retry transient failures in
+# minutes (capped) and reserve the hour-long backoff for PERMANENT failures
+# (dead URL / 404), preserving the original cost protection.
+TRANSIENT_RETRY_DELAY = int(os.environ.get('TRANSIENT_RETRY_DELAY_MIN', '5'))  # minutes
+MAX_TRANSIENT_RETRIES = int(os.environ.get('MAX_TRANSIENT_RETRIES', '3'))
+# Bounded concurrency so one slow/timing-out product can't block the other
+# due products behind it (the old loop was strictly sequential, up to 55s
+# each). Sized to stay under ScrapingBee's per-plan concurrency cap. SQLite
+# (dev fallback) is forced to 1 writer to avoid "database is locked".
+SCRAPER_MAX_WORKERS = int(os.environ.get('SCRAPER_MAX_WORKERS', '4'))
+# How many due products to pull per scheduler cycle. Raise as the catalog
+# grows so "checked every hour" keeps holding; concurrency makes a larger
+# batch finish in roughly max() time instead of sum() time.
+SCHEDULER_BATCH_SIZE = int(os.environ.get('SCHEDULER_BATCH_SIZE', '10'))
+# Try a cheap, non-JS-rendered fetch first (≈1-5 credits, much faster, so
+# far fewer timeouts) and fall back to the full render only if the light
+# page is missing the fields. Set to 'false' to always full-render.
+TRY_CHEAP_FETCH = os.environ.get('TRY_CHEAP_FETCH', 'true').lower() == 'true'
+
+# In-memory fast-retry queue for transient failures. The scheduler is one
+# long-lived process, so a module-level dict survives across cycles without
+# any DB migration. product_id -> dict(url, user_id, title, category,
+# attempts, next_retry, reason). Guarded by a lock because checks now run on
+# a thread pool.
+_retry_queue = {}
+_retry_lock = threading.Lock()
+
+
+def _schedule_retry(product_id, url, user_id, title, category, reason):
+    """Queue a transient-failure product for a quick re-check. Returns True
+    if a fast retry was scheduled, False if retries are exhausted (caller
+    should fall back to the normal hourly cadence)."""
+    with _retry_lock:
+        entry = _retry_queue.get(product_id, {'attempts': 0})
+        if entry['attempts'] >= MAX_TRANSIENT_RETRIES:
+            _retry_queue.pop(product_id, None)
+            return False
+        entry.update({
+            'url': url, 'user_id': user_id, 'title': title,
+            'category': category, 'reason': reason,
+            'attempts': entry['attempts'] + 1,
+            'next_retry': datetime.now() + timedelta(minutes=TRANSIENT_RETRY_DELAY),
+        })
+        _retry_queue[product_id] = entry
+        return True
+
+
+def _clear_retry(product_id):
+    with _retry_lock:
+        _retry_queue.pop(product_id, None)
+
+
+def _due_retries(now):
+    """Pop and return retry-queue entries whose next_retry has arrived."""
+    due = []
+    with _retry_lock:
+        for pid, entry in list(_retry_queue.items()):
+            if entry.get('next_retry') and entry['next_retry'] <= now:
+                due.append((pid, entry))
+    return due
+
+
+def _classify_status(status_code):
+    """Map an HTTP status from ScrapingBee to a backoff strategy.
+    404/410 (dead URL) and 400 (malformed request) are PERMANENT — a fast
+    retry can't fix them, and for dead URLs ScrapingBee still bills, so they
+    keep the original hour-long backoff. Everything else (429 rate limit,
+    5xx, 403 transient blocks) is worth a quick retry."""
+    if status_code in (400, 404, 410):
+        return 'permanent'
+    return 'transient'
+
+
+def _stamp_failed(product_id):
+    """Stamp last_checked=now on a failed check. This is the original cost
+    protection: it stops a failing product from being re-selected by the
+    hourly SQL query every cycle (a retry storm that, on a billed 404, could
+    burn thousands of credits on one dead URL). Transient failures still get
+    a fast re-check via the in-memory retry queue — this only governs the
+    SQL cadence."""
+    try:
+        c = get_db()
+        cur = c.cursor()
+        cur.execute(q("UPDATE products SET last_checked = %s WHERE id = %s"),
+                    (datetime.now(), product_id))
+        c.commit()
+        c.close()
+    except Exception as e:
+        print(f"⚠️ Could not stamp last_checked for product {product_id}: {e}")
 SCREENSHOT_DIR = os.path.join(os.path.dirname(__file__), 'screenshots')
 if not os.path.exists(SCREENSHOT_DIR):
     os.makedirs(SCREENSHOT_DIR)
@@ -487,7 +583,17 @@ def run_scheduler():
     scheduler_running = False
 
 def check_due_products():
-    """Check products that are due for their hourly check"""
+    """Check products due for their hourly check, plus any transient
+    failures whose fast-retry window has arrived.
+
+    Checks run on a bounded thread pool so one slow or timing-out product
+    can't block the others queued behind it (the old loop was strictly
+    sequential, up to SCRAPINGBEE_TIMEOUT seconds each). Per-outcome backoff:
+      success   -> last_checked stamped inside check_single_product (hourly)
+      transient -> fast retry in ~TRANSIENT_RETRY_DELAY min, capped
+      permanent -> hour-long backoff (original cost protection, unchanged)
+    Dormant products keep the same 60-minute baseline — nothing here slows
+    them down."""
     current_time = datetime.now()
     check_threshold = current_time - timedelta(minutes=60)
 
@@ -498,115 +604,118 @@ def check_due_products():
         conn = get_db()
         cursor = conn.cursor()
 
-        # Find products that haven't been checked in the last 60 minutes
+        # Find products not checked in the last 60 minutes. Batch size is
+        # env-tunable (SCHEDULER_BATCH_SIZE) so the catalog can grow without
+        # checks drifting past their hour.
         if get_db_type() == 'postgresql':
             cursor.execute('''
-                SELECT 
-                    p.id as product_id,
-                    p.product_url,
-                    p.product_title,
-                    p.current_rank,
-                    p.current_category,
-                    p.is_bestseller,
-                    p.last_checked,
-                    p.created_at,
-                    p.user_id,
-                    u.email
+                SELECT p.id as product_id, p.product_url, p.product_title,
+                       p.current_rank, p.current_category, p.is_bestseller,
+                       p.last_checked, p.created_at, p.user_id, u.email
                 FROM products p
                 JOIN users u ON p.user_id = u.id
                 WHERE p.active = true
                   AND u.subscription_status = 'active'
                   AND (u.subscription_expires IS NULL OR u.subscription_expires > %s)
-                  AND (
-                      p.last_checked IS NULL 
-                      OR p.last_checked <= %s
-                  )
-                ORDER BY 
-                    COALESCE(p.last_checked, p.created_at) ASC
-                LIMIT 10
-            ''', (current_time, check_threshold,))
+                  AND (p.last_checked IS NULL OR p.last_checked <= %s)
+                ORDER BY COALESCE(p.last_checked, p.created_at) ASC
+                LIMIT %s
+            ''', (current_time, check_threshold, SCHEDULER_BATCH_SIZE))
         else:
             cursor.execute('''
-                SELECT 
-                    p.id as product_id,
-                    p.product_url,
-                    p.product_title,
-                    p.current_rank,
-                    p.current_category,
-                    p.is_bestseller,
-                    p.last_checked,
-                    p.created_at,
-                    p.user_id,
-                    u.email
+                SELECT p.id as product_id, p.product_url, p.product_title,
+                       p.current_rank, p.current_category, p.is_bestseller,
+                       p.last_checked, p.created_at, p.user_id, u.email
                 FROM products p
                 JOIN users u ON p.user_id = u.id
                 WHERE p.active = 1
                   AND u.subscription_status = 'active'
                   AND (u.subscription_expires IS NULL OR u.subscription_expires > ?)
-                  AND (
-                      p.last_checked IS NULL 
-                      OR p.last_checked <= ?
-                  )
-                ORDER BY 
-                    COALESCE(p.last_checked, p.created_at) ASC
-                LIMIT 10
-            ''', (current_time, check_threshold,))
+                  AND (p.last_checked IS NULL OR p.last_checked <= ?)
+                ORDER BY COALESCE(p.last_checked, p.created_at) ASC
+                LIMIT ?
+            ''', (current_time, check_threshold, SCHEDULER_BATCH_SIZE))
 
         due_products = cursor.fetchall()
+        conn.close()
+        conn = None  # worker threads each open their own connection
 
-        if not due_products:
-            conn.close()
+        # Assemble the work set: SQL-due products first.
+        work = {}  # product_id -> (url, user_id, title, category)
+        for product in (due_products or []):
+            if isinstance(product, dict):
+                pid = product['product_id']
+                work[pid] = (product['product_url'], product['user_id'],
+                             product['product_title'], product['current_category'])
+            else:
+                pid = product[0]
+                work[pid] = (product[1], product[8], product[2], product[4])
+
+        # A product that is SQL-due again no longer needs its fast-retry slot.
+        for pid in list(work):
+            _clear_retry(pid)
+
+        # Add transient retries whose window has arrived (deduped).
+        retry_added = 0
+        for pid, entry in _due_retries(current_time):
+            if pid not in work:
+                work[pid] = (entry['url'], entry['user_id'],
+                             entry['title'], entry['category'])
+                retry_added += 1
+
+        if not work:
             return 0
 
-        print(f"\n⏰ {current_time.strftime('%H:%M:%S')} - Found {len(due_products)} products due for checking")
+        print(f"\n⏰ {current_time.strftime('%H:%M:%S')} - Found {len(work)} "
+              f"products due for checking ({retry_added} fast-retries)")
 
-        # Process each product
-        for product in due_products:
-            # Extract product data
-            if isinstance(product, dict):
-                product_id = product['product_id']
-                url = product['product_url']
-                title = product['product_title']
-                user_id = product['user_id']
-                category = product['current_category']
-            else:
-                product_id = product[0]
-                url = product[1]
-                title = product[2]
-                user_id = product[8]
-                category = product[4]
+        def _run(pid, info):
+            url, user_id, title, category = info
+            try:
+                status = check_single_product(pid, url, user_id, title, category, None)
+            except Exception as e:
+                print(f"⚠️ [product {pid}] check raised: {e}")
+                status = 'transient'
+            return pid, info, status
 
-            # Use the new check_single_product function
-            success = check_single_product(
-                product_id, url, user_id, title, category, None
-            )
+        # SQLite (dev fallback) can't take concurrent writers; Postgres can.
+        workers = SCRAPER_MAX_WORKERS if get_db_type() == 'postgresql' else 1
+        workers = max(1, min(workers, len(work)))
 
-            if success:
+        results = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(_run, pid, info) for pid, info in work.items()]
+            for fut in concurrent.futures.as_completed(futures):
+                results.append(fut.result())
+
+        ok = transient = permanent = 0
+        for pid, info, status in results:
+            url, user_id, title, category = info
+            label = (title or '')[:40]
+            if status == 'success':
+                ok += 1
                 products_checked += 1
-            else:
-                # Cost protection: a FAILED check must still stamp
-                # last_checked, or the product stays eternally "due" and
-                # retries every scheduler cycle (~1/min). Observed live as
-                # a retry storm; harmless when the failure precedes the
-                # scrape, but a post-scrape failure (e.g. dead URL → 404,
-                # which ScrapingBee bills) would burn ~14k credits/day on
-                # one product under the global-key model. This caps any
-                # failing product at one attempt per hour.
-                try:
-                    fail_conn = get_db()
-                    fail_cur = fail_conn.cursor()
-                    fail_cur.execute(q("UPDATE products SET last_checked = %s WHERE id = %s"),
-                                     (datetime.now(), product_id))
-                    fail_conn.commit()
-                    fail_conn.close()
-                    print(f"⏸️ Check failed for product {product_id}; next attempt in ~60 min")
-                except Exception as stamp_err:
-                    print(f"⚠️ Could not stamp last_checked for product {product_id}: {stamp_err}")
+                _clear_retry(pid)
+            elif status == 'permanent':
+                permanent += 1
+                _clear_retry(pid)
+                _stamp_failed(pid)  # hour-long backoff (unchanged)
+                print(f"⏸️ [product {pid}] permanent failure ({label}); hourly backoff")
+            else:  # transient
+                transient += 1
+                # Stamp now so the hourly SQL query won't also re-pick it
+                # before the fast retry fires; the retry queue owns cadence.
+                _stamp_failed(pid)
+                if _schedule_retry(pid, url, user_id, title, category, 'transient'):
+                    attempts = _retry_queue.get(pid, {}).get('attempts', '?')
+                    print(f"🔁 [product {pid}] transient failure ({label}); "
+                          f"fast retry #{attempts} in ~{TRANSIENT_RETRY_DELAY} min")
+                else:
+                    print(f"⏸️ [product {pid}] transient retries exhausted ({label}); "
+                          f"hourly backoff")
 
-            time.sleep(2)  # Rate limiting between products
-
-        # Close connection and return success count
-        conn.close()
+        print(f"✅ Cycle done: {ok} ok / {transient} transient / {permanent} permanent "
+              f"| retry queue: {len(_retry_queue)}")
         return products_checked
 
     except Exception as e:
@@ -618,7 +727,7 @@ def check_due_products():
             try:
                 conn.rollback()
                 conn.close()
-            except Exception as e:
+            except Exception:
                 pass
         return -1
 
@@ -1842,100 +1951,125 @@ class AmazonMonitor:
             if not can_call:
                 print(f"❌ Rate limit exceeded: {error_msg}")
                 return {
-                    'success': False, 
+                    'success': False,
                     'error': error_msg,
+                    'failure_kind': 'transient',  # clears when the window rolls over
                     'html': '',
                     'screenshot': None
                 }
 
         if not self.api_key:
             print("❌ ScrapingBee API key not configured")
-            return {'success': False, 'error': 'API key not configured', 'html': '', 'screenshot': None}
+            return {'success': False, 'error': 'API key not configured',
+                    'failure_kind': 'transient', 'html': '', 'screenshot': None}
 
-        # First, always get HTML
-        html_params = {
+        # --- HTML fetch -------------------------------------------------
+        # Amazon book pages carry title/rank/badge in server-rendered HTML,
+        # so a render_js=false pass (≈1-5 credits, much faster → far fewer
+        # timeouts) usually suffices for the hourly data check. We fall back
+        # to the full JS render only when the light page is missing
+        # #productTitle (a bot-check page or an A/B variant). The screenshot
+        # call below always uses the full render — it needs the painted page.
+        base_params = {
             'api_key': self.api_key,
             'url': url,
             'premium_proxy': 'true',
             'country_code': 'us',
             'window_width': 1920,
             'window_height': 1080,
-            'wait': 2000,  # Reduced from 3000
-            'wait_for': '#productTitle'
         }
+        full_params = {**base_params, 'wait': 2000, 'wait_for': '#productTitle'}
+        cheap_params = {**base_params, 'render_js': 'false'}
 
-        try:
-            print("📊 Fetching HTML content...")
-            html_response = requests.get('https://app.scrapingbee.com/api/v1/', params=html_params, timeout=SCRAPINGBEE_TIMEOUT)
-
-            if html_response.status_code != 200:
-                print(f"❌ Failed to get HTML: {html_response.status_code}")
-                return {
+        def _fetch_html(params, label):
+            """Returns (html | None, error_dict | None). The error dict
+            carries failure_kind so the scheduler can choose a fast retry
+            (transient) vs the hour-long backoff (permanent)."""
+            try:
+                print(f"📊 Fetching HTML content ({label})...")
+                r = requests.get(SCRAPINGBEE_URL, params=params, timeout=SCRAPINGBEE_TIMEOUT)
+                if r.status_code == 200:
+                    return r.text, None
+                print(f"❌ Failed to get HTML: {r.status_code}")
+                return None, {
                     'success': False,
-                    'error': f'ScrapingBee HTML error: {html_response.status_code}',
-                    'html': '',
-                    'screenshot': None
+                    'error': f'ScrapingBee HTML error: {r.status_code}',
+                    'failure_kind': _classify_status(r.status_code),
+                    'html': '', 'screenshot': None,
+                }
+            except requests.exceptions.Timeout:
+                print("❌ Request timed out")
+                return None, {
+                    'success': False, 'error': 'Request timed out',
+                    'failure_kind': 'transient', 'html': '', 'screenshot': None,
+                }
+            except Exception as e:
+                print(f"❌ Error during scraping: {str(e)}")
+                return None, {
+                    'success': False, 'error': str(e),
+                    'failure_kind': 'transient', 'html': '', 'screenshot': None,
                 }
 
-            html_content = html_response.text
-            print(f"✅ Got HTML content ({len(html_content)} chars)")
+        html_content = None
+        if TRY_CHEAP_FETCH and not need_screenshot:
+            html_content, _ = _fetch_html(cheap_params, 'light')
+            if html_content is not None and 'productTitle' not in html_content:
+                print("↺ Light fetch missing productTitle; escalating to full render")
+                html_content = None
 
-            screenshot_data = None
+        if html_content is None:
+            html_content, err = _fetch_html(full_params, 'full render')
+            if html_content is None:
+                return err
 
-            # If screenshot needed, make second call
-            if need_screenshot:
-                print("📸 Fetching screenshot...")
-                screenshot_params = {
-                    'api_key': self.api_key,
-                    'url': url,
-                    'premium_proxy': 'true',
-                    'country_code': 'us',
-                    'screenshot': 'true',
-                    'screenshot_full_page': 'true',
-                    'window_width': 1920,
-                    'window_height': 1080,
-                    'wait': 2000,  # Reduced from 3000
-                    'block_ads': 'true',  # Add this - blocks ads which speeds up rendering
-                    'block_resources': 'false'  # Keep resources for proper rendering
-                }
+        print(f"✅ Got HTML content ({len(html_content)} chars)")
 
+        screenshot_data = None
+
+        # If screenshot needed, make second call. Retry once on a transient
+        # miss: the screenshot IS the product, so a dropped one used to mean
+        # a captured badge with nothing to show (the data check still
+        # "succeeded", so nothing retried it). One quick retry here, and
+        # check_single_product marks the badge for recapture if it still
+        # fails.
+        if need_screenshot:
+            screenshot_params = {
+                'api_key': self.api_key,
+                'url': url,
+                'premium_proxy': 'true',
+                'country_code': 'us',
+                'screenshot': 'true',
+                'screenshot_full_page': 'true',
+                'window_width': 1920,
+                'window_height': 1080,
+                'wait': 2000,
+                'block_ads': 'true',      # blocks ads which speeds up rendering
+                'block_resources': 'false'  # keep resources for proper rendering
+            }
+            for attempt in range(2):
                 try:
-                    screenshot_response = requests.get('https://app.scrapingbee.com/api/v1/', 
-                                                      params=screenshot_params, timeout=SCRAPINGBEE_TIMEOUT)
-
+                    print(f"📸 Fetching screenshot (attempt {attempt + 1})...")
+                    screenshot_response = requests.get(SCRAPINGBEE_URL,
+                                                       params=screenshot_params, timeout=SCRAPINGBEE_TIMEOUT)
                     if screenshot_response.status_code == 200:
                         screenshot_data = screenshot_response.content
                         print(f"✅ Got screenshot ({len(screenshot_data)} bytes)")
-                    else:
-                        print(f"⚠️ Screenshot failed: {screenshot_response.status_code}")
+                        break
+                    print(f"⚠️ Screenshot failed: {screenshot_response.status_code}")
                 except requests.exceptions.Timeout:
-                    print("⚠️ Screenshot timed out, continuing without it")
+                    print("⚠️ Screenshot timed out")
                 except Exception as e:
-                    print(f"⚠️ Screenshot error: {e}, continuing without it")
+                    print(f"⚠️ Screenshot error: {e}")
+            if screenshot_data is None:
+                print("⚠️ Screenshot could not be captured after retry; "
+                      "badge will be left unset for recapture next cycle")
 
-            return {
-                'success': True,
-                'error': None,
-                'html': html_content,
-                'screenshot': screenshot_data
-            }
-
-        except requests.exceptions.Timeout:
-            print("❌ Request timed out")
-            return {
-                'success': False,
-                'error': 'Request timed out',
-                'html': '',
-                'screenshot': None
-            }
-        except Exception as e:
-            print(f"❌ Error during scraping: {str(e)}")
-            return {
-                'success': False,
-                'error': str(e),
-                'html': '',
-                'screenshot': None
-            }
+        return {
+            'success': True,
+            'error': None,
+            'html': html_content,
+            'screenshot': screenshot_data
+        }
 
     def extract_product_info(self, html):
         """Extract product ranking and bestseller info from Amazon HTML - FIXED"""
@@ -8341,9 +8475,9 @@ def manual_check_product(product_id):
             conn.close()
             return jsonify({'error': 'Unauthorized'}), 403
 
-        success = check_single_product(product_id=product_id)
+        status = check_single_product(product_id=product_id)
 
-        if success:
+        if status == 'success':
             return jsonify({'status': 'success', 'message': 'Product checked successfully'})
         else:
             return jsonify({'error': 'Failed to check product'}), 500
@@ -8499,7 +8633,14 @@ def check_specific_product(user_id, product_id):
         raise
 
 def check_single_product(product_id, url=None, user_id=None, product_title=None, category=None, target_rank=None):
-    """Check single product with two-call strategy"""
+    """Check single product with two-call strategy.
+
+    Returns a status string so the scheduler can choose the right backoff:
+      'success'   — checked cleanly (last_checked stamped here)
+      'transient' — temporary failure (timeout/429/5xx); retry in minutes
+      'permanent' — dead URL / broken row; keep the hour-long backoff
+    (Truthiness note: only 'success' means success — callers must compare
+    against the string, not use a bare `if status:`.)"""
     conn = get_db()
     cursor = conn.cursor()
 
@@ -8522,7 +8663,7 @@ def check_single_product(product_id, url=None, user_id=None, product_title=None,
             product_data = cursor.fetchone()
             if not product_data:
                 conn.close()
-                return False
+                return 'permanent'  # row doesn't exist; a fast retry won't help
 
             if isinstance(product_data, dict):
                 url = url or product_data['product_url']
@@ -8562,7 +8703,7 @@ def check_single_product(product_id, url=None, user_id=None, product_title=None,
         if not prev_data:
             print(f"Product {product_id} not found")
             conn.close()
-            return False
+            return 'permanent'
 
         # Handle both dict and tuple with safe defaults
         if isinstance(prev_data, dict):
@@ -8613,7 +8754,7 @@ def check_single_product(product_id, url=None, user_id=None, product_title=None,
         if not result['success']:
             print(f"❌ Failed to scrape: {result['error']}")
             conn.close()
-            return False
+            return result.get('failure_kind', 'transient')
 
         product_info = monitor.extract_product_info(result['html'])
         current_rank = int(product_info['rank']) if product_info['rank'] else None
@@ -8701,12 +8842,17 @@ def check_single_product(product_id, url=None, user_id=None, product_title=None,
                     )
 
         # Update product status.
-        # If badge evidence was rejected, persist has_bestseller_badge as
-        # False so the badge reads as "newly appeared" next hour and the
-        # capture retries. Also: this UPDATE previously had no SQLite
-        # branch at all (silently skipped on the fallback) — now q()'d.
+        # Leave has_bestseller_badge unset (→ reads as "newly appeared" next
+        # cycle, so the capture retries) whenever we detected a badge but
+        # could NOT produce emailable evidence for it — either the render
+        # disagreed (evidence rejected) OR the screenshot never landed even
+        # after the retry. Previously only the evidence-rejected case did
+        # this, so a badge whose screenshot merely timed out got recorded as
+        # "already seen" and was never recaptured — a silently lost badge.
+        # Also: this UPDATE previously had no SQLite branch at all (silently
+        # skipped on the fallback) — now q()'d.
         persist_badge = product_info['is_bestseller']
-        if 'bestseller_badge' in achievements and not evidence_verified:
+        if 'bestseller_badge' in achievements and not screenshot_files:
             persist_badge = False
         cursor.execute(q("""
             UPDATE products 
@@ -8716,21 +8862,24 @@ def check_single_product(product_id, url=None, user_id=None, product_title=None,
                 last_achievement_date = %s
             WHERE id = %s
         """), (
-            current_rank, 
-            persist_badge, 
+            current_rank,
+            persist_badge,
             datetime.now(),
-            datetime.now() if (achievements and evidence_verified) else last_achievement,
+            # Stamp the achievement date only when evidence was actually
+            # saved/emailed (screenshot_files set), so a failed-screenshot
+            # cycle doesn't suppress the recapture or a later target_reached.
+            datetime.now() if (achievements and screenshot_files) else last_achievement,
             product_id
         ))
 
         conn.commit()
         print(f"✅ Product check complete. Credits used: {10 if not achievements else 35}")
-        return True
+        return 'success'
 
     except Exception as e:
         conn.rollback()
         print(f"❌ Error checking product: {e}")
-        return False
+        return 'transient'
     finally:
         conn.close()
 
