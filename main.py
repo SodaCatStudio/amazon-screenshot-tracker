@@ -8905,6 +8905,22 @@ def check_single_product(product_id, url=None, user_id=None, product_title=None,
             product_id
         ))
 
+        # Record ranking history. The hourly scheduler only ever overwrote the
+        # product's current state, so the `rankings` table (which the manual
+        # /check_products path writes) stayed empty in production and badge
+        # durations could not be measured. One row per check, raw detection
+        # (not persist_badge), so an unconfirmed badge still counts as "seen".
+        cursor.execute(q("""
+            INSERT INTO rankings (product_id, rank_number, category, is_bestseller, checked_at)
+            VALUES (%s, %s, %s, %s, %s)
+        """), (
+            product_id,
+            current_rank,
+            product_info.get('category'),
+            bool(product_info.get('is_bestseller', False)),
+            datetime.now()
+        ))
+
         conn.commit()
         print(f"✅ Product check complete. Credits used: {10 if not achievements else 35}")
         # Confirmed a badge but produced no emailable evidence → tell the
