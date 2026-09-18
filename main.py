@@ -8801,7 +8801,9 @@ def check_single_product(product_id, url=None, user_id=None, product_title=None,
                     evidence_verified = False
                     print("⚠️ Evidence rejected: the screenshot render does not show the "
                           "badge (Amazon served a different page variant). No email sent; "
-                          "badge state left unset so the capture retries next hour.")
+                          "badge left unset and a fast retry is queued so a flickering "
+                          "badge (esp. a time-limited #1 New Release) gets another shot in "
+                          f"~{TRANSIENT_RETRY_DELAY} min instead of waiting the full hour.")
 
             if evidence_verified and screenshot_result['success'] and screenshot_result['screenshot']:
                 # Process the screenshot into sections
@@ -8851,8 +8853,23 @@ def check_single_product(product_id, url=None, user_id=None, product_title=None,
         # "already seen" and was never recaptured — a silently lost badge.
         # Also: this UPDATE previously had no SQLite branch at all (silently
         # skipped on the fallback) — now q()'d.
+        # A badge we detected in the data fetch (fetch #1) but could NOT turn
+        # into emailable evidence — either the screenshot render disagreed
+        # (evidence rejected) or the screenshot never landed. In both cases we
+        # leave the badge unset so it re-detects as "newly appeared", AND we
+        # want the recapture SOON, not next hour: #1 New Release badges only
+        # exist during Amazon's short launch window, and the render often just
+        # flickers between page variants, so an hour-long wait can miss the
+        # badge entirely. Returning 'transient' hands the product to the
+        # scheduler's existing fast-retry queue (~TRANSIENT_RETRY_DELAY min,
+        # capped at MAX_TRANSIENT_RETRIES then hourly) — bounded cost, and it
+        # stops the moment Amazon drops the badge from fetch #1 (no achievement
+        # → 'success' → cleared). See monitoring-reliability doc.
+        badge_unconfirmed = ('bestseller_badge' in achievements
+                             and not screenshot_files)
+
         persist_badge = product_info['is_bestseller']
-        if 'bestseller_badge' in achievements and not screenshot_files:
+        if badge_unconfirmed:
             persist_badge = False
         cursor.execute(q("""
             UPDATE products 
@@ -8874,6 +8891,10 @@ def check_single_product(product_id, url=None, user_id=None, product_title=None,
 
         conn.commit()
         print(f"✅ Product check complete. Credits used: {10 if not achievements else 35}")
+        # Confirmed a badge but produced no emailable evidence → tell the
+        # scheduler to fast-retry (bounded) instead of waiting the full hour.
+        if badge_unconfirmed:
+            return 'transient'
         return 'success'
 
     except Exception as e:
