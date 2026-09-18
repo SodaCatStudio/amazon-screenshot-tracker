@@ -4,6 +4,964 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     {% include 'partials/gtag.html' %}
+    <title>Screenshot Tracker - Capture Your Amazon Bestseller Badge Before It Disappears</title>
+    <meta name="description" content="Amazon shows and hides bestseller badges without warning. We check your book's page every hour and email you the full-page screenshot the moment a badge appears.">
+    <meta name="facebook-domain-verification" content="rkch02n9yb1lb25ncudpl8hafli0bo" />
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="Screenshot Tracker">
+    <meta property="og:url" content="https://screenshottracker.com/">
+    <meta property="og:title" content="Never Miss Your Amazon Bestseller Moment">
+    <meta property="og:description" content="We watch your book's Amazon page every hour and email you the screenshot the moment a bestseller badge appears.">
+    <meta property="og:image" content="https://screenshottracker.com/static/screenshots/og-card.png">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta property="og:image:alt" content="A captured #1 New Release badge on an Amazon book listing.">
+
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="Never Miss Your Amazon Bestseller Moment">
+    <meta name="twitter:description" content="We watch your book's Amazon page every hour and email you the screenshot the moment a bestseller badge appears.">
+    <meta name="twitter:image" content="https://screenshottracker.com/static/screenshots/og-card.png">
+    <link rel="icon" href="/static/screenshots/favicon.ico" sizes="any">
+    <link rel="icon" type="image/png" sizes="32x32" href="/static/screenshots/favicon-32.png">
+    <link rel="apple-touch-icon" href="/static/screenshots/apple-touch-icon.png">
+    <style>
+        /* Palette note: --navy is sampled from the logo artwork (icon-512.png),
+           which is flattened onto #010b1b with no alpha channel. Matching the site
+           to the asset lets the logo PNG sit on the nav with no visible edge. */
+        :root {
+            --navy: #010b1b;
+            --navy-mid: #12263f;
+            --orange: #ff9900;
+            --orange-deep: #e07d00;
+            --ink: #1a1a1a;
+            --muted: #5c6672;
+            --line: #e4e7eb;
+            --wash: #f6f7f9;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            line-height: 1.6;
+            color: var(--ink);
+            overflow-x: hidden;
+            background: #fff;
+        }
+
+        img { max-width: 100%; }
+
+        /* ---------- Navigation ---------- */
+        nav {
+            background-color: var(--navy);
+            padding: 10px 0;
+            position: fixed;
+            width: 100%;
+            top: 0;
+            z-index: 1000;
+            box-shadow: 0 1px 0 rgba(255,255,255,0.06);
+        }
+
+        .nav-container {
+            max-width: 1120px;
+            margin: 0 auto;
+            padding: 0 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+        }
+
+        /* Wordmark stays live text rather than an image lockup: it keeps the nav
+           on one line at 390px (the old emoji + text wrapped to 107px tall) and
+           stays crisp at every density. */
+        .logo {
+            color: #fff;
+            font-size: 19px;
+            font-weight: 700;
+            letter-spacing: -0.01em;
+            text-decoration: none;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            white-space: nowrap;
+            min-width: 0;
+        }
+
+        .logo img {
+            width: 34px;
+            height: 34px;
+            border-radius: 7px;
+            display: block;
+            flex: 0 0 auto;
+        }
+
+        .nav-links {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            flex: 0 0 auto;
+        }
+
+        .nav-links a {
+            color: #fff;
+            text-decoration: none;
+            padding: 8px 16px;
+            border-radius: 6px;
+            font-size: 15px;
+            transition: background-color 0.2s, color 0.2s;
+        }
+
+        .nav-links .btn-login:hover { background-color: rgba(255,255,255,0.1); }
+
+        .nav-links .btn-plans {
+            background-color: var(--orange);
+            color: #12100a;
+            font-weight: 700;
+        }
+
+        .nav-links .btn-plans:hover { background-color: #ffad2e; }
+
+        /* ---------- Hero ----------
+           Split in two. The dark band carries the nav and the problem statement;
+           everything from the CTA down sits on white. Reasons: the hero capture is
+           a screenshot of a white Amazon page, so on navy it read as a bright hole
+           in a dark frame, and an orange button has more contrast against white
+           than against a dark field it already glows on. The band keeps the
+           headline, and everything from the subheadline down is dark-on-white.
+           The three-line headline gives the band enough mass to read as a
+           deliberate masthead rather than an oversized nav bar, and moving the
+           subcopy out lifts the CTA about 86px higher up the page. */
+        .hero {
+            background: linear-gradient(180deg, var(--navy-mid) 0%, var(--navy) 100%);
+            color: #fff;
+            padding: 92px 20px 44px;
+            text-align: center;
+        }
+
+        .hero-continue {
+            background: #fff;
+            padding: 38px 20px 54px;
+            text-align: center;
+        }
+
+        .hero-inner { max-width: 820px; margin: 0 auto; }
+
+        .hero h1 {
+            font-size: clamp(30px, 5.6vw, 50px);
+            line-height: 1.14;
+            letter-spacing: -0.02em;
+            margin-bottom: 0;
+        }
+
+        .hero h1 .accent { color: var(--orange); }
+
+        /* The forced line break helps the two-sentence headline balance on wide
+           screens; below 760px the text wraps naturally and the break is dropped. */
+        @media (max-width: 760px) { .hide-sm { display: none; } }
+
+        /* Dark-on-white. #48535f gives ~7.5:1 against white, comfortably past AA
+           for the 19px body size. */
+        .hero-lede {
+            font-size: clamp(16px, 2.1vw, 19px);
+            color: #48535f;
+            max-width: 660px;
+            margin: 0 auto 28px;
+        }
+
+        .btn {
+            padding: 16px 38px;
+            font-size: 18px;
+            font-weight: 700;
+            text-decoration: none;
+            border-radius: 7px;
+            display: inline-block;
+            cursor: pointer;
+            border: none;
+            transition: transform 0.15s, box-shadow 0.15s, background-color 0.2s;
+        }
+
+        .btn-primary {
+            background-color: var(--orange);
+            color: #12100a;
+            box-shadow: 0 6px 20px rgba(255,153,0,0.28);
+        }
+
+        .btn-primary:hover {
+            background-color: #ffad2e;
+            transform: translateY(-2px);
+            box-shadow: 0 10px 26px rgba(255,153,0,0.36);
+        }
+
+        /* Single primary CTA by design. The old hero ran "Create Free Account"
+           beside an equally weighted "See How It Works"; a competing second
+           button splits intent, so the secondary is a text link now. */
+        /* Sits on white now, so these are dark-on-light. */
+        .hero-micro {
+            margin-top: 14px;
+            font-size: 14.5px;
+            color: var(--muted);
+        }
+
+        .hero-micro a { color: #33404f; text-decoration: underline; text-underline-offset: 3px; }
+        .hero-micro a:hover { color: var(--navy); }
+
+        .hero-shot {
+            max-width: 720px;
+            margin: 36px auto 0;
+            border-radius: 10px;
+            overflow: hidden;
+            background: #fff;
+            border: 1px solid var(--line);
+            box-shadow: 0 14px 34px rgba(1, 11, 27, 0.13);
+        }
+
+        .hero-shot img { display: block; width: 100%; height: auto; }
+
+        .hero-shot figcaption {
+            padding: 11px 16px;
+            font-size: 13.5px;
+            color: var(--muted);
+            background: #fbfcfd;
+            border-top: 1px solid var(--line);
+            text-align: left;
+        }
+
+        /* ---------- Shared section furniture ---------- */
+        .container { max-width: 1120px; margin: 0 auto; }
+
+        .section-title {
+            text-align: center;
+            font-size: clamp(25px, 3.4vw, 34px);
+            letter-spacing: -0.015em;
+            margin-bottom: 14px;
+            color: var(--navy);
+        }
+
+        .section-subtitle {
+            text-align: center;
+            font-size: 17px;
+            color: var(--muted);
+            margin: 0 auto 44px;
+            max-width: 620px;
+        }
+
+        /* ---------- Proof (moved directly below the hero) ---------- */
+        .demo-section { padding: 68px 20px; background-color: var(--wash); text-align: center; }
+
+        .proof-frame {
+            background: linear-gradient(45deg, var(--orange), var(--navy));
+            padding: 3px;
+            border-radius: 12px;
+            max-width: 700px;
+            margin: 0 auto;
+            box-shadow: 0 12px 32px rgba(1, 11, 27, 0.14);
+        }
+
+        .proof-inner { background: #fff; border-radius: 9px; overflow: hidden; }
+
+        .proof-mailhead {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 14px 18px;
+            border-bottom: 1px solid #ececec;
+            background: #fafafa;
+            text-align: left;
+        }
+
+        .proof-avatar {
+            flex: 0 0 auto;
+            width: 38px;
+            height: 38px;
+            border-radius: 50%;
+            background: var(--navy);
+            color: var(--orange);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 19px;
+        }
+
+        .proof-meta { flex: 1 1 auto; min-width: 0; }
+
+        .proof-from {
+            font-size: 0.85rem;
+            font-weight: 600;
+            color: var(--navy);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .proof-from span { font-weight: 400; color: #8a8a8a; }
+
+        .proof-subject {
+            font-size: 0.85rem;
+            color: #666;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .proof-time {
+            flex: 0 0 auto;
+            font-size: 0.8rem;
+            color: #8a8a8a;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .proof-body { padding: 24px 22px 20px; text-align: left; }
+
+        .proof-h { margin: 0 0 16px; font-size: 1.35rem; line-height: 1.25; color: var(--ink); }
+
+        .proof-body p { margin: 0 0 13px; font-size: 1rem; line-height: 1.6; color: #333; }
+        .proof-body p:last-of-type { margin-bottom: 0; }
+        .proof-body strong { color: var(--ink); }
+        .proof-stamp { font-style: italic; color: #555 !important; }
+
+        .proof-attach {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-top: 18px;
+            padding: 12px 14px;
+            border: 1px solid var(--line);
+            border-radius: 7px;
+            background: #fbfbfb;
+        }
+
+        .proof-file {
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: var(--navy);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .proof-size { margin-left: auto; flex: 0 0 auto; font-size: 0.8rem; color: #8a8a8a; }
+
+        .proof-archive {
+            display: flex;
+            align-items: center;
+            gap: 22px;
+            max-width: 700px;
+            margin: 24px auto 0;
+            padding: 18px;
+            border: 1px solid var(--line);
+            border-radius: 10px;
+            background: #fff;
+            text-align: left;
+        }
+
+        .proof-archive-img {
+            flex: 0 0 auto;
+            width: 118px;
+            height: 170px;
+            overflow: hidden;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            background: #fff;
+            -webkit-mask-image: linear-gradient(to bottom, #000 62%, transparent 100%);
+            mask-image: linear-gradient(to bottom, #000 62%, transparent 100%);
+        }
+
+        .proof-archive-img img { display: block; width: 100%; height: auto; }
+
+        .proof-archive-text { font-size: 0.95rem; line-height: 1.6; color: #555; }
+        .proof-archive-text strong { color: var(--navy); }
+
+        /* ---------- Features ---------- */
+        .features { padding: 68px 20px; background-color: #fff; }
+
+        /* Cut from six cards to three. "Secure & Private" and "Lightning Fast"
+           answered objections nobody had, and the six-card grid was pushing the
+           proof section 4,555px down the page on mobile. */
+        .feature-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 26px;
+        }
+
+        .feature-card {
+            background: #fff;
+            padding: 30px 26px;
+            border-radius: 10px;
+            border: 1px solid var(--line);
+            text-align: left;
+        }
+
+        .feature-icon {
+            width: 42px;
+            height: 42px;
+            margin-bottom: 16px;
+            color: var(--orange-deep);
+        }
+
+        .feature-icon svg { width: 100%; height: 100%; display: block; }
+
+        .feature-card h3 { color: var(--navy); margin-bottom: 10px; font-size: 19px; }
+        .feature-card p { color: var(--muted); font-size: 15.5px; line-height: 1.65; }
+
+        /* ---------- How it works ---------- */
+        .how-it-works { padding: 68px 20px; background-color: var(--wash); }
+
+        .steps {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+            gap: 30px;
+            margin-top: 8px;
+        }
+
+        .step { text-align: center; }
+
+        .step-number {
+            width: 48px;
+            height: 48px;
+            background-color: var(--orange);
+            color: #12100a;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+            font-weight: 700;
+            margin: 0 auto 14px;
+        }
+
+        .step h3 { color: var(--navy); margin-bottom: 8px; font-size: 17px; }
+        .step p { color: var(--muted); font-size: 15px; }
+
+        /* ---------- Pricing ---------- */
+        .pricing { padding: 68px 20px 76px; background-color: #fff; }
+
+        .pricing-container {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(330px, 1fr));
+            gap: 28px;
+            max-width: 940px;
+            margin: 0 auto;
+        }
+
+        .pricing-tier {
+            background: #fff;
+            border-radius: 12px;
+            padding: 30px 28px 28px;
+            border: 1px solid var(--line);
+            display: flex;
+            flex-direction: column;
+        }
+
+        .pricing-tier h3 { font-size: 22px; color: var(--navy); }
+        .tier-subtitle { color: var(--muted); margin-bottom: 18px; font-size: 15px; }
+
+        .tier-features { list-style: none; padding: 0 0 18px; border-bottom: 1px solid var(--line); margin-bottom: 20px; }
+        .tier-features li { padding: 6px 0; color: #48535f; font-size: 15.5px; }
+        .tier-features li:before { content: "✓"; color: #1e874b; font-weight: bold; margin-right: 9px; }
+
+        .price-options { display: flex; flex-direction: column; gap: 12px; }
+
+        /* Every price is now a submit button that goes straight to Stripe.
+           Previously these were inert divs, so a visitor who had already decided
+           had no way to buy without registering first. */
+        .price-option {
+            padding: 14px 16px;
+            background: var(--wash);
+            border: 1px solid var(--line);
+            border-radius: 9px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            position: relative;
+            width: 100%;
+            font: inherit;
+            text-align: left;
+            cursor: pointer;
+            transition: border-color 0.15s, transform 0.15s, box-shadow 0.15s;
+        }
+
+        .price-option:hover {
+            border-color: var(--orange);
+            transform: translateY(-1px);
+            box-shadow: 0 5px 16px rgba(1,11,27,0.09);
+        }
+
+        .price-option:disabled { opacity: 0.6; cursor: wait; }
+
+        .price-option .price { font-size: 21px; font-weight: 700; color: var(--navy); }
+        .price-option .period { color: var(--muted); font-size: 14.5px; }
+        .price-option .po-text { display: flex; flex-direction: column; min-width: 0; }
+        .price-option .po-note { font-size: 13px; color: var(--muted); }
+        .price-option .po-go { margin-left: auto; flex: 0 0 auto; color: var(--orange-deep); font-weight: 700; font-size: 14.5px; }
+
+        .price-option.featured { background: linear-gradient(135deg, var(--orange) 0%, #ff7a00 100%); border-color: transparent; }
+        .price-option.featured .price,
+        .price-option.featured .period,
+        .price-option.featured .po-note,
+        .price-option.featured .po-go { color: #12100a; }
+        .price-option.featured .period,
+        .price-option.featured .po-note { opacity: 0.85; }
+
+        /* Exactly one of these on the page. Both tiers carried a "Most Popular"
+           badge before, which cancels the signal out. */
+        .badge {
+            position: absolute;
+            top: -10px;
+            right: 16px;
+            background: #1e874b;
+            color: #fff;
+            padding: 3px 11px;
+            border-radius: 20px;
+            font-size: 11.5px;
+            font-weight: 700;
+            letter-spacing: 0.02em;
+        }
+
+        .savings { background: #1e874b; color: #fff; padding: 3px 10px; border-radius: 20px; font-size: 11.5px; font-weight: 700; }
+
+        .pricing-foot { text-align: center; margin-top: 30px; color: var(--muted); font-size: 14.5px; }
+        .pricing-foot a { color: var(--orange-deep); }
+
+        .checkout-error {
+            display: none;
+            max-width: 600px;
+            margin: 20px auto 0;
+            padding: 12px 16px;
+            border-radius: 8px;
+            background: #fdecea;
+            border: 1px solid #f5c6c2;
+            color: #8a1c13;
+            font-size: 15px;
+            text-align: center;
+        }
+
+        /* ---------- Contact + footer ---------- */
+        .contact-section { background-color: var(--navy); color: #fff; padding: 44px 20px; text-align: center; }
+        .contact-section h2 { color: #fff; margin-bottom: 12px; font-size: 22px; }
+        .contact-section p { color: #9fb0c4; margin-bottom: 12px; }
+        .contact-section a { color: var(--orange); text-decoration: none; font-size: 19px; }
+        .contact-section a:hover { text-decoration: underline; }
+
+        footer { background-color: var(--navy); color: #fff; padding: 0 20px 36px; text-align: center; }
+
+        .footer-links { display: flex; justify-content: center; gap: 26px; margin-bottom: 16px; flex-wrap: wrap; }
+        .footer-links a { color: #fff; text-decoration: none; opacity: 0.75; }
+        .footer-links a:hover { opacity: 1; }
+
+        /* ---------- Responsive ---------- */
+        @media (max-width: 760px) {
+            .hero { padding: 80px 18px 34px; }
+            .hero-continue { padding: 30px 18px 44px; }
+            .feature-grid { grid-template-columns: 1fr; }
+            .pricing-container { grid-template-columns: 1fr; }
+            .proof-archive { flex-direction: column; align-items: flex-start; gap: 16px; }
+            .proof-archive-img { width: 100px; height: 146px; }
+            .proof-time, .proof-size { display: none; }
+            .proof-body { padding: 20px 16px 18px; }
+            .proof-h { font-size: 1.15rem; }
+        }
+
+        /* Keeps the nav on one line without crowding at 390px. The old nav wrapped
+           to two lines (107px tall) and overlapped the hero. */
+        @media (max-width: 560px) {
+            .logo { font-size: 15.5px; gap: 8px; }
+            .logo img { width: 29px; height: 29px; }
+            .nav-links { gap: 4px; }
+            .nav-links a { padding: 7px 11px; font-size: 13.5px; }
+            .nav-container { padding: 0 14px; }
+        }
+
+        @media (max-width: 400px) {
+            .logo { font-size: 14.5px; }
+            .nav-links a { padding: 6px 9px; font-size: 13px; }
+            .btn { padding: 15px 22px; font-size: 16.5px; width: 100%; }
+            .hero h1 { font-size: 27px; }
+            .hero-lede { font-size: 15.5px; }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            * { transition: none !important; }
+        }
+    </style>
+</head>
+<body>
+    <!-- Navigation -->
+    <nav id="siteNav">
+        <div class="nav-container">
+            <a href="/" class="logo">
+                <img src="{{ url_for('static', filename='screenshots/icon-512.png') }}"
+                     width="34" height="34" alt="">
+                <span>Screenshot Tracker</span>
+            </a>
+            <div class="nav-links">
+                <a href="{{ url_for('auth.login') }}" class="btn-login">Log in</a>
+                <a href="#pricing" class="btn-plans">See plans</a>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Hero -->
+    <section class="hero" id="top">
+        <div class="hero-inner">
+            <h1>Amazon hides your bestseller badge without warning.<br class="hide-sm">
+                <span class="accent">We screenshot it before it's gone.</span></h1>
+        </div>
+    </section>
+
+    <!-- The gradient stops at the headline. Everything from here down is
+         dark-on-white, including the capture, which is itself a screenshot of a
+         white Amazon page and read as a bright hole when framed in navy. -->
+    <section class="hero-continue">
+        <div class="hero-inner">
+            <p class="hero-lede">
+                We check your book's Amazon page every hour, day and night. The moment a
+                bestseller or #1 New Release badge appears, you get the full-page screenshot
+                in your inbox — timestamped, archived, and ready for your newsletter, your
+                cover, or your press kit.
+            </p>
+            <a href="#pricing" class="btn btn-primary">Start tracking my book</a>
+            <p class="hero-micro">
+                Cancel anytime · From $14.99 · <a href="#how-it-works">See how it works</a>
+            </p>
+
+            <!-- The badge is the product, so it has to be legible. At 390px the full
+                 738px-wide capture scales the badge down to roughly 5px of text.
+                 The mobile source is a 2x crop of the title-and-badge region of the
+                 same capture, so the badge reads at close to 1:1. -->
+            <figure class="hero-shot">
+                <picture>
+                    <source media="(max-width: 700px)"
+                            srcset="{{ url_for('static', filename='screenshots/badge-hero-mobile.webp') }}"
+                            width="976" height="200">
+                    <img src="{{ url_for('static', filename='screenshots/badge-hero.webp') }}"
+                         width="738" height="294" fetchpriority="high"
+                         alt="Amazon listing for Murder In Cavendish Square by Ann Sutton, showing the #1 New Release badge in British &amp; Irish Humor &amp; Satire.">
+                </picture>
+                <figcaption>A real capture — the badge exactly as Amazon displayed it, at 02:26 UTC.</figcaption>
+            </figure>
+        </div>
+    </section>
+
+    <!-- Proof. Moved above the features grid: it was starting 4,555px down on a
+         390px viewport, which is 5.4 screens, and it is the only real evidence
+         on the page. -->
+    <section class="demo-section">
+        <div class="container">
+            <h2 class="section-title">This is what lands in your inbox</h2>
+            <p class="section-subtitle">
+                The moment a badge appears — with the full-page screenshot attached and
+                archived to your dashboard.
+            </p>
+
+            <div class="proof-frame">
+                <div class="proof-inner">
+                    <div class="proof-mailhead">
+                        <div class="proof-avatar" aria-hidden="true">🏆</div>
+                        <div class="proof-meta">
+                            <div class="proof-from">Screenshot Tracker <span>&lt;noreply@mail.screenshottracker.com&gt;</span></div>
+                            <!-- Subject now matches the badge in the capture below.
+                                 It previously read "Bestseller Badge captured" while the
+                                 body and screenshot both said "#1 New Release". -->
+                            <div class="proof-subject">🎉 Achievement Unlocked! — #1 New Release captured</div>
+                        </div>
+                        <div class="proof-time">2:26 AM</div>
+                    </div>
+
+                    <div class="proof-body">
+                        <h3 class="proof-h">🎉 Achievement Unlocked!</h3>
+                        <p>
+                            Your book <strong>Murder In Cavendish Square: A Dodo Dorchester Mystery
+                            Book 15</strong> has achieved: <strong>#1 New Release</strong>
+                        </p>
+                        <p class="proof-stamp">Captured July 31, 2026 at 02:26 UTC</p>
+                        <p>
+                            The full page screenshot is attached — your badge and ranking as they
+                            appeared on Amazon at the moment of capture. It's also saved to your
+                            dashboard.
+                        </p>
+
+                        <div class="proof-attach">
+                            <span aria-hidden="true">📎</span>
+                            <span class="proof-file">bestseller-badge-2026-07-31.png</span>
+                            <span class="proof-size">Full page capture</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="proof-archive">
+                <div class="proof-archive-img">
+                    <img src="{{ url_for('static', filename='screenshots/full-capture-thumb.webp') }}"
+                         width="520" height="942" loading="lazy"
+                         alt="The full Amazon product page as captured, from the header down to the author bio.">
+                </div>
+                <p class="proof-archive-text">
+                    <strong>The whole page, not just the badge.</strong> Every capture archives
+                    the complete listing — rankings, review count, categories and all — so you
+                    have the full context months later, when the badge is long gone and you
+                    need it for a newsletter or a cover.
+                </p>
+            </div>
+
+            <p class="section-subtitle" style="margin: 26px auto 0;">
+                Sent at <strong>2:26 in the morning</strong>. Amazon never announces these
+                badges and gives no warning before they disappear — this one was caught and
+                archived while the author slept.
+            </p>
+        </div>
+    </section>
+
+    <!-- TESTIMONIAL SLOT — drop 2–3 customer quotes in here once you have them.
+         This position (after proof, before features) is where they do the most work. -->
+
+    <!-- Features -->
+    <section class="features">
+        <div class="container">
+            <h2 class="section-title">What you get</h2>
+            <p class="section-subtitle">Built for one job: catching the badge and keeping the evidence.</p>
+
+            <div class="feature-grid">
+                <div class="feature-card">
+                    <div class="feature-icon" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M3 8a2 2 0 0 1 2-2h2.5l1.2-1.8A1 1 0 0 1 9.5 4h5a1 1 0 0 1 .8.4L16.5 6H19a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+                            <circle cx="12" cy="12.5" r="3.4"/>
+                        </svg>
+                    </div>
+                    <h3>Hourly automatic capture</h3>
+                    <p>We check your listing every hour, around the clock. When a badge appears, the screenshot is taken and emailed to you without you doing anything.</p>
+                </div>
+
+                <div class="feature-card">
+                    <div class="feature-icon" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                            <circle cx="12" cy="12" r="8.5"/>
+                            <circle cx="12" cy="12" r="4.6"/>
+                            <circle cx="12" cy="12" r="1.1" fill="currentColor"/>
+                        </svg>
+                    </div>
+                    <h3>Track the categories you care about</h3>
+                    <p>Watch specific categories like "British Historical Fiction" or "Health, Fitness &amp; Dieting", and set the rank you want to be told about.</p>
+                </div>
+
+                <div class="feature-card">
+                    <div class="feature-icon" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M3 18.5 8.5 13l3.5 3.2L20.5 8"/>
+                            <path d="M15.5 8h5v5"/>
+                            <path d="M3 21h18"/>
+                        </svg>
+                    </div>
+                    <h3>Rank history you can go back to</h3>
+                    <p>Every capture is archived with its timestamp, so you can show where a book ranked months after Amazon stopped displaying it.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- How It Works -->
+    <section class="how-it-works" id="how-it-works">
+        <div class="container">
+            <h2 class="section-title">How it works</h2>
+            <p class="section-subtitle">Set up once, in about two minutes.</p>
+
+            <div class="steps">
+                <div class="step">
+                    <div class="step-number">1</div>
+                    <h3>Pick a plan</h3>
+                    <p>Choose the plan that matches your launch. Cancel whenever you want.</p>
+                </div>
+
+                <div class="step">
+                    <div class="step-number">2</div>
+                    <h3>Set your password</h3>
+                    <p>Straight after checkout — no waiting on an email to get started.</p>
+                </div>
+
+                <div class="step">
+                    <div class="step-number">3</div>
+                    <h3>Paste your Amazon link</h3>
+                    <p>Add your book's product URL and pick the categories to watch.</p>
+                </div>
+
+                <div class="step">
+                    <div class="step-number">4</div>
+                    <h3>Go to sleep</h3>
+                    <p>We watch every hour and email the screenshot the moment a badge shows up.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Pricing -->
+    <section class="pricing" id="pricing">
+        <div class="container">
+            <h2 class="section-title">Choose your plan</h2>
+            <p class="section-subtitle">Pick a plan and you're tracking in about two minutes.</p>
+
+            <div class="pricing-container">
+                <div class="pricing-tier">
+                    <h3>Author</h3>
+                    <p class="tier-subtitle">For individual authors</p>
+                    <ul class="tier-features">
+                        <li>Track up to 2 books</li>
+                        <li>Checked every hour, day and night</li>
+                        <li>Email alert with the screenshot attached</li>
+                        <li>Full-page captures archived to your dashboard</li>
+                    </ul>
+                    <div class="price-options">
+                        <button type="button" class="price-option" data-price-id="{{ author_weekly_price_id }}">
+                            <span class="po-text">
+                                <span><span class="price">$14.99</span> <span class="period">/ week</span></span>
+                                <span class="po-note">Launch Week — for a single launch</span>
+                            </span>
+                            <span class="po-go" aria-hidden="true">Choose →</span>
+                        </button>
+                        <button type="button" class="price-option featured" data-price-id="{{ author_monthly_price_id }}">
+                            <span class="badge">Most Popular</span>
+                            <span class="po-text">
+                                <span><span class="price">$29.99</span> <span class="period">/ month</span></span>
+                                <span class="po-note">Badges appear unannounced — stay covered</span>
+                            </span>
+                            <span class="po-go" aria-hidden="true">Choose →</span>
+                        </button>
+                        <button type="button" class="price-option" data-price-id="{{ author_yearly_price_id }}">
+                            <span class="po-text">
+                                <span><span class="price">$24.99</span> <span class="period">/ month, billed annually</span></span>
+                                <span class="po-note">$299.99 a year</span>
+                            </span>
+                            <span class="savings">Save 17%</span>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="pricing-tier">
+                    <h3>Publisher</h3>
+                    <p class="tier-subtitle">For publishers and agencies</p>
+                    <ul class="tier-features">
+                        <li>Track up to 5 books</li>
+                        <li>Checked every hour, day and night</li>
+                        <li>Email alert with the screenshot attached</li>
+                        <li>Full-page captures archived to your dashboard</li>
+                    </ul>
+                    <div class="price-options">
+                        <button type="button" class="price-option" data-price-id="{{ publisher_weekly_price_id }}">
+                            <span class="po-text">
+                                <span><span class="price">$29.99</span> <span class="period">/ week</span></span>
+                                <span class="po-note">Launch Week — for a single launch</span>
+                            </span>
+                            <span class="po-go" aria-hidden="true">Choose →</span>
+                        </button>
+                        <button type="button" class="price-option" data-price-id="{{ publisher_monthly_price_id }}">
+                            <span class="po-text">
+                                <span><span class="price">$59.99</span> <span class="period">/ month</span></span>
+                                <span class="po-note">Badges appear unannounced — stay covered</span>
+                            </span>
+                            <span class="po-go" aria-hidden="true">Choose →</span>
+                        </button>
+                        <button type="button" class="price-option" data-price-id="{{ publisher_yearly_price_id }}">
+                            <span class="po-text">
+                                <span><span class="price">$49.99</span> <span class="period">/ month, billed annually</span></span>
+                                <span class="po-note">$599.99 a year</span>
+                            </span>
+                            <span class="savings">Save 17%</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="checkout-error" id="checkoutError" role="alert"></div>
+
+            <p class="pricing-foot">
+                Cancel anytime from your account — access continues to the end of the paid term.
+                See our <a href="/refunds">refund policy</a>.<br>
+                Already have an account? <a href="{{ url_for('auth.login') }}">Log in</a>
+            </p>
+        </div>
+    </section>
+
+    <!-- Footer -->
+    <footer>
+        <div class="contact-section">
+            <h2>Need help?</h2>
+            <p>We're here to help you track your Amazon success</p>
+            <a href="mailto:support@screenshottracker.com">support@screenshottracker.com</a>
+        </div>
+
+        <div class="container" style="padding-top: 30px;">
+            <div class="footer-links">
+                <a href="/terms">Terms of Service</a>
+                <a href="/privacy">Privacy Policy</a>
+                <a href="/refunds">Refund Policy</a>
+            </div>
+            <p style="opacity: 0.6;">© 2026 Screenshot Tracker. Not affiliated with Amazon.</p>
+        </div>
+    </footer>
+
+    <script>
+        // Smooth scrolling for anchor links
+        document.querySelectorAll('a[href^="#"]').forEach(function (anchor) {
+            anchor.addEventListener('click', function (e) {
+                var target = document.querySelector(this.getAttribute('href'));
+                if (!target) return;
+                e.preventDefault();
+                target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            });
+        });
+
+        // Checkout straight from the landing page. /create_checkout does not require
+        // a login, and the Stripe webhook provisions the account afterwards, so a
+        // visitor who has already decided never has to register first.
+        (function () {
+            var errorBox = document.getElementById('checkoutError');
+
+            function showError(msg) {
+                errorBox.textContent = msg;
+                errorBox.style.display = 'block';
+            }
+
+            document.querySelectorAll('.price-option').forEach(function (btn) {
+                btn.addEventListener('click', function () {
+                    var priceId = btn.getAttribute('data-price-id');
+                    if (!priceId) {
+                        showError('That plan is not available right now. Please email support@screenshottracker.com.');
+                        return;
+                    }
+
+                    errorBox.style.display = 'none';
+                    btn.disabled = true;
+
+                    fetch('/create_checkout', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ price_id: priceId })
+                    })
+                        .then(function (r) { return r.json(); })
+                        .then(function (data) {
+                            if (data && data.url) {
+                                window.location = data.url;
+                            } else {
+                                btn.disabled = false;
+                                showError('We could not start checkout. Please try again, or email support@screenshottracker.com.');
+                            }
+                        })
+                        .catch(function () {
+                            btn.disabled = false;
+                            showError('We could not reach the payment service. Please check your connection and try again.');
+                        });
+                });
+            });
+        })();
+    </script>
+</body>
+</html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    {% include 'partials/gtag.html' %}
     <title>Amazon Screenshot Tracker - Capture Your Success Automatically</title>
     <meta name="description" content="Automatically capture screenshots when your Amazon products achieve bestseller status. Track rankings, set category goals, and get instant notifications.">
     <meta name="facebook-domain-verification" content="rkch02n9yb1lb25ncudpl8hafli0bo" />

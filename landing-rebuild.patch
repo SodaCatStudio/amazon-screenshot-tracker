@@ -1,0 +1,4546 @@
+From 0eda06bdc4fd6b2374a0d4acf03a247bc53ec0be Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 18 Sep 2026 00:06:30 -0600
+Subject: [PATCH] Pay-first funnel: rebuild landing page, retire free
+ registration
+
+Landing page:
+- Palette moved to the logo's navy (#010b1b, sampled from icon-512.png) so the
+  flattened logo PNG sits on the nav with no visible edge; short navy->darker
+  navy hero gradient replaces the navy->orange one that went muddy at the fold.
+- Real logo replaces the trophy emoji; wordmark stays live text so the nav stops
+  wrapping to two lines (107px -> 53px at 390px, which also fixes the fixed-nav
+  overlap of the hero).
+- New hero copy leading with the loss, one primary CTA, 'See how it works'
+  demoted to a text link, and the captured badge moved above the fold. A 2x crop
+  of the title-and-badge region is served below 700px so the badge stays legible.
+- Hero split: the navy gradient ends at the headline and everything from the
+  subheadline down is dark-on-white. The capture is itself a screenshot of a
+  white Amazon page, so framing it in navy read as a bright hole; this also
+  lifts the CTA ~86px and leaves the hero band and footer as the only dark
+  regions on the page.
+  demoted to a text link, and the captured badge moved above the fold. A 2x crop
+  of the title-and-badge region is served below 700px so the badge stays legible.
+- Proof section moved directly under the hero (was starting 4,555px down on
+  mobile). Email subject now matches the badge in the capture, and the
+  placeholder Resend sender address is replaced.
+- Six feature cards cut to three, emoji icons replaced with inline SVG.
+- Pricing cards are now buttons that post to /create_checkout. One 'Most Popular'
+  badge instead of two, weekly reframed as 'Launch Week', annual shown as a
+  monthly-equivalent, refund policy linked.
+- Mobile document height 8,739px -> 6,445px.
+
+Funnel:
+- /register retired and 301'd to /#pricing. It was public, unauthenticated, had
+  no rate limit, and created a users row from an email and password - the fake
+  signup vector. Accounts now come only from a signature-verified Stripe webhook.
+- /success renders the password form inline, gated by the verified-paid session,
+  and polls /success/setup_status while the async webhook lands. Removes the
+  dependency on an emailed link that expires in 24 hours.
+- complete_registration.html rebranded (it said 'Amazon Bestseller Monitor' and
+  'Create your free account' to people who had just paid), Confirm Password
+  dropped, five-rule password policy reduced to 8 characters, enforced server-side.
+- Paddle.js removed from pricing.html; checkout is Stripe only.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01CfGyHszvnpujaJSzL4Kqt8
+---
+ main.py                                   |  290 +++--
+ static/screenshots/badge-hero-mobile.webp |  Bin 0 -> 16450 bytes
+ templates/auth/login.html                 |    4 +-
+ templates/auth/register.html              |  463 -------
+ templates/complete_registration.html      |  576 +++------
+ templates/landing.html                    | 1401 ++++++++++-----------
+ templates/pricing.html                    |  514 ++++----
+ templates/success.html                    |  359 +++++-
+ 8 files changed, 1569 insertions(+), 2038 deletions(-)
+ create mode 100644 static/screenshots/badge-hero-mobile.webp
+ delete mode 100644 templates/auth/register.html
+
+diff --git a/main.py b/main.py
+index dba4d8c..aa0cc74 100644
+--- a/main.py
++++ b/main.py
+@@ -3252,132 +3252,25 @@ def setup_account():
+ # Authentication routes with best practices
+ @auth.route('/register', methods=['GET', 'POST'])
+ def register():
+-    """Free registration - no payment required"""
+-    if request.method == 'POST':
+-        email = request.form.get('email', '').lower().strip()
+-        password = request.form.get('password')
+-        confirm_password = request.form.get('confirm_password')
+-        full_name = request.form.get('full_name', '').strip()
+-
+-        # Validation
+-        if not email or not password or not full_name:
+-            flash('All fields are required', 'error')
+-            return render_template('auth/register.html', email=email, full_name=full_name)
+-
+-        if password != confirm_password:
+-            flash('Passwords do not match', 'error')
+-            return render_template('auth/register.html', email=email, full_name=full_name)
+-
+-        # Password strength validation
+-        if len(password) < 8:
+-            flash('Password must be at least 8 characters long', 'error')
+-            return render_template('auth/register.html', email=email, full_name=full_name)
+-
+-        conn = get_db()
+-        cursor = conn.cursor()
+-
+-        try:
+-            # Check if user already exists
+-            if get_db_type() == 'postgresql':
+-                cursor.execute("SELECT id FROM users WHERE email = %s", (email,))
+-            else:
+-                cursor.execute("SELECT id FROM users WHERE email = ?", (email,))
+-
+-            if cursor.fetchone():
+-                flash('Email already registered. Please log in.', 'error')
+-                conn.close()
+-                return render_template('auth/register.html', email=email, full_name=full_name)
+-
+-            # Generate verification token
+-            verification_token = secrets.token_urlsafe(32)
+-            verification_expiry = datetime.now() + timedelta(hours=24)
+-            password_hash = generate_password_hash(password)
+-
+-            print(f"📝 Creating new user: {email}")
+-            print(f"   Verification token: {verification_token[:20]}...")
+-
+-            # Create user with FREE tier (no subscription yet)
+-            if get_db_type() == 'postgresql':
+-                cursor.execute("""
+-                    INSERT INTO users (
+-                        email,
+-                        password_hash,
+-                        full_name,
+-                        is_verified,
+-                        verification_token,
+-                        verification_token_expiry,
+-                        subscription_status,
+-                        subscription_tier,
+-                        max_products
+-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+-                """, (
+-                    email,
+-                    password_hash,
+-                    full_name,
+-                    False,
+-                    verification_token,
+-                    verification_expiry,
+-                    'inactive',  # No subscription yet
+-                    'free',      # Free tier
+-                    0            # Can't add products yet
+-                ))
+-            else:
+-                cursor.execute("""
+-                    INSERT INTO users (
+-                        email,
+-                        password_hash,
+-                        full_name,
+-                        is_verified,
+-                        verification_token,
+-                        verification_token_expiry,
+-                        subscription_status,
+-                        subscription_tier,
+-                        max_products
+-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+-                """, (
+-                    email,
+-                    password_hash,
+-                    full_name,
+-                    0,
+-                    verification_token,
+-                    verification_expiry,
+-                    'inactive',
+-                    'free',
+-                    0
+-                ))
+-
+-            conn.commit()
+-            print(f"✅ User registered: {email}")
+-
+-            # Send verification email
+-            if email_notifier.is_configured():
+-                print(f"📧 Sending verification email to {email}...")
+-                success = email_notifier.send_verification_email(email, verification_token)
+-
+-                if success:
+-                    print(f"✅ Verification email sent to {email}")
+-                    flash('Account created! Please check your email to verify your account.', 'success')
+-                else:
+-                    print(f"❌ Failed to send verification email to {email}")
+-                    flash('Account created but email verification failed. Please contact support.', 'warning')
+-            else:
+-                print("⚠️ Email system not configured")
+-                flash('Account created! Email verification temporarily unavailable. Contact support.', 'warning')
+-
+-            conn.close()
+-            return redirect(url_for('auth.login'))
+-
+-        except Exception as e:
+-            print(f"❌ Registration error: {e}")
+-            import traceback
+-            traceback.print_exc()
+-            conn.rollback()
+-            conn.close()
+-            flash('An error occurred during registration. Please try again.', 'error')
+-            return render_template('auth/register.html', email=email, full_name=full_name)
+-
+-    # GET request
+-    return render_template('auth/register.html')
++    """Retired: free self-service registration no longer exists.
++
++    Why this route is gone rather than merely unlinked. It was public,
++    unauthenticated, created a `users` row from nothing but an email and a
++    password, and carried NO rate limit (compare `login()` below, which has
++    `@limiter.limit("10 per hour per ip")`) - so it fell back to the global
++    default of 50/hour per IP. That is how the fake signups got in, and the real
++    damage was not the junk rows but the bounces: bad addresses degrade the
++    Resend sending reputation that the badge-alert emails depend on.
++
++    Accounts are now created only by `handle_checkout_completed`, which runs off
++    a signature-verified Stripe `checkout.session.completed` webhook. Creating an
++    account therefore requires a completed card payment, which bots do not do.
++
++    301 rather than deleting the route so that indexed links and any old ad URLs
++    pointing at /register keep working instead of hitting a 404. There is no form
++    left here to abuse.
++    """
++    return redirect('/#pricing', code=301)
+ 
+ @app.route('/login_success')
+ @login_required
+@@ -4042,13 +3935,30 @@ def complete_registration():
+ 
+     if request.method == 'POST':
+         password = request.form.get('password')
++        confirm_password = request.form.get('confirm_password')
+         full_name = request.form.get('full_name')
+         
+-        # Validate required fields
++        # Validate required fields. The 8-character rule is enforced here, not just
++        # in the template: the client-side checklist was relaxed from five rules
++        # (upper/lower/number/special) to a single length rule, and client-side
++        # validation is a hint, not enforcement.
+         if not password:
+             flash('Password is required', 'error')
+             return render_template('complete_registration.html', email=email, token=token)
+ 
++        if len(password) < 8:
++            flash('Password must be at least 8 characters long', 'error')
++            return render_template('complete_registration.html', email=email, token=token)
++
++        # Both setup forms (/success and this page) send confirm_password. Checked
++        # here as well as in the browser: client-side validation is a convenience,
++        # and a mismatch that slipped through would lock a paying customer out of
++        # the account they just bought. Only enforced when the field is present, so
++        # an older emailed setup link that renders without it still works.
++        if confirm_password is not None and password != confirm_password:
++            flash('Those passwords do not match. Please retype them.', 'error')
++            return render_template('complete_registration.html', email=email, token=token)
++
+         # Verify user has active subscription
+         conn = get_db()
+         cursor = conn.cursor()
+@@ -4940,6 +4850,23 @@ def test_email():
+     except Exception as e:
+         return f"Email test failed: {str(e)}", 500
+ 
++def _plan_price_ids():
++    """Stripe price IDs for the plan buttons.
++
++    Shared by /pricing and the landing page. The landing page's pricing cards used
++    to be inert markup, so a visitor who had already decided had no way to pay
++    without registering first; they post to /create_checkout now and need these.
++    """
++    return {
++        'author_weekly_price_id': os.environ.get('STRIPE_AUTHOR_WEEKLY_PRICE'),
++        'author_monthly_price_id': os.environ.get('STRIPE_AUTHOR_MONTHLY_PRICE'),
++        'author_yearly_price_id': os.environ.get('STRIPE_AUTHOR_YEARLY_PRICE'),
++        'publisher_weekly_price_id': os.environ.get('STRIPE_PUBLISHER_WEEKLY_PRICE'),
++        'publisher_monthly_price_id': os.environ.get('STRIPE_PUBLISHER_MONTHLY_PRICE'),
++        'publisher_yearly_price_id': os.environ.get('STRIPE_PUBLISHER_YEARLY_PRICE'),
++    }
++
++
+ @app.route('/')
+ def index():
+     """Landing page - properly handle authenticated users"""
+@@ -4952,7 +4879,7 @@ def index():
+             return dashboard_view()
+         else:
+             print("🔍 INDEX: Showing landing page for anonymous user")
+-            return render_template('landing.html')
++            return render_template('landing.html', **_plan_price_ids())
+ 
+     except Exception as e:
+         print(f"❌ INDEX: Error: {e}")
+@@ -4960,7 +4887,7 @@ def index():
+         traceback.print_exc()
+ 
+         # If there's an error, show landing page
+-        return render_template('landing.html')
++        return render_template('landing.html', **_plan_price_ids())
+ 
+ @app.route('/debug/baseline_screenshots')
+ @admin_required
+@@ -5826,14 +5753,7 @@ def add_product():
+ @app.route('/pricing')
+ def pricing():
+     """Pricing page with Stripe price IDs"""
+-    return render_template('pricing.html',
+-        author_weekly_price_id=os.environ.get('STRIPE_AUTHOR_WEEKLY_PRICE'),
+-        author_monthly_price_id=os.environ.get('STRIPE_AUTHOR_MONTHLY_PRICE'),
+-        author_yearly_price_id=os.environ.get('STRIPE_AUTHOR_YEARLY_PRICE'),
+-        publisher_weekly_price_id=os.environ.get('STRIPE_PUBLISHER_WEEKLY_PRICE'),
+-        publisher_monthly_price_id=os.environ.get('STRIPE_PUBLISHER_MONTHLY_PRICE'),
+-        publisher_yearly_price_id=os.environ.get('STRIPE_PUBLISHER_YEARLY_PRICE')
+-    )
++    return render_template('pricing.html', **_plan_price_ids())
+ 
+ @app.route('/cancel_subscription', methods=['GET', 'POST'])
+ @login_required
+@@ -8259,9 +8179,101 @@ def subscription_success():
+         except Exception as e:
+             print(f"⚠️ Could not verify checkout session for conversion: {e}")
+ 
++    # Post-payment account setup now happens on this page instead of only via the
++    # emailed link. With the free-account flow removed, this is the ONLY way a
++    # paying customer gets access, and setup_token_expiry is 24 hours - so a
++    # customer who pays at 2am and misses the email becomes a live charge with no
++    # account (a refund or a chargeback). The email still goes out as a backup.
++    #
++    # Safe because the email comes from the Stripe session we just verified as
++    # paid, never from client input, and session ids are unguessable.
++    setup = _setup_state_for_session(session_id)
++
+     return render_template('success.html',
+-        message="Payment successful! Check your email to complete setup.",
+-        conversion=conversion)
++        message="Payment successful! Set your password to finish setting up.",
++        conversion=conversion,
++        setup=setup)
++
++
++def _setup_state_for_session(session_id):
++    """Resolve the setup token for a paid Stripe Checkout session.
++
++    Returns one of:
++      {'state': 'none'}     - no/invalid session id, fall back to "check your email"
++      {'state': 'pending'}  - session is paid but the webhook has not landed yet
++      {'state': 'ready', 'email': ..., 'token': ...} - render the password form
++      {'state': 'done'}     - this account already has a password set
++
++    'pending' exists because Stripe redirects the browser here immediately while
++    the webhook that creates the row is asynchronous; the template polls until
++    this flips to 'ready'.
++    """
++    if not session_id:
++        return {'state': 'none'}
++
++    try:
++        cs = stripe.checkout.Session.retrieve(session_id)
++        if cs.payment_status != 'paid':
++            return {'state': 'none'}
++        email = (cs.customer_details.email if cs.customer_details else None) or cs.get('customer_email')
++        if not email:
++            return {'state': 'none'}
++        email = email.strip().lower()
++    except Exception as e:
++        print(f"⚠️ Could not verify checkout session for setup: {e}")
++        return {'state': 'none'}
++
++    conn = get_db()
++    cursor = conn.cursor()
++    try:
++        cursor.execute(q("""
++            SELECT password_hash, setup_token, setup_token_expiry
++            FROM users WHERE LOWER(email) = LOWER(%s)
++        """), (email,))
++        row = cursor.fetchone()
++    except Exception as e:
++        print(f"⚠️ Setup lookup failed for {email}: {e}")
++        return {'state': 'none'}
++    finally:
++        conn.close()
++
++    if not row:
++        # Webhook has not created the row yet.
++        return {'state': 'pending'}
++
++    password_hash = row['password_hash'] if not isinstance(row, tuple) else row[0]
++    setup_token = row['setup_token'] if not isinstance(row, tuple) else row[1]
++    token_expiry = row['setup_token_expiry'] if not isinstance(row, tuple) else row[2]
++
++    if password_hash:
++        # Existing registered user who just upgraded - they already have credentials.
++        return {'state': 'done'}
++
++    if not setup_token:
++        return {'state': 'pending'}
++
++    # Guarded because Postgres may hand back a timezone-aware datetime while
++    # datetime.now() is naive, and comparing the two raises TypeError. An expiry
++    # we cannot evaluate should not block a paying customer from setting a
++    # password - complete_registration() re-checks the token in SQL anyway.
++    try:
++        if token_expiry and token_expiry < datetime.now(getattr(token_expiry, 'tzinfo', None)):
++            return {'state': 'none'}
++    except TypeError:
++        pass
++
++    return {'state': 'ready', 'email': email, 'token': setup_token}
++
++
++@app.route('/success/setup_status')
++@limiter.limit("60 per hour per ip")
++def success_setup_status():
++    """Poll target for the /success page while the Stripe webhook lands.
++
++    Gated by the same verified-paid session id as /success, so it cannot be used
++    to enumerate accounts: it only ever reports on the session's own email.
++    """
++    return jsonify(_setup_state_for_session(request.args.get('session_id')))
+ 
+ @app.route('/cancel')
+ def subscription_cancel():
+diff --git a/static/screenshots/badge-hero-mobile.webp b/static/screenshots/badge-hero-mobile.webp
+new file mode 100644
+index 0000000000000000000000000000000000000000..a807b47448347b979eb1931dc27bf7bdf4376eb6
+GIT binary patch
+literal 16450
+zcmV-IK)t_GNk&FGKmY(&MM6+kP&gniKmY)+0Rf!>D$oPS06r-ah(e*EBNLgt@Gt^|
+zw6}g6JiZXA+gL#wbLrH1r}`HRKB2nf$$O%|>V3NW)bzpqgVcljFGv429&P?`K8K!;
+zUbkP-`dfeZ{?&VJe#Uz$>Y9BI$=8_wh5Uf?kMW<I{<r<V{Ga)M?%%gRA^+z2KI@P9
+z{(^rT`&;+_??2{0=6`<u?fIYe_sJj3zi$6|{sZyv<QMUe<$v9OuYTSCf&JwA#fe8+
+z{|nGZ+t0aw;r|EdCG*~beslgq_Cwj9_8<GaiS!EcJ^v&Bcl!@pf1Cfa|HuA^@?YrB
+z`(OJ{@IT_eX$e)SNSCL+R;40dp7~moiF$kGYEmWX@0F=Ym#4l~r6KgPm1_^u8Lq{q
+zA~sSn^U6h{FiBycLm+#>$jp^JNEJQk6se6qJEB=um2>X@l}s#S&&K|8P}57q;tN8;
+zrC`J<<HnW%Y<_Zk#H%d66Dkhf2S$aJlN+}qmBA5m_N6s%MLpw_FW3=XFJsMhs8tHQ
+zEcrHy7CuUH$)%86Lh{bZ8&+yHIGfm!Nl_3=xdx{ZMKI`)=T>+iH#PrfG)K9e#h1ls
+zOS8}o+X`lFa=~4|j0}GKS}>>9cJq$4+8{>EIyj5b4>RapTu7HPh*PcLDd+%+E*N6Q
+zzvT0P<x&{i-#d{M0Z;G|B{XJ?2G{C>a1cVd8_IJ$iyx8_>$PIK(PU#x+h_GwqNK%P
+zo&w!iIX2!|7c|qPaf=t8y)oS77>!wniA1Jq9(=*V0y!GxnFJFVBuTw>jpYbGb0G-A
+zd9HdW(sWM~1ImQJ?1DZtxD#Kvc`)+NyCs6J^)aDnXmpyYhPj}%rzmBE9kDpWNhe_(
+z+|iy4Zw-E2QJiD=;&8%Dwwp1}Q#mq_!d8PV27nNXq0|tB*HOs-KEARY_*Vq+$8U32
+zWcE@gNKqWyqU*0yT!MO{oX)EUVe)b$6;b&nqCU7GlvY*R>6lJulT)V>d#@hLnOnP?
+zm=@YyQmv?F(FSci7-G|$1^w|R|0N`OyXUN}&4z%!y9S5}^eKY*^7@s53vb!9uJ)1B
+z_KR!_c^H09nf7R$LKm#a$P^a47kyz2qBn?Mr*(bX!L5iR^T?DW4~QRn1qihZmF{3K
+zA>mpneA~4eHk=hkF@ljr`pIAACP=nwc-k;JvyyqviG%R=9s%JbCj98<?E3X2V$zFP
+zhV1>PWXll7;Q?honU*eH8g8ey=`{ym=p%$;h7k>u@OkXi3);Vd3I1j#HZSCF!NZf;
+zDg>g444OCyzuwLAER4K%FwhUOb}wT>mR=X-M~%RN+N>9z_mM28x6pO(ksLjp@@cuu
+zHd_REZ;!Wlg(yy1Xy`J4seliPk$8eTURHTn=i5`z<C1kFd0A4pI29*cny%?^l5wu*
+z9QD7+_ez_&dxeccF@TAx=Yi|$%oB=vR(ikByt`1e0_}ZuVo)I4v?_)h^Deu`%$nTr
+z!<pwU*`wY6f)p#$%ijjex7|R0GoZY9#=zc6?}?zGlStkmL2(GU8BvncYq1Jp^Iz%d
+z6~h6-*V?9G+!BBmj381*_u(U`9Hb}j#ojNVGHilQ2kzr~xn%ds)TB$(-z!p)FHd~$
+zjDfXd=`<-ozr}aWv7d|{(43k)ib7Qg+A8B+R>x?ojdfccqOLYDYW_?;+X7^n5j&(U
+ze}scmWDjR&lSFu~sopZPB>N^51Q|KqZ!x55iRTzFH)cne8*5FH!E_$CZ@#MmdBuST
+z4Od2U#T*$|C#icyTx+V>?G<sZt7EiP#=5PJ(N`Mk*}25qLiw$$K|Lx{^Yo9bFIwXY
+zS74qtSAedu@w^uOpW8o~Tx{AZwCGue^W>#?5L*UKP^HIJVRaB|q-f0`v78BtHzVOB
+zdxdx2&1GOAAXzyvPe}Q{y@ka1GhlS~__BNDYEmWX@0F=Ym#4s|xW%+FiJg?MHo4{L
+zIet@v6=J8-^YvaLtAj^C<t8<z$*gbM_~8GP2=y*1pH8^m9fz2ecOxX#5{lFZ3aUH}
+z_#WnKG1)Ohk<z7EyXg9R@qZT`Pi6}AGU7IdYYbNSIh(7#``!w}g8gtG5UL-!YO^$n
+z{y$)Tl<n11;ov;wasKEo;eOg=m8UDGer2sz$7rjKbz2>xt~J$cc8wCnoMW`rqkNQu
+zvGVN5BI01yPtohK{yoG(@+qV!E-gUN4`DqRpbI-ua36TTna5?}O>_@r$YkNWK*O?a
+zcIP@~30ces_Yxu2RJX`43|JFYvDzx*T~^0vtBrMA9iv3B<IRaj>*Rg-*x!h|YXS;{
+z3tEL*^eOIt9k875*6-u>AtZ$R%XgZ!rZkRn=E#ck`Tu;6xoc&A_uV4^5Y4KToco<Z
+zI361p8gjh10GQJHbmlBY0dV!3d+1_^XPKauKO@LSe#ovDh)pK;0I*jALh%E3XW6I{
+zv6z@A2s!a&_sZ0yOVi&gQjqq;i1YRci};S|fdU?G<k6K^q$xf})H>xlIyH4Vm$*aC
+z0F)T+9H&f2hm;{Us~%ruT|?1qP`bXEIa4-w{0Y&H;h##>?=}U)#=zdoE#5mO<;JYl
+z=-pSs(ngyUPoSPZ#34g<Ry6*JaB2M#;M4jg!Kd^~P<qXO8e)UVSvFY}X9&p}4dqVV
+zE1gWSxl$CySKSx4jFW^29S8xNU&~sbcs8P2>z_A=B0}zVuZu8VPkw^Il_?VR_sn-I
+zQjsrDe631Ey*={V_OhFCfB^pg<0HTTi<$rc3na<(v&T}P8(wvi$e*nQP1?c%POe+h
+znYNxaQj7C^z%R@NdJtjSAqmS0yLAUmh;cY13Ns{s5`6}4ww0a2%eYWx`MDTd!!XY*
+z{MyIM7+gGU=@TiU^c9vVnOqk*oROSNPJh#*aR4qgDRiF>K8-%0hIAa&zl1zKwke<$
+z-}>Z(RjCnNy`KKfdwGw->dSNekU^W&VJ3Q_Af#{gOlLqp<`(t~6+>*A=#pAYPni64
+zZ~W<G>e1a+6#)r>0)~UVrLq(i$d9CKm#C?9;xF>{gBmp(GzN3yHU1N*%kTtx>$a4o
+z<b2daFs9DGVM09yA<%`GK$Oy^_g!>Y5rUy-S2+LvnbRuRa-%i;H7%_R$9k{fFuWN}
+z`i545Xmjk%G=&9J9#d#;#0+pIRa#FF7k`p@q7w8r7_Y4Zh+rp2z||}-W51Q4j{;X7
+zHT^ercrcj~60WL1-S1c)TZF8sk|(!LuMD~4%gpXA{r(@Rkd)7B7PL+J6+Ti!>_pu1
+za~k4(sy`z5j{TqJ<xYw;qs;;yHmyo+Fq!)zaE3at$wXWHf8aCMO}<+aOWjLoec2W}
+z3(84a_6&i8P=P449GOCNrm5E+!ByqSiz;$Y{cQ8S^^|x6G{4&vMHdO~f+xH3?J5L;
+zS6TgX?1TdE+isWGZnG+hc_?CIxVeMXPG%QnEh$>MvUJmzsj9wn;c+nSgrnt;2?{Y+
+zE8aY3^e)Lj#157r<DnZ!CXXphcUIOUK0^(F<r9eZnF&iP!;BN_scRI8%~lL(&G)^k
+zZ*)4xe4r45IK9%k=1?hy7Q;6LBuz7{^%#L%WO`BM+r)iO&v+wYlBV!_Bc0an-Yi7g
+z>fyes*OWhAf6W7@r^n9(ovZVM)V^V?y<_u}jQQZVa#<QpCQk{GaJ9Y2VbmO+IyuZj
+zOT8uoSf91Yn&nn_sa?1@E2!JHQ@q^TF57k+6Ex+ojJ#EU$_`F7rx-O&D&zqffjwMn
+zl}G)4!>1j0@_V8tZ^`969*|eUX}?im3H|5IZ)dbF$(2aS%(<zV7>0Hj-YE-t-KJ%{
+zRKa@NBLNonXL&>D$cB8sumLe2H_TD$9$ad>^{>tz;g~+GM(*S5^qTTir?J?eBGsJ?
+zZ%`Dc?Icuu+lY(nTO72T=TSI^S-4I7v;X)VKWr<ycOfzl#M#(o-&6MJ_aBb)3Iu@f
+zy+u6mefhn%wUXI<CDz#BkZRvKbA|CEkjbOOaxW^(-AI(BI!wE`B1sKzKj=Kf_viR_
+zp*TZM&#!%;dYWtZMsg)=29L=nXa<IMJ55H_{tPCkd3mQBWI8=J7{9lg97CYdqV23J
+z7jXTe>5TD!@gOS?rx8bm-DN}Mhj7(XiscRBB5TV-YAtYYxH=2cZ>**-ooGWDn^H1C
+z0|IrMT}($j=@3Qm{81Vf+Qn->oy&d|DaJQ1pGPI)W^SRmubxe*vOkuAq8nM=`mwB!
+z)fXzxZQj8jI5E{{ZIkOF$pw1j5{?BFYF0wfhTYH7w0L_c;#|^}oN<#i8-)U3h|fJ8
+zuLE_ciA%eT0K99Bz6Kyy=jbmo4T*-#qV)o3##($Y`Wg|SwV*53U8;Gn{K@+(d7-Xe
+z@q9mC&iKZmhd*1Or|dJZ=iRVb@J8k?Xn$aiZVt0Rkic<c3;BmK6Ml+d^;1X=rK^{a
+zh+~<oJ4J0h>@;6UCPn}f_%&xAU_(KEDg^c;d(9GDXZz>8OhV1lLAPa;C&~2vUlFtX
+zHwpxb7dW{Ti7|H4IbgSr^hAsUP#L#vEu}x5sI^s}sBEVI*h*>x9>b#H;^)gn=3Prt
+zOhOB5Z&A&uqg4EG4jB)4GJmN>k)}|nhtCJa&h=<7HRLCtz^{Z~DOHB+aoz&@>fpBH
+zyX%FRk<9qauizd6+9`bAFkU8HHiLvU-*fM%{pe`(wgNIeqcGj3fcE~mgONX($9)&~
+zP5Wk79@z<T4zrQX@%bbrs2=rt)7-pC0A{5!wC0#kn^Onm`_G>|^Xg2Odhed=^ow1x
+z^uE90WoTOV0Oh@VJ~0!g>H^XpIfNt{7{Ye$=?>6589z=sTi-FC-9i#r($g3jG>{m&
+zb`m$->Kj!prqaoK%x4pft1l8W&iTDB$3|mcr2Z$iH`m@E$YOw00?;i7Llfu|;RlV!
+zwAN!+K1v}Nyd?+TzkY?`{UM2+jr4c!ClH=BjAv!EhzMW+!+bRNxg)%qkliC?j)?|c
+zsapXDxaLHaRKhFgfn?hgyG`mxypHopK_m64yas%5cVWfK|5_QzyhO5_b3uyEQlGTE
+zF7xL-()!<oGs*!&)nX_tuXj+C*VSX#1$GUIlo~-&k6yg=jp{!GffBCzDzJh;ohb8s
+z^3d%Atl|cM<H~h0JHjuK1K%&A>v#;b8u3NGLR>O{X%+PP?S@QyACyK<O|?n>%!{1A
+zlDh0bo8mBzkvsjVdApjhih-VtmmlzZN2zZ);0JlC-@*GH((q?GkzXVVepDVEn-dd+
+z`SXJGK0Rg;<hU~19ppr+1IC5}?I<F;mni(9h5v+&>0r-RL9MpPI5g^g293W#?6nMY
+zp=IV&LWp#*hLg5r*2!2B0py&(-qE4S{o9kjPxWum%&bO>kr2QkQoW=~f>b#WeQ!e1
+zxKa-B_N@n+ABUji_0!ZaAm~)Gg@&CwG;|Tp3LoZAW+jNPM4@ZY(*{oybJH2)6^n>w
+z&}f2cvLDLv3AaB%{O(RGUZ8%)hMw`=oB{x<Q^?@-aB*M7UAyCq7RG{Q^VqkUV6}XE
+z!ZR4$_3L?aS%!C8XS$q#Zd<CWp1vds)rF`i7Gm1{)mWPSrE9DDR=uAns4LPB@g?Ak
+zJk?UJfaAt^9<5|M-pV3o>3U4)#1V{d^0($1T2U%IR^fFg!T&R?*vT+iU6Q&VcA3};
+zU6I`-#IASyO#Fk`FDRNn%(nWK&fc2$7;%%bbT|{3oZQ7Qm_hN7nCfqA%RI|vjh<-w
+zkt|dr<gZ`4){<&>m<ti!`=c4DR|n?14a8XC2tzN#6TyB|P@}cFKV=?}G4Y5POFnA3
+zo8K@ihKfjuv90>k?G4&>xSZ4+oIfYE2&9D0qPUu8{k59wF!Uc|Ky=eiu86$9T5M}{
+z*Aw*8{g|Oy1mTlXNSbCX&kE!;8B11|hXHF8XJ3WtU{hvz*jzw}!DR}T1+U*#S{nz}
+ziMUIH=O`b@o$iP|HPwFG*TnbZ94ucn{$%C&4ZNFyb-PfB0F@=@Qua;esVZn>afU$7
+z%FEiJW9V=VKMHwTH+Y#0;Y)lQB{}@;rQfpyS(<|(`)^n9J^LjN@wJO^%_ajis!rgx
+zOt%cfc(TZtaTZjY9RiKiEi8JhmwZ|GQc2Gt8FRHk*9>CrUNZIA$>-_*bK^PFI`YIC
+z%NqT9l88!TtbbVWba~^<)Hx+VmgX3d8tMAKm>xL7cKy-f+LE`f+m>31&*Q3CI5f(m
+zTZ%r)y{(l#!Q3HQ_+vw;DQ^US(`b}7L}^Pzb1D{b|6!x1)McK8eQGJxU%5B8&J7D>
+z@KS{t+;m8JXCjkH2`e@0Di8#sl!|0dJ-=ds2mSQQc&?x=om8H@NuYHtIdJ4luu4Ok
+z7c9~_uCz{$XL4G<%tfl(vQtKZQ?oR2k`MmxelK<4_!YadXq+`ZUwcVZ^kL!)qKhFE
+z7qcMhVZd{3JJtcdX~$-d)Z=^`k@$+(2?AA3{cc_Mjv@0CbVrHPdnlY*r)HOVjhxua
+zk#3s8nSLVIA4`w_8oTcU7m-(%q1U<uq<;VW@jWbx=RPrj!Npse*wm&9kwle$NgS28
+z_0gr%&;0XQL9SFTqw7Qjd$Xg;k9?PdRYfdGz#2Y@zuC<!tUe%;&^T1yX2`?t&(hDH
+zMA3H<E?mOxs*q3tOCo{!mimwd(4?Gj{75>vU_t@g#~3L_akkcC5#S4I13yG^(_~-y
+zM!WZ;jx|k4MLX9#b0JSA8yb;}9Ga0>%(3DB+A^ZMI98DT(^>F4d4TOt;Z1CH{f^tG
+zG2?50Q>&=R@s-y<gUl<KaO)up1JHP$pgoZd8<kYOT-&GIzYYb;3zHRAU?B^h3<TmG
+zy&>a5jZbP*ni3xFCL6Kj7eh{j>0Q_E4t@ofUX_}ZV|E4oS6F{IOe&Ki@RGd-HcsvJ
+z_Jj>1dSX-ffaXZ6Q5H+l(9_FNlkcCo|7zWGA>T~k*IyL1S~kOUxl|N2qNmT-6`FEj
+zt%P!V$7BEE12Ra3Bg3B{!Y%umeYu;W=dt(^7(Ha}n#_dX3MH*e40_;UYOLJ`>Sowq
+z?HY0RYwoRYshGrO<nvoc0#`Iif)RE>bb@}qTOCUVk~`BoT19ih5;l{J9M=VW9`zl|
+zx8vT2OO0VI@j1GPaQ=HB;+4-AT+=W?dbj8w_vVx7ZZ}Frv-6vFNyof+<n>MiXcO0m
+zvCH&j^!w=#?3DfJ4RyW?2hhUO4Q!WqM@b9iY!v#gHCu767w_j%GW_l@t4J}zGIT69
+zWP;_4!jC$xDqBO}cpS;?m*h!ax6_C141v_bLgDBY#U06>NK@b|kOu<-5cl3M>W7wo
+zAxUZ4Hh#@I^%~%IRRLd}GNn77>|Dvo;o_Jy(_fTVl~-vF7Cvs@r1Bnp!LIR+MCH%7
+znUWO0k2h)vcL#}_uMaYwRVgZiakn@TKv8&=NdWokyApA4Mfal*#HJM?%fcm=MsOrN
+zKz1xA8|i#y#^&jvEe379Ze;P&h*wNBj5W`Q$Y~x$x#PSChg8T)w7C}5{<@zbBGa&g
+zkB*emA)RK#E+V2u7}IK4ysIqTGgZ;%Q*AAm+YLQGT*~ayCLtwBVMsm3w7pVhKu)=F
+ztDh!Af<z%X^?hYe78~z;<gWc52)P<s1%3zjQ;B_641cZ|C(dt(z5hsM5$MnnoGE7L
+zl84)n4q%I`$U|AL4-(Q?hlDno<ID)BSBchtmz4s1vCE52P$P>zSk3|~HVEZ{%G*((
+zbM^^f+{P3T(9N)*Q|SkfS;kck7#Ixl%$_=ULU%A#fW&{TyHASH!x76O^$W*?iNw<{
+zrIGrWhBl7_1!bp%qj3Z45E!*hMM;hhz7hZ1drEfd$iCQ_C1Sd7Fg#hAUZEiDhhyB5
+zRIkCZn_nyej<r@Qw(6?dw-(3B>i3EGCfM0@arE7L688tzEu^`Svci{?uRpq#Q?x`V
+z$3FBnkEj=#5G>`YiB8_^a@Z$Usn0*Z#vcqz+*F6!B_MFB&T`<v8*2hbf~21YQUi6v
+zXE(CiF-2UpKHFDD?o=~Eo|;Up6<n*e>ZchF&viA)<=4t<v6GEVh1}dYvqdVz!Ja|f
+zl5W>$Mn8-?$+0lDZ2Cd-{xzpxslNV}?b((w8F3U@4<mYg2kg8NTMbg|dCgVHC$0R@
+z?MeyM!#aIcP=DjaRB{^U6<F}@Qj0BY52t5-a$qtVMY@2ws64(znx?RJ6JwB@Xly)v
+zwQ8LtD+T7z*r2v*^gRpM_-ldP_(X@M7`*fFP{+r-z;yep9_8k~eI=?WA$=1<NxZ^P
+z_<09Llwb%E%8vpD!XreW{t;lMe&-uGvFKjAULcneq<?_fK<h}9q0RWIGkqSu`YCgR
+zxP@^_ym$eaesD&tn%(8s939wT_}z3oHlJjG<at&efheH>U(sorrV7}(``mZrFNtxO
+zMFI>lR)kr2&OBz9?FrQaN#1-1F#EnX=l4$+FAseU*5FSv$<OSSSPs#m87}Ab=u(!d
+zVFt;$F39H5)WBmf`H!bT&7-;N2NRn!NZ-|vhhNUz1P!PM%@H3_>k22IOj?gWBo778
+zJNQS1Y6WQv@KPaeb8|%A{#;tiYojZ&Z4<arJUjDNgj}^!5Sa$7l&UC!%jYrA`jB(1
+z5uhaxyY@lZ*!T>SpK54f#4(^S>*k~02OX8FF6z0YI-#yQJ!cbv!*32$GgKkKG87FJ
+z8#I5i1GErqxD~rqo(5y?@S<{Bef+f1TwQtr*U1;Ud)v`CCkt;SUU(K4aX&*s0kzk>
+zs#vi6R3D7x23kllQFlZCg#ob}iZeK?o|?P#p4ly26=vn1bac+a?OsB%V&juz<Opcb
+zfWt}qzg^0C7t;>mXCGixnpF*AJ|!Q80J)#zpf7mpwr+K$aaS*Cy{fTNk%R%fjnWAH
+zXaqjojDcRfxPHeDE!MkL6qMh|mCesskUJT8MU#gBxRw!3>ni->i2A^9A6F4k2d=$h
+zF#2NU5?r_NIF^37{z<)do$rA#pys*hEC(Kuk!@17ts{(<yu4_GX4)P#h3hWq?v|T8
+z-chERMOb@319eNupx?oNCZqS8z=ICtQMRBvWnhXb?)Rl8y>#I+d`EpSczAF9A<Lb~
+zA0RN0-o)zTe`>r@=UkmWgbT|wEBm|tsd{8dWXiRQ$%*>(cvnA(i!R=%E&}0uAB=x<
+zOsCbPi2T{HnA7OcYD#pw8?|uHV!403YCvUx7xQcOu;6bSDB(8>6Y1fIAE#)qo&ePO
+zKn52|p`n8MXF0E89KJVZnhkZ66&~&pFO%zc;{q~#{w?_M0vL}J-Wp6)|5seCR}VmD
+zFB}PvE+*H|Fa)l%wXxfm1iqv0PS;;XgYo;w2Dz1qTeV(HZG+j6YBgt(id3D=@XwP5
+z+E(l^Kz)lV*T63W%^*t-&c+=yHb?jaQ9GoD^sG4Ov_0y~H_#aU-{~Bxz3?N51Sz`n
+zgU~C#=w#8+?kQ~K&<S4YA|GW0lHD!^fI|vIuXa*jl3kxIAQPcWg2|?XFF1frcbS5&
+z)E|FFV^)BTE6{NAzS#G5JTD5{|NY>0t)W;CJ&5;uzDqft#ua!6iCF@jv(xdAgR!OV
+zWipvz)I4WfVuML1BLeDS$FuT{&m9e>^$(3lpRMJluMYb})<P|xTjtGN*d!-MsmYfO
+zgF48<n<vQYIofc-@rEh5dh5yR-QUEGG-Hq%PC$HDQ<tINN9N`~0Xi~N>F5qwVsO|G
+ztpykIyioWr7-pdl44IY<1B_@#PW)eTpO^uF@&BQTkIGNrR%lztd*A)f<$YY=AZ-)I
+z>X1Gufg&nJ^|GV{^+>08BH}C8kF30J?hiR|W_^mPnF?W_mr;9wIm|b8JpXB=+?GrK
+zzOaRuy$kVX&jQ>Zob_v?4)RL-`*m6wch;?K&i(Z&cyt0pZ<b}%rz(N*OFh**tOjfe
+z%lihWPk#^RuVcX6=}XjRzshreCUSj-^|qX}JN}2d{)6{-7$m~k!sq9-qTG{V#&C80
+zexX#$A^k2{tMotVjworptCpbZzGVgUwEP!%`W=*~<)ErX7A3ZRk+fe~Gvcy@&RRBY
+zmS23K17(+?+}=aoMx%DZn(0m^R1FP_$sU_`X5#!+-kMkwtwUYy`(b)|UG;T~ypbI6
+zza`YVCm`K@de=&h!JQh<I)bPa3Dv2$%-~bUR^{3KRtcsikcpJ{7MNmF-DNtI=gC1J
+z=Y1|Qz`yoa>=hWQA!Ldg$HvF@*qR*HW`0#_>Y>NXke-yMGFjBzq8f*49)}c<lOVWY
+zu4F$H9Wo@l?^b@kI2!c-HRpc~cwkY?UeJ78!xRF$8e62?O9uL~se*g`EalU?l}Ac`
+z?bPC$<)N_!)IM0mB6>k-YWf=<#4_a^;hVf}Cw!+Al&Eq5?4C%RyuP09FY+h042B)b
+z!inO9K033hri4WND!L&gX{=_um>HjmXp1Ys5~4f<_f80vMnEx2L%3|yY$vt7_1m!7
+z$6k5xKRn>pOCWC-C(EPmR?u`2034Ke<1;>KR^kCbwD^Eb-`?r^PrC5bq)`9M*UO7%
+zpO8i5Q`(?Xe!TC*`<$$?MpzeZl5@LyBUSL>V^@Us-i52xra!w#-aM8O2}KR^Z3LpN
+zJ6E{V&Ycy!l1<M<vb?jK5IAaqCz7q3rw`G=S1N;duq0`tF~WzPHKE8&I^BuIwG%%j
+z;kX`W$X5=chgYk9IM_g>MA=47stmrpnB&}jvj)1@HsDysod`uPPX5YWZZ5Y^;BH4%
+zV?!rC+fVH}ZxnuB@h%r8kDNtcYJlMK9kuuG$HkW<KQn!K%hBFVR5`(#;O&R#Ws?T<
+zsx^@4IC!iyL5t2mZNe`EdiZw*I99IYqsKk^FOc$Ri8Z0q{y*O_RFQ{c^|?~FY?A+^
+z5fAm^IajBY6`#X~7gz^P5oZN1iM^S6X49|n*f4~`Jp!^1JlrWSaA1*%Z|M?HSa`Qm
+zS6z}NTCOOTZou#M^ALRNRKvxhg90uaDi7eEi8q$2w5cG{qmeb87xRlEe%1veL4eOD
+z;z8{j@D2$f!V_Tb)fN&4U#UJd5@lR>ia!by7cFg$S_B5)1$yT1B4?&gkuD#lB#N%%
+zm5>r;!tt7u7zo4zHTQDi(en1sEDZE0KvUQlp2sX*!m~tN=~I?!Ps=;rbe=clrqL@j
+zI71W<Vvp1uVRGSzkyqcB%-6P+kT|D0GC<WC5I(s;3_e&gcDz0n5(zarrMd0^EI+ig
+zl$4&D$@w0*SPED#25m18@pesSI2^tIM6ODQ)z|!YLU1k~M@w*CS~K5#mjyrcs+Yr+
+zGt&mcL;+(f3DqM!cS$?$5~o)ljoR<^*Pe(p$YLNR3urS&1u8^tuUifiNNqFM<5Y!J
+z?wp<Z9o;SAU@h~G2%}@DnIQNN%yK$O9pYBwjEwhrICqda@FKZye#G-p0`%d|LxTUl
+zN8%9PE6l&bGk{fV*nDlRy12B*kZz70_h!X!v{~g-_@FAhM*IQNk<nMhs-KDh*%S@^
+zUA#s+9;~HYz9xV`lBzdbWI#H6%^If?iFUeB%S&k?=+JfnXoIRk{;rL0PV^O{th`Ds
+zsGf4LvubcacV8vxEq>?e)uUdL!*-dpXr?>QZ9dk=5!P>KH&}xt&CzCIQq*~`&6P>E
+z&jC*jot)IER1YuvmAH+MsUhpyQVkmys~GcsBm_W{%sTt8TV3KNB_xQ%W0CzAiCbdI
+z-BGd3IM(i<5y~7R_Tsujw2mNz)H9wP`M);CKNaBlywvL6-f2L1f*X350BBx5mN>QY
+z+jHbSu0dAD<$9Wd*B!+WzgH{iSMlI>UnqiB453O}el2z{K=B;|^bHUhCgidK@SW^e
+z&r?>TYAYY|5Dx=t#8t7-{`K*c?oxe-E`7BC5rO(%(fjSNNVEYNw|`DGD1BRG;mjhQ
+ztd6xW47M#qT`dWU9VCP>y2;}JwrcY9m3X#w7>#TiM9z3sOR%jrUefHpgUj?SrIJKi
+z#J@+UBU;2SgRqd4<$TvUh1(eJiqYbBtX_uOI^m&a(39G|&(yg$-Q50U3V$s}Nlr`J
+ziQ!=shsfWfT|gtF#;QedQgmNVXxQ31LeO!P&pB<Q^e_h2i_#oz-ob47^Dq<vxkp9a
+z6RV#xIE?R#WRyc&Jz$WF1T=wjjBsSxAefB9E|~X$N;3Ur2{>Y15ECat%dc1u9z#xj
+zH5#?<FdWd*Is|>338VP#jM!5P?kFJ=#|C+Vw@PU^PA41FD_=0yXWC$~Vhdi+Kz192
+zY`Zs?Z7!)S1u*k~AkFCk835a+RzkFZRRKBe+B;Xloaux;k$uCUrV`NljAe?k_ZQ|a
+zO0{IN5~4<MbGiGf*dg0rqJ3g-A+Kibsj^lrW}fBs+`Qai{t~WG8J3<7S_&dmeq>x^
+zcp`xc7q9z!3%5Dy*YI9iX$vvTrf_Ib2VTaAw4i)O=EWwkgzK(~7_mDrhK0~sXz&Er
+zi%@Vk&FGKXDM<>y=%?|>AVijF#qvB{)or&m{Q}S3^g+XfgBXKb;L-B;JYeFx96~Q_
+zCW6}tNe8XWp%A8|Gnn*Axn@Og&%hK)-H92TMV*I=P%RBG!MVl)6p2P4KA$H!Pe6ii
+z-NJCei%V@iG1yp$e6}RJ2+*`{DR@{&A0foZeuxuB(Z>8#bLM^x1=QvyHfs&XCu+@x
+zc{2(`IJ_XVgR@5aj4!<;CQ5Sn%yYr^4Arg$78f^iyDu0lX;_o9Qc-~JsvBIDx|m1K
+zht*GNo7Epu5GwiFHnou}t?Dqs@Nhe}fd1OoHOl9jXfIhzpI=7IDI@eW3HGxC*%UJl
+zW93pYAe@VnxLHn`LkC25R+!m$d01v-poa9w{Ybn4YV#LKL!l5Cj3r+89<DO#&kI;N
+zN9-~1OY!ZT6H-LJn})REy$UualW#tSo*DVgK`8W+hSAjR+y&FR>J4s4LWq3lO=VGl
+z3Jm2J+1xUprpBfgHLKJX!p52HW6VPq&7X3!0#>qr5O#_x=^xe13F#<JN&ZkKlv%wD
+z2i9Ipp3~PiE=g;avZJo+E(f)%5c6)FVppq0rUrb%=|u3W)lai`gO;>S#o*HTTA^D{
+z`_ffC*=hvP-Sq(*QGL&4{3U16<CPEF`gSfC<v_bLrn;04>)@{eCcNna`&GUq;4gT3
+zoGlMs`B45ZqZ`vu30s^W84rnD*AHrMAa)hR;VgqOG3G!!*(^JRv>{fpQi%Dl{3Vc#
+zj2TebGhTEyzYhr0Bv{V2dREdMCa3F^Tnx@ip8G=Lfl56f;;Y!&UBEU8mS1_W7}wV<
+z%Gr%jo)S8wn}eVBc3ny8s3yZ0kHQCHe*i&bS4@Pt=3yM4<0H*&a6%-k>@Q9a_Lj2t
+z06_lw(3*iJU`*aCToe3w$$%7lDM<E^T}1hdbKaF-C>Xuoa16j?A!G<O4~9&90%M=D
+z>!@kmQR{x>{(5j$0uUGCdteDewAPsN8hT88aY*xrUE^ZXZ15guvkD+TV_58r!&t6M
+z|Cb(+SG!-w<oZs}9K)WBXv$$Vhb)4N?H3#TSc04P2|8X>QWm{Lp<5@nXKPJ*e(G?2
+z>+)3{{EDHgMTMJ6GyFXJKD@#-cr$=Fp=K`o#WC43CAbaQv69`=O)K7&zdOE4Q>I3#
+zd$<8vOInT{C7M6g1fW?>xI&I%NdP|`jOTzm143-IQRqrCMjq3vS<Ik<^JhH%BuE<`
+zD`itP#~{O^kH|(8VhfXJtXz~>&s~J$sH-@ry^|CviVhj7MCK>Ws#AIVeqeS8q@1t5
+zYAza;5m52IJ1)aDIoF45j^O!?J#I(gdjX<NU#@jZf3$fGVzdH|mf5FRSXZDeb$W-(
+zRJM8=ZWRW_w~fY2{_;f`!rro^<Nyy71wm->g250$?_|Fr5&bE5KfUh~9M;Y$Aj86)
+z;jRXPW1)QtB)E9O8G%ldeWj|Tx&;fg%jPgx(wcD?Sm^kFC~0V8Lgd(7P;-c0GyBHa
+z*FKP8J?j7p8~4I`v)Y2OgD+Yh24y2`MjK;;A9$F4-aQC6->~lx3X0hH%%RaOB@X-#
+z+E}u!_Fiv1#K>qz4HHwK9>fb&>ElslkZfvLbIgfVXWX&`p*7eD2vjb3%C8Y|{-OJw
+z?Io_mVqf4gAD84@Tc^rLjfI_yLvK{t7Nt!ySX0Ln`SbU45wW+PY7h&%oNF{q&XyJ`
+z9?5u;SoIgt1P`Z;)Xg{aXdmysEOi{7?QnNxICLh55-g5c5MrRskJYa2zg<CL0HBqC
+zeS<li8$*!rBxXj8$A4->N+XBY6i|Uzu958D)ty?)Yr!Xz3+1-`!a$zPsknTIHO&Q}
+z3DUN=;D9;L!}|8$U5sg3Z*wYCiI9cZGe;GiWyy~)q=YB^uKmc${1i0-oI)i|dH<iT
+zPTPKRYVPvr`k>D1QVE~!D4YAopOqTlM57WTEG0(r`+`M-K8E1_8S2DCqgwz%lh*{_
+zfSu3`OP}A$mv>mX{4@n(M8l-0Bd8BLWAcklQxkRfnEnj61r1F?0Ajir2bwEu<>}Pq
+z3sB<Nhd@n+z7nk&9J#v;AX#@*1>}Y2507c^iQhS(*gN-b%gL@09l|Z9u4|g}sk7)*
+z(2=2lYxEvRag-2rWPN$xl@?}XrGHA1h91diC7X4}h+D%fO?w)JJU}cUci^Vo%NqL^
+z`9`D6)gp|39uE<k4~47j0!S-<#@~#Scy20x2e1fPPeTCz!R9v!MuXtPG%O&fK=9XF
+z93lgv!eCM;mNd4Wj)moA+*)Qzz`oJ0DY%ZsMgayVNH`#tsIo&_3kXcaSK};}7Ju3*
+z%v;)E0_tgMFiD<`$cCpQ@gZScfR&3Tg&<=mm%P>Ns|GiUWVOWYY-!25z$tn$1yn(3
+z+hP9rb_MKyp0K>z$-8MTkO{X9X7AHpJqKysj$Ie-4IR8M&_<!|?`|F)Km+dxyMok@
+zOI!IG=fo0dKqi8c8-Fy~GfNGR!C0`njtCiIe;_Jq40gY_8_4cnKp%TwbfX|KyPQ)7
+z-yrpYUyF&n$K5vK(2k@d36*3x%R9Y7^zkn!oiTMA7XRMsweKOE6XYm)KP71shlj=Y
+z(l})lfe)r#e}v<I#p0=XxMS}Ar;lgnI^XQt{Lj4X)(fK5bJWX<B1{j+$c_sN%38r`
+z_CO!#cPBYRW5sI2KtdYJh*4UDtKBB`?q0HsE8B4&HR^+PgYSgGew6!~g81fldcNRd
+z+*`lX&C2u2uJ3cWcpxK}-NSc#mN{4DLiZS`7|Z}%gqF2c#Ahp7_~$;XK0|pnD2t3P
+zPVbC$*$EKkQUG|OcoxWiym!bZP9HN+sJ8s;R>9Qc_TKT`?AASR(#&Z?G?(iijd7&g
+z*m~-G)X0#;jQ^`?{;ahVi}0Y+Zl8gYJ^}GMf+dFP(&VykqdGgzzlR&#+#ga#%bQ+;
+zg_-gf{%e~X{DiBvba1ma!^Y!OT)mC9=z;FGH4Y&gDze9fwgVGZhCr5B@{-73vLWaD
+z@ZDL3+y9^W7mRw0fm?JHf@zlmg*%Z_g6)sy<%YOkx1u#BC)qimbibGnSy%YWdiH~T
+znL?GzU;kmb{0LQjT4}xoYTioKW^x}LyBYiXfoWCp|23v^>00jsi1ooq*$Vk&c%gdN
+zB+e(Q!&SLbQ7`~%qBF0P#Uh{MWu!plhHxvXD^yUb{I90?AWSX)#p{Ds>s`HKgg6cC
+zVQ0hN-qnm36W03<J<osWymZ{Wb9@wi3n0AkClCtgZsP~RG8}vOpe{d*dFndr4RAFv
+zHpy9dFKQ%~av%%FB4u$0bEb1~hNQMp2}kxGS(u*>Ah*ACmA$bkPlT<Yyk`We@3U*!
+z_08Yj%=J6X)pbFZfj0!+rHMKynrmTjv@hnX=!P0Lp(FBO1fbiDSgi70ROy*Pqb>r4
+zR4Oy_B`{B;TaW|6CzY%czQR6Qm(YgLq|$8CkF~tt`xT8o9%~c-j**yZ?K2?rjdHAp
+zz@p>Uei|Wa5{MrqhG3sys(mO3ARXA$?avle14mh=-#>MM7GOeDPTeY`p$P)9e!4yq
+z-p2>6%OOD$&0o_&$8}7>6Z(L+X-pSLzYsAsN1uweOycr83xQOkj>X0%c551;<%3vQ
+z+~V#dTn}nyYx%v{*>V38M0A1b;V=N8sJh@5;c$g0j3;KtZSQ`QEsP**-!1NNTnRu{
+z%A={mBb{WcBFz0)!U8E|WAJ)zTqzh;E3s}>7?~LTCYH3T(yIeQ7wg_#_Afh{fSH_)
+zDoOTKKAsJd`wo=zg`U5aX}HD~=vB<4+7NRRUpbNNFDO>?Q?=<Cn58thNu`iEmPEZy
+zceIFg+>u-n)_T6obRkE-7tOvE8Mjo7MeySc0#qD0WH)4-OMQ(f;qWW+%Or$xVZdYN
+zS5!zTp@sk`Dz{(YpNCBQzx`E?!zLMdQgDguVsnMjq7_mj@Mc{yNUoBZSzwlsL#Zgp
+zhG;%|{ZqONS#az(V2or^eKV9BUaC-jaQ4uhr-?cFzV)&uC6nf4a}XP%E6N#CbgO{G
+zz5Wi}s=iAZ;&_Zf+=AEoBaO$Hdg-ZM)WKOFbV8XwH$)ta-c9)-k?*R6pn&F-D^;U8
+zJC|hkS;5f*J<M3{@YTJc@bf+SuQ}6GsD^nl`Qh3t9avIaPdAB9mhEInDDc=M+m@Z9
+z_pAqyJ@k&|H7@++l3&!CJ!^c8y0OUpE0UPya7(!f9&7pS#coq;L!Vj7p&|vk2iAG#
+zn42h3(x~hyY%3)t(}{UPyzo59RMbU*@&uCdL9woQ_$zIp>O6L2iE{ZZ+*Qq-Cq*Gt
+z%>E~SKh}1bI$ZvjTcLOn%_4C#@+B}&u^EzqoQkjepRP8?>^vf9J_>&XcrU<+0sPR3
+zgJ^tqbd`Egs^ZV{(;OjhGVMhyj!S$`0&4i^YJbMrLi}SgL%$R>7uMxsT`l}+M3^zm
+z6&_6O&@ugvMM)HOUQ!arHgequL1~gD`2Z;M>>03yWGk@r@O8iTQ|~z!s-9cpMprW~
+zAhpDq+$DZ8+RH6p#Se~$)4DZ+kp#5Rs#P|XWYg*9HLz(S(&NR&tlKd5A7qyxI-*V+
+zJhV~Trk+US$Z`p@Bh}@VRoG};?q>EF1Z`z~&WJxCtu|pP$@oijy)tntU%1>%x05_d
+zs5_`o_-vOD(LG^XQ6e7_*(UFuN21gCz8podBAh=*G5+%Db>{vTUID=GQPNggwc(Ur
+zdsV-3-SM+6ak9UF2(XOhykbh|+W)b$f?ZaXMz>Ge?)=uRK_@bHI}86)WPjSaL2~C$
+z`(hLaLRcayjWQpKbX%e543l+GpcrU7FqJtDWh=QW>cKFiP433{8x;)uXQr%?mJJxv
+zwg0IW-4Ucw<1@n7K`-v2u8PbB*}7Y7ZU9=kEp)Dxb*vKx9HK9qll150_AbELDF-1J
+zil&BdwEc<MQfa>w+Z$chk(H4K3n*R##;;gB5bT{4k+s-ReqUUtx(CnX$r`-ACP>gn
+z(rW_wOUlqk_B&#1X6-xuaQ}2EP2MjFo|Sf1C6@Kkp$k1da5bJlp@C?d=^oT5fnIze
+zd`q}LmRAc`dz!7OW)RJ@L?yrhC)5Z_(iq^q<A{|!dm$b^c;2pu`3?6HkX^g0duMuy
+zt1f0Q1#{QuoLe`Y8tUNwCMt6gAfu2P<BL4+0hbq|3+<ZKbPqe~I`Yd)SdK=H=~N89
+zwI&sS-S6erurOabMOWAQ1R41~GyKBtBX|Gre(q2V;{)TNJ!1Q04s#Jvs<hd!k1r+%
+zGr<WbGioftn4j-H-Gr^vrSPbHL`t)r7WY!yA$+~b?>>;tT^ma)$QRNO&GEp|X{fwI
+zIEb)eZhTSy6Ts%{ZN1;s4mk0V$7DjS=9hsln7lPP&rm7>5%Td)%s8CJF)f`b03{Vd
+zw!CsZHCl~(VHuwRz5GIO#YGNPuQu(Tr#+f16!8&fpnj|<+6DF0gmszr&kS2f^~ak)
+zE8%qM5$*+>;;bCs&UB;+y2Z7`VM=_~=z24<c$JRZxL%!=`wo#>aUpq+=}e@VH5yw)
+zx7(|!M5m7S_dUrxL8)J5^+dy!?U*Qp7F8THJ>4Vjw1X88?6i`Oa{9qpHEKkxPMY=I
+zk!IiqO+ZTvWIE1qGa9q`y_tNNp{g~_8sSKzsK5QuU%M$(vJ^8aPr1ygnqVwG9q%%H
+z`Ah<O;r_h+Bu=6i?^*>p`NU|Wjd5)fgXp-MpaZ-wrjL!5gc50$c>~J_sW@8pSkWx9
+z@ITB3Fz+3Ce_qN%RWPdetB}%$LWa%kF?qUy4hU1z8W5>r6ZYVq2o@`4e^_*gnCbcV
+zGW{HphGZ~y(C%h2$Sk0gLK&7=h<sqcqr@3^Ei5PxTAtOUKYf7WlnWZ5wLWXP9X#yY
+zG|_?QTGWB<yNV7ZeQYJPTzsC|WyGi9vz<<3icZ0H+S4#vOdDU&^(y?-vhRLstwaD9
+zog^LQ6~qtD*TEUa8$;M8@lmc52@x6#tvdH359_x!O(XP8{{9B&kwEclGhk#wm3lVI
+z8*>>};n);aPm<3bO_|wy))Rue3l$nMxUZLljT8x)=J8#4tq%oI?>v*b3~(QOK;!@H
+zej{VH5}{P8!8M{3n0nLDXp3nJSp_K#fwtOG@Pe(XIxk9qqa9aK#1NIuMjw+vP<~Ml
+zmvi?gjmw+h&NqJi2>&i1KA@Z1iD$uZi1b;idH6p%B<3b664M3}EQp=Y)QW?(u!Va&
+zb*p9WnsSgLYY+Be_q9-S7){;JEi)m)wm0q!sSN?VA|%BMf+IrrK<`DB)p$%GTCR*x
+z(IRXn9G3K+#i2LNxPDP(B_x{Ob=;GQv^H-G7v;MSw2=)sa1;t5Gxi<7z=5^QFTSAy
+zGj^m|!>9AdaIyu_8RWuX2*6ZqJ%iP!C(=iK=vGy^2oMBO9@DT7fVL2qq8Mt+$zjQo
+zKG{M7p+5UcJ{{lHgb6<1=FR|B@EsxYn2#B>;D^RCe0=4>H9c^2fO-ma$})K0+8Tu8
+z0HjT+fb7zNSBP*ncWK~(Afk6>zF{k1l0}t~hswB})(E}=CH)D=_q5D`9{4Q8t`HSb
+zCcgIN8>O*6GMSMFwrbqH4bk6cuY^idnI_<8>QjF=da3T|v$pL*^mXNOtzAK)c*aMO
+zxoO{G>Re#kV}Th!C(*&$X<iMI=1EI-cxNE3tRNnWt@RjML6rarc+MX;W@yU4oQM-F
+z96;8zAtC4;CxM;wl*7sR!Ps`b6yQCA4E6oz4a2flJ`Sap?r#r*dkQr12N2@qz_F{W
+zZq|+`!_d>BZLP%5vT6F5qr~ha3A5HsQ0!J!djMtm3c1MJ+)++m-bz0tVQ^tPhU%Fo
+z27@o*<QIwOHRAZp)lshNayST<wxG5qJ7DX4ny#n0Tge(Sink|eZ@5&_rp&5OnBgfy
+zB2L#gR;k)D>1gr<fm&M+x8XEN#`1gI_Fno6Vn0e2eTfcLRiS+(*Mt(euaV?M+%=9Z
+zApH45X%e1|BSwR^#AP_)KpsZS%@t{mPu84;a?we>dj1u}3`y|Bi$4pYgjBT@M?u9s
+z=5XE@SA2`;v36TBHJvv=&4k_A<y*Jkt(mNQ{Y8HSvHyA^#z?nkP&Ey`7HKTG#r+$G
+zmY$+u?)b}fW7x24u|YBt*u=PC(68j|HNHL;vqXOOX+*O1@+9&_q?BrH_*R9dkUAE4
+ztojTQuF4HGU3k~ejfJ^_(xk^Q3kB$0RQwE>vF6abM$;DDC|uH}taIwCrvlR~qLJ|P
+zqK=)#S1(l$DP<-W$?dfYvP`?i+v9f+LFignfDoct$hBp(N(?f(KjXs{>i50__Cd(o
+z5fVm*bNkl7ec0?t8riTd?n$mYXzFNy>iFw+=b+Z_t=GxTkh3QK$piZ?B(&lGn>~Wq
+z{&78z_bZ^qJ6VbtN?JRgAWW*RW*)AiHTUkeMT@&)Z1AgdU!w|V`I#UI!r2ff*?zd2
+zA)NMr=AyVWZZO^51ku!YcLU|N2tMtn8*#+_x|p{psVNY-=a?2xX5TIS+8AaL>OTLS
+z4wmFZPeYUqSCIj1)y<Eds<gat#B4%KYND69#>!HnGyp1I;DFt>F2=ZB?*fEVgf%AH
+zb~$I?E$}+7qI8UfP3P235RDZkjzjn>A<sNnN-4&@D5Y3>ol6jNE9_zXhmaNEarfsF
+z(eS&s7#IM6<;%3C(t}(}N|xw@Zpf{Kh}^wc+44r#+<U0AOZqt;({4?lnqrcm{%Vmw
+zVg_t$3fEmBhtK{F1L*W|LlKiSCNx#3p;0{nA=g+!?#3ShUMuCeRTglY&Wd$L8d?zw
+zwvn$c2_)j(Zoh=d`KyL8#-NUa&e+ow-{!>ssmd>Fwqlymj6_iszAJS#$;BYsl82Sh
+zyrO9Bs!+lb>3G=m&*Tw3Smlb`8wx*opyt^!nl5f^5O^0}w3C<c<jccw)uYG+#_ca)
+z&IuuZL;gjk)^m<jy)fj8SmLLeY(GMZWlhCcx}VKNQ+i1R4m%$+gWt#D?~>ZbW@%2B
+zQx*`iqX63$<<bBD9{?2Q%zxopy%?ucA>W!Wm62X4RD0Wo1BLd(%Y9E*0KSPRJ?l5H
+zAuT^8LMNDDy<WO#9FbbSwnQ$R>=c5D#kH}EdYO#G=;sqzmkyUNPe-MRJpc0_>lDP!
+z;$eQVdD0Mb1zJ`&X6J<rt*&alEGkJ!P@zI|s^6GIwfe)g6%@ba7$-7Kzr9@Bx`A86
+zu9fhG(BoEmy06cCLIb3p4>p&L_11}tZg`KpSoBBJDnI!`f`pZ0c1uj?&K3UZb)JNk
+zFJv(Q0z_VbtnK7V!a%y5DO}H*U-catGjmdZD^81=jCP|X0&nri4fWD7Rj{{&!ejcY
+z)jVkc?Y*(-30R{Q)Q}M#W{mB>d5kAXTdmm%wf?>EA_2v`-Gj+H2T%(`I?F#7HN)bi
+z8Y}-y<<q({kpUCqKxGwgAXz}Uxp3(3DF%Sv6%Qu1+ZH-JG1-yYB${Qj+ro?^Q~bMB
+zX4ZCKaVdN9b?I*&xzR^{*@OuD<L8t#hvy>8Oq@j!(eOz7Rq6rSIc5I3bb~e2-#>9u
+ztbVHYc+8RcZfXAaG+mnm{3<U{NuDE%T@4DxCnT+I<FYCAC>($jeejm;21jfd*xjvL
+zT$v(?%YDW0S!W$<G_O7aWP!Kh=R3M0Kw_HXDaOIa*0E8xprzzj-qfHU_lv6bcHQO|
+z4yW?^UOAX{S9zp0Brz8MliB*&3bT}kwWF=6F3n}@Ql0BD75}3wIzI=fuR639_>qwT
+zpuyDXH9Ig?*#TbqwiAh=d7gGYi0z#hP1`6e$P-h>ci48N9FmT}D7W##nL!%Hbw<Sw
+ze@664in~Chn}Z_i`_}?wXwu?U@d9F_l7?Uqfkq2pfp$%`7|#eKG{{W)<nf3S#&a+W
+zc~k(2x(cTZYPlf*BQae;&pP5YD<zeubhMI!ijROH4%Eg2|HZbJ(Wzo*6hf>AnPx(l
+zP2&>@h+bf5RK*r=;AA6No~tkT;CId0s3d4aU?j;)u<zvCI0<OzudGn`uS#;Api@_>
+zL2eUbv95rlKU(r<D++**wkbB%x7n48qoxO!a!RQ^%daNGJ~T-fw8Bm+jqTWT?}flF
+zdfhkOE@9Y<Jd;3V5IhWRh{(Meao$FSVGPya1{0$S2?LWQ3m@~!lf(mB>NmibRB)3<
+cSfEHO^`fsZE=1fINBRvsk<hZ4RQLb@04}2-p#T5?
+
+literal 0
+HcmV?d00001
+
+diff --git a/templates/auth/login.html b/templates/auth/login.html
+index 229e410..bce821d 100644
+--- a/templates/auth/login.html
++++ b/templates/auth/login.html
+@@ -319,7 +319,9 @@
+         </div>
+ 
+         <div class="register-link">
+-            Don't have an account? <a href="{{ url_for('auth.register') }}">Sign up here</a><br>
++            {# Points at pricing, not the retired /register form: accounts are now
++               created by the Stripe webhook after checkout. #}
++            Don't have an account? <a href="{{ url_for('pricing') }}">See plans</a><br>
+             Need to verify your email? <a href="{{ url_for('auth.resend_verification') }}">Resend verification</a>
+         </div>
+     </div>
+diff --git a/templates/auth/register.html b/templates/auth/register.html
+deleted file mode 100644
+index 5058e4d..0000000
+--- a/templates/auth/register.html
++++ /dev/null
+@@ -1,463 +0,0 @@
+-<!DOCTYPE html>
+-<html lang="en">
+-<head>
+-    <meta charset="UTF-8">
+-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+-    <meta name="robots" content="noindex, nofollow">
+-    {% include 'partials/gtag.html' %}
+-    <title>Sign Up - Amazon Bestseller Monitor</title>
+-    <style>
+-        * {
+-            margin: 0;
+-            padding: 0;
+-            box-sizing: border-box;
+-        }
+-
+-        body {
+-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+-            background-color: #f5f5f5;
+-            display: flex;
+-            justify-content: center;
+-            align-items: center;
+-            min-height: 100vh;
+-            padding: 20px;
+-        }
+-
+-        .auth-container {
+-            background: white;
+-            padding: 40px;
+-            border-radius: 10px;
+-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+-            width: 100%;
+-            max-width: 450px;
+-        }
+-
+-        .logo {
+-            text-align: center;
+-            margin-bottom: 30px;
+-        }
+-
+-        .logo h1 {
+-            color: #232f3e;
+-            font-size: 24px;
+-            margin-bottom: 5px;
+-        }
+-
+-        .logo p {
+-            color: #666;
+-            font-size: 14px;
+-        }
+-
+-        .form-group {
+-            margin-bottom: 20px;
+-        }
+-
+-        label {
+-            display: block;
+-            margin-bottom: 5px;
+-            color: #333;
+-            font-weight: 500;
+-            font-size: 14px;
+-        }
+-
+-        input[type="email"],
+-        input[type="password"],
+-        input[type="text"] {
+-            width: 100%;
+-            padding: 12px 15px;
+-            border: 1px solid #ddd;
+-            border-radius: 5px;
+-            font-size: 16px;
+-            transition: border-color 0.3s;
+-        }
+-
+-        input:focus {
+-            outline: none;
+-            border-color: #ff9900;
+-        }
+-
+-        input.error {
+-            border-color: #dc3545;
+-        }
+-
+-        .password-requirements {
+-            background-color: #f8f9fa;
+-            padding: 15px;
+-            border-radius: 5px;
+-            margin-top: 10px;
+-            font-size: 13px;
+-            color: #666;
+-        }
+-
+-        .password-requirements h4 {
+-            margin-bottom: 8px;
+-            color: #333;
+-            font-size: 14px;
+-        }
+-
+-        .requirement {
+-            display: flex;
+-            align-items: center;
+-            margin-bottom: 5px;
+-        }
+-
+-        .requirement-icon {
+-            width: 16px;
+-            margin-right: 8px;
+-            font-size: 12px;
+-        }
+-
+-        .requirement.met .requirement-icon {
+-            color: #28a745;
+-        }
+-
+-        .requirement.unmet .requirement-icon {
+-            color: #dc3545;
+-        }
+-
+-        .password-strength {
+-            height: 4px;
+-            background-color: #e9ecef;
+-            border-radius: 2px;
+-            margin-top: 8px;
+-            overflow: hidden;
+-        }
+-
+-        .password-strength-bar {
+-            height: 100%;
+-            transition: all 0.3s;
+-            border-radius: 2px;
+-        }
+-
+-        .strength-weak {
+-            width: 33%;
+-            background-color: #dc3545;
+-        }
+-
+-        .strength-medium {
+-            width: 66%;
+-            background-color: #ffc107;
+-        }
+-
+-        .strength-strong {
+-            width: 100%;
+-            background-color: #28a745;
+-        }
+-
+-        .btn {
+-            width: 100%;
+-            padding: 14px;
+-            background-color: #ff9900;
+-            color: white;
+-            border: none;
+-            border-radius: 5px;
+-            font-size: 16px;
+-            font-weight: bold;
+-            cursor: pointer;
+-            transition: background-color 0.3s;
+-        }
+-
+-        .btn:hover {
+-            background-color: #e88b00;
+-        }
+-
+-        .btn:disabled {
+-            background-color: #ccc;
+-            cursor: not-allowed;
+-        }
+-
+-        .divider {
+-            text-align: center;
+-            margin: 25px 0;
+-            position: relative;
+-        }
+-
+-        .divider::before {
+-            content: '';
+-            position: absolute;
+-            top: 50%;
+-            left: 0;
+-            right: 0;
+-            height: 1px;
+-            background-color: #ddd;
+-        }
+-
+-        .divider span {
+-            background: white;
+-            padding: 0 15px;
+-            position: relative;
+-            color: #666;
+-            font-size: 14px;
+-        }
+-
+-        .login-link {
+-            text-align: center;
+-            margin-top: 20px;
+-            font-size: 14px;
+-            color: #666;
+-        }
+-
+-        .login-link a {
+-            color: #ff9900;
+-            text-decoration: none;
+-            font-weight: 500;
+-        }
+-
+-        .login-link a:hover {
+-            text-decoration: underline;
+-        }
+-
+-        .flash-messages {
+-            margin-bottom: 20px;
+-        }
+-
+-        .flash {
+-            padding: 12px 15px;
+-            border-radius: 5px;
+-            margin-bottom: 10px;
+-            font-size: 14px;
+-        }
+-
+-        .flash.success {
+-            background-color: #d4edda;
+-            color: #155724;
+-            border: 1px solid #c3e6cb;
+-        }
+-
+-        .flash.error {
+-            background-color: #f8d7da;
+-            color: #721c24;
+-            border: 1px solid #f5c6cb;
+-        }
+-
+-        .benefits-list {
+-            background-color: #e3f2fd;
+-            padding: 20px;
+-            border-radius: 8px;
+-            margin-bottom: 20px;
+-        }
+-
+-        .benefits-list h3 {
+-            color: #1565c0;
+-            font-size: 16px;
+-            margin-bottom: 10px;
+-        }
+-
+-        .benefits-list ul {
+-            list-style: none;
+-            padding: 0;
+-        }
+-
+-        .benefits-list li {
+-            display: flex;
+-            align-items: center;
+-            margin-bottom: 8px;
+-            font-size: 14px;
+-            color: #333;
+-        }
+-
+-        .benefits-list li::before {
+-            content: "✓";
+-            color: #1565c0;
+-            font-weight: bold;
+-            margin-right: 10px;
+-        }
+-
+-        @media (max-width: 480px) {
+-            .auth-container {
+-                padding: 30px 20px;
+-            }
+-        }
+-    </style>
+-</head>
+-<body>
+-    <div class="auth-container">
+-        <div class="logo">
+-            <h1>🏆 Amazon Bestseller Monitor</h1>
+-            <p>Create your free account</p>
+-        </div>
+-
+-        {% with messages = get_flashed_messages(with_categories=true) %}
+-            {% if messages %}
+-                <div class="flash-messages">
+-                    {% for category, message in messages %}
+-                        <div class="flash {{ category }}">{{ message }}</div>
+-                    {% endfor %}
+-                </div>
+-            {% endif %}
+-        {% endwith %}
+-
+-        <div class="benefits-list">
+-            <h3>Start monitoring in minutes:</h3>
+-            <ul>
+-                <li>Document your products' ranks</li>
+-                <li>Automatic bestseller screenshots</li>
+-                <li>Email notifications</li>
+-                <li>Custom category tracking</li>
+-            </ul>
+-        </div>
+-
+-        <form method="POST" action="{{ url_for('auth.register') }}" id="registerForm">
+-            <!-- CRITICAL: CSRF TOKEN - This was missing! -->
+-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+-
+-            <div class="form-group">
+-                <label for="full_name">Full Name</label>
+-                <input type="text" 
+-                       id="full_name" 
+-                       name="full_name" 
+-                       required 
+-                       placeholder="John Doe"
+-                       value="{{ full_name if full_name else '' }}">
+-            </div>
+-
+-            <div class="form-group">
+-                <label for="email">Email Address</label>
+-                <input type="email" 
+-                       id="email" 
+-                       name="email" 
+-                       required 
+-                       autocomplete="email"
+-                       placeholder="your@email.com"
+-                       value="{{ email if email else '' }}">
+-            </div>
+-
+-            <div class="form-group">
+-                <label for="password">Password</label>
+-                <input type="password" 
+-                       id="password" 
+-                       name="password" 
+-                       required 
+-                       autocomplete="new-password"
+-                       placeholder="Create a strong password">
+-
+-                <div class="password-requirements" id="passwordRequirements" style="display: none;">
+-                    <h4>Password must contain:</h4>
+-                    <div class="requirement" id="req-length">
+-                        <span class="requirement-icon">✗</span>
+-                        <span>At least 8 characters</span>
+-                    </div>
+-                    <div class="requirement" id="req-uppercase">
+-                        <span class="requirement-icon">✗</span>
+-                        <span>One uppercase letter</span>
+-                    </div>
+-                    <div class="requirement" id="req-lowercase">
+-                        <span class="requirement-icon">✗</span>
+-                        <span>One lowercase letter</span>
+-                    </div>
+-                    <div class="requirement" id="req-number">
+-                        <span class="requirement-icon">✗</span>
+-                        <span>One number</span>
+-                    </div>
+-                    <div class="requirement" id="req-special">
+-                        <span class="requirement-icon">✗</span>
+-                        <span>One special character (!@#$%^&*)</span>
+-                    </div>
+-                    <div class="password-strength">
+-                        <div class="password-strength-bar" id="strengthBar"></div>
+-                    </div>
+-                </div>
+-            </div>
+-
+-            <div class="form-group">
+-                <label for="confirm_password">Confirm Password</label>
+-                <input type="password" 
+-                       id="confirm_password" 
+-                       name="confirm_password" 
+-                       required 
+-                       autocomplete="new-password"
+-                       placeholder="Confirm your password">
+-            </div>
+-
+-            <button type="submit" class="btn" id="registerBtn">Create Account</button>
+-        </form>
+-
+-        <div class="divider">
+-            <span>Already have an account?</span>
+-        </div>
+-
+-        <div class="login-link">
+-            <a href="{{ url_for('auth.login') }}">Log in here</a>
+-        </div>
+-    </div>
+-
+-    <script>
+-        // Password validation
+-        const passwordInput = document.getElementById('password');
+-        const confirmPasswordInput = document.getElementById('confirm_password');
+-        const passwordRequirements = document.getElementById('passwordRequirements');
+-        const strengthBar = document.getElementById('strengthBar');
+-
+-        // Requirements
+-        const requirements = {
+-            length: { element: document.getElementById('req-length'), regex: /.{8,}/ },
+-            uppercase: { element: document.getElementById('req-uppercase'), regex: /[A-Z]/ },
+-            lowercase: { element: document.getElementById('req-lowercase'), regex: /[a-z]/ },
+-            number: { element: document.getElementById('req-number'), regex: /\d/ },
+-            special: { element: document.getElementById('req-special'), regex: /[!@#$%^&*(),.?":{}|<>]/ }
+-        };
+-
+-        passwordInput.addEventListener('focus', function() {
+-            passwordRequirements.style.display = 'block';
+-        });
+-
+-        passwordInput.addEventListener('input', function() {
+-            const password = this.value;
+-            let strength = 0;
+-
+-            // Check each requirement
+-            for (const [key, req] of Object.entries(requirements)) {
+-                if (req.regex.test(password)) {
+-                    req.element.classList.add('met');
+-                    req.element.classList.remove('unmet');
+-                    req.element.querySelector('.requirement-icon').textContent = '✓';
+-                    strength++;
+-                } else {
+-                    req.element.classList.add('unmet');
+-                    req.element.classList.remove('met');
+-                    req.element.querySelector('.requirement-icon').textContent = '✗';
+-                }
+-            }
+-
+-            // Update strength bar
+-            strengthBar.className = 'password-strength-bar';
+-            if (strength < 3) {
+-                strengthBar.classList.add('strength-weak');
+-            } else if (strength < 5) {
+-                strengthBar.classList.add('strength-medium');
+-            } else {
+-                strengthBar.classList.add('strength-strong');
+-            }
+-        });
+-
+-        // Confirm password validation
+-        confirmPasswordInput.addEventListener('input', function() {
+-            if (this.value !== passwordInput.value) {
+-                this.setCustomValidity('Passwords do not match');
+-                this.classList.add('error');
+-            } else {
+-                this.setCustomValidity('');
+-                this.classList.remove('error');
+-            }
+-        });
+-
+-        // Form submission
+-        document.getElementById('registerForm').addEventListener('submit', function(e) {
+-            const password = passwordInput.value;
+-            const confirmPassword = confirmPasswordInput.value;
+-
+-            if (password !== confirmPassword) {
+-                e.preventDefault();
+-                confirmPasswordInput.setCustomValidity('Passwords do not match');
+-                confirmPasswordInput.reportValidity();
+-                return;
+-            }
+-
+-            // Disable button to prevent double submission
+-            const registerBtn = document.getElementById('registerBtn');
+-            registerBtn.disabled = true;
+-            registerBtn.textContent = 'Creating Account...';
+-        });
+-    </script>
+-</body>
+-</html>
+\ No newline at end of file
+diff --git a/templates/complete_registration.html b/templates/complete_registration.html
+index a94fa98..c173e85 100644
+--- a/templates/complete_registration.html
++++ b/templates/complete_registration.html
+@@ -3,462 +3,256 @@
+ <head>
+     <meta charset="UTF-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+-    <meta name="robots" content="noindex, nofollow">
+-    <title>Sign Up - Amazon Bestseller Monitor</title>
++    {% include 'partials/gtag.html' %}
++    <title>Finish Setting Up Your Account | Screenshot Tracker</title>
++    <link rel="icon" href="/static/screenshots/favicon.ico" sizes="any">
+     <style>
+-        * {
+-            margin: 0;
+-            padding: 0;
+-            box-sizing: border-box;
+-        }
+-
+-        body {
+-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+-            background-color: #f5f5f5;
+-            display: flex;
+-            justify-content: center;
+-            align-items: center;
+-            min-height: 100vh;
+-            padding: 20px;
+-        }
+-
+-        .auth-container {
+-            background: white;
+-            padding: 40px;
+-            border-radius: 10px;
+-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+-            width: 100%;
+-            max-width: 450px;
+-        }
+-
+-        .logo {
+-            text-align: center;
+-            margin-bottom: 30px;
+-        }
+-
+-        .logo h1 {
+-            color: #232f3e;
+-            font-size: 24px;
+-            margin-bottom: 5px;
+-        }
+-
+-        .logo p {
+-            color: #666;
+-            font-size: 14px;
+-        }
+-
+-        .form-group {
+-            margin-bottom: 20px;
+-        }
+-
+-        label {
+-            display: block;
+-            margin-bottom: 5px;
+-            color: #333;
+-            font-weight: 500;
+-            font-size: 14px;
+-        }
+-
+-        input[type="email"],
+-        input[type="password"],
+-        input[type="text"] {
+-            width: 100%;
+-            padding: 12px 15px;
+-            border: 1px solid #ddd;
+-            border-radius: 5px;
+-            font-size: 16px;
+-            transition: border-color 0.3s;
++        :root {
++            --navy: #010b1b;
++            --orange: #ff9900;
++            --orange-deep: #e07d00;
++            --ink: #1a1a1a;
++            --muted: #5c6672;
++            --line: #e4e7eb;
+         }
+ 
+-        input:focus {
+-            outline: none;
+-            border-color: #ff9900;
+-        }
+-
+-        input.error {
+-            border-color: #dc3545;
+-        }
++        * { margin: 0; padding: 0; box-sizing: border-box; }
+ 
+-        .password-requirements {
+-            background-color: #f8f9fa;
+-            padding: 15px;
+-            border-radius: 5px;
+-            margin-top: 10px;
+-            font-size: 13px;
+-            color: #666;
+-        }
+-
+-        .password-requirements h4 {
+-            margin-bottom: 8px;
+-            color: #333;
+-            font-size: 14px;
++        body {
++            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
++            background: #f6f7f9;
++            color: var(--ink);
++            line-height: 1.6;
++            padding: 30px 18px 60px;
+         }
+ 
+-        .requirement {
++        /* Brand lockup. This page used to say "Amazon Bestseller Monitor" and
++           "Create your free account" - to someone who had just paid. */
++        .brand {
+             display: flex;
+             align-items: center;
+-            margin-bottom: 5px;
+-        }
+-
+-        .requirement-icon {
+-            width: 16px;
+-            margin-right: 8px;
+-            font-size: 12px;
+-        }
+-
+-        .requirement.met .requirement-icon {
+-            color: #28a745;
++            justify-content: center;
++            gap: 10px;
++            margin-bottom: 26px;
++            color: var(--navy);
++            font-weight: 700;
++            font-size: 19px;
++            text-decoration: none;
+         }
+ 
+-        .requirement.unmet .requirement-icon {
+-            color: #dc3545;
+-        }
++        .brand img { width: 34px; height: 34px; border-radius: 7px; display: block; }
+ 
+-        .password-strength {
+-            height: 4px;
+-            background-color: #e9ecef;
+-            border-radius: 2px;
+-            margin-top: 8px;
+-            overflow: hidden;
++        .container {
++            max-width: 540px;
++            margin: 0 auto;
++            background: #fff;
++            padding: 34px 32px 32px;
++            border-radius: 12px;
++            border: 1px solid var(--line);
++            box-shadow: 0 8px 28px rgba(1, 11, 27, 0.07);
+         }
+ 
+-        .password-strength-bar {
+-            height: 100%;
+-            transition: all 0.3s;
+-            border-radius: 2px;
+-        }
++        h1 { font-size: 24px; color: var(--navy); margin-bottom: 8px; text-align: center; }
+ 
+-        .strength-weak {
+-            width: 33%;
+-            background-color: #dc3545;
+-        }
++        .lede { color: var(--muted); text-align: center; margin-bottom: 26px; }
+ 
+-        .strength-medium {
+-            width: 66%;
+-            background-color: #ffc107;
+-        }
++        .form-group { margin-bottom: 18px; }
+ 
+-        .strength-strong {
+-            width: 100%;
+-            background-color: #28a745;
+-        }
++        label { display: block; font-weight: 600; font-size: 14.5px; margin-bottom: 6px; color: #33404f; }
+ 
+-        .btn {
++        input[type="text"], input[type="email"], input[type="password"] {
+             width: 100%;
+-            padding: 14px;
+-            background-color: #ff9900;
+-            color: white;
+-            border: none;
+-            border-radius: 5px;
++            padding: 12px 14px;
++            border: 1px solid #cfd6de;
++            border-radius: 8px;
+             font-size: 16px;
+-            font-weight: bold;
+-            cursor: pointer;
+-            transition: background-color 0.3s;
++            font-family: inherit;
+         }
+ 
+-        .btn:hover {
+-            background-color: #e88b00;
+-        }
++        input:focus { outline: none; border-color: var(--orange); box-shadow: 0 0 0 3px rgba(255,153,0,0.15); }
++        input[readonly] { background: #f2f4f7; color: var(--muted); }
++        input.error { border-color: #d93025; }
+ 
+-        .btn:disabled {
+-            background-color: #ccc;
+-            cursor: not-allowed;
+-        }
++        .hint { font-size: 13.5px; color: var(--muted); margin-top: 6px; }
++        .hint.bad { color: #b3261e; }
++        .hint.good { color: #14653a; }
++        input.ok { border-color: #1e874b; }
+ 
+-        .divider {
+-            text-align: center;
+-            margin: 25px 0;
+-            position: relative;
+-        }
+-
+-        .divider::before {
+-            content: '';
+-            position: absolute;
+-            top: 50%;
+-            left: 0;
+-            right: 0;
+-            height: 1px;
+-            background-color: #ddd;
+-        }
+-
+-        .divider span {
+-            background: white;
+-            padding: 0 15px;
+-            position: relative;
+-            color: #666;
+-            font-size: 14px;
+-        }
+-
+-        .login-link {
+-            text-align: center;
+-            margin-top: 20px;
+-            font-size: 14px;
+-            color: #666;
+-        }
+-
+-        .login-link a {
+-            color: #ff9900;
+-            text-decoration: none;
+-            font-weight: 500;
+-        }
++        /* Reveal toggle: confirming catches a mismatch, but seeing the password is
++           what tells you which of the two fields holds the typo. */
++        .label-row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+ 
+-        .login-link a:hover {
++        .reveal {
++            background: none;
++            border: none;
++            padding: 0;
++            font: inherit;
++            font-size: 13.5px;
++            font-weight: 600;
++            color: var(--orange-deep);
++            cursor: pointer;
+             text-decoration: underline;
++            text-underline-offset: 2px;
+         }
+ 
+-        .flash-messages {
+-            margin-bottom: 20px;
+-        }
+-
+-        .flash {
+-            padding: 12px 15px;
+-            border-radius: 5px;
+-            margin-bottom: 10px;
+-            font-size: 14px;
+-        }
+-
+-        .flash.success {
+-            background-color: #d4edda;
+-            color: #155724;
+-            border: 1px solid #c3e6cb;
+-        }
+-
+-        .flash.error {
+-            background-color: #f8d7da;
+-            color: #721c24;
+-            border: 1px solid #f5c6cb;
+-        }
+-
+-        .benefits-list {
+-            background-color: #e3f2fd;
+-            padding: 20px;
++        .btn {
++            width: 100%;
++            padding: 14px 20px;
++            background: var(--orange);
++            color: #12100a;
++            border: none;
+             border-radius: 8px;
+-            margin-bottom: 20px;
+-        }
+-
+-        .benefits-list h3 {
+-            color: #1565c0;
+-            font-size: 16px;
+-            margin-bottom: 10px;
+-        }
+-
+-        .benefits-list ul {
+-            list-style: none;
+-            padding: 0;
++            font-size: 17px;
++            font-weight: 700;
++            cursor: pointer;
++            font-family: inherit;
+         }
+ 
+-        .benefits-list li {
+-            display: flex;
+-            align-items: center;
+-            margin-bottom: 8px;
+-            font-size: 14px;
+-            color: #333;
+-        }
++        .btn:hover { background: #ffad2e; }
++        .btn:disabled { opacity: 0.6; cursor: not-allowed; }
+ 
+-        .benefits-list li::before {
+-            content: "✓";
+-            color: #1565c0;
+-            font-weight: bold;
+-            margin-right: 10px;
+-        }
++        .flash { padding: 12px 15px; border-radius: 8px; margin-bottom: 16px; font-size: 15px; }
++        .flash.error { background: #fdecea; border: 1px solid #f5c6c2; color: #8a1c13; }
++        .flash.success { background: #e8f6ee; border: 1px solid #c3e6d0; color: #14653a; }
++        .flash.warning { background: #fff6e5; border: 1px solid #ffe0a3; color: #7a4f00; }
+ 
+-        @media (max-width: 480px) {
+-            .auth-container {
+-                padding: 30px 20px;
+-            }
+-        }
++        .foot { text-align: center; margin-top: 22px; font-size: 14.5px; color: var(--muted); }
++        .foot a { color: var(--orange-deep); }
+     </style>
+ </head>
+ <body>
+-    <div class="auth-container">
+-        <div class="logo">
+-            <h1>🏆 Amazon Bestseller Monitor</h1>
+-            <p>Create your free account</p>
+-        </div>
++    <a href="/" class="brand">
++        <img src="{{ url_for('static', filename='screenshots/icon-512.png') }}" width="34" height="34" alt="">
++        <span>Screenshot Tracker</span>
++    </a>
++
++    <div class="container">
++        <h1>Finish setting up your account</h1>
++        <p class="lede">Your subscription is active. Choose a password and you're in.</p>
+ 
+         {% with messages = get_flashed_messages(with_categories=true) %}
+             {% if messages %}
+-                <div class="flash-messages">
+-                    {% for category, message in messages %}
+-                        <div class="flash {{ category }}">{{ message }}</div>
+-                    {% endfor %}
+-                </div>
++                {% for category, message in messages %}
++                    <div class="flash {{ category }}">{{ message }}</div>
++                {% endfor %}
+             {% endif %}
+         {% endwith %}
+ 
+-        <div class="benefits-list">
+-            <h3>Start monitoring in minutes:</h3>
+-            <ul>
+-                <li>Document your products' ranks</li>
+-                <li>Automatic bestseller screenshots</li>
+-                <li>Email notifications</li>
+-                <li>Custom category tracking</li>
+-            </ul>
+-        </div>
+-
+-        <form method="POST" action="{{ url_for('auth.complete_registration') }}" id="registerForm">
+-            <!-- Bug fix: previously posted to auth.setup_account, which skipped
+-                 token-expiry and subscription checks and whose GET 500ed on a
+-                 missing template. complete_registration is the validating handler. -->
++        <form method="POST" action="{{ url_for('auth.complete_registration') }}" id="setupForm">
+             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+             <input type="hidden" name="token" value="{{ token }}">
+ 
+             <div class="form-group">
+-                <label for="full_name">Full Name</label>
+-                <input type="text" 
+-                       id="full_name" 
+-                       name="full_name" 
+-                       required 
+-                       placeholder="John Doe"
+-                       value="{{ full_name if full_name else '' }}">
++                <label for="email">Email address</label>
++                <!-- Readonly and prefilled from the setup link. The POST handler reads
++                     it from the form with a query-string fallback. -->
++                <input type="email" id="email" name="email" value="{{ email }}" readonly>
+             </div>
+ 
+             <div class="form-group">
+-                <label for="email">Email Address</label>
+-                <input type="email" 
+-                       id="email" 
+-                       name="email" 
+-                       required 
+-                       autocomplete="email"
+-                       readonly
+-                       value="{{ email if email else '' }}">
++                <label for="full_name">Your name</label>
++                <input type="text" id="full_name" name="full_name"
++                       autocomplete="name" placeholder="Jane Author">
+             </div>
+ 
+             <div class="form-group">
+-                <label for="password">Password</label>
+-                <input type="password" 
+-                       id="password" 
+-                       name="password" 
+-                       required 
+-                       autocomplete="new-password"
+-                       placeholder="Create a strong password">
+-
+-                <div class="password-requirements" id="passwordRequirements" style="display: none;">
+-                    <h4>Password must contain:</h4>
+-                    <div class="requirement" id="req-length">
+-                        <span class="requirement-icon">✗</span>
+-                        <span>At least 8 characters</span>
+-                    </div>
+-                    <div class="requirement" id="req-uppercase">
+-                        <span class="requirement-icon">✗</span>
+-                        <span>One uppercase letter</span>
+-                    </div>
+-                    <div class="requirement" id="req-lowercase">
+-                        <span class="requirement-icon">✗</span>
+-                        <span>One lowercase letter</span>
+-                    </div>
+-                    <div class="requirement" id="req-number">
+-                        <span class="requirement-icon">✗</span>
+-                        <span>One number</span>
+-                    </div>
+-                    <div class="requirement" id="req-special">
+-                        <span class="requirement-icon">✗</span>
+-                        <span>One special character (!@#$%^&*)</span>
+-                    </div>
+-                    <div class="password-strength">
+-                        <div class="password-strength-bar" id="strengthBar"></div>
+-                    </div>
++                <div class="label-row">
++                    <label for="password">Choose a password</label>
++                    <button type="button" class="reveal" id="revealBtn" aria-pressed="false"
++                            aria-controls="password confirm_password">Show</button>
+                 </div>
++                <!-- Single length rule, replacing the old five-rule checklist
++                     (upper/lower/number/special) that stayed hidden until typing
++                     began. Enforced server-side too. -->
++                <input type="password" id="password" name="password" required minlength="8"
++                       autocomplete="new-password" placeholder="At least 8 characters">
++                <div class="hint" id="pwHint">At least 8 characters. That's the only rule.</div>
+             </div>
+ 
++            <!-- Confirm stays on this step even though it was cut from the old
++                 registration form. This is the only moment a password gets set and
++                 the customer has already paid, so a silent typo means a locked-out
++                 paying customer and a support email. -->
+             <div class="form-group">
+-                <label for="confirm_password">Confirm Password</label>
+-                <input type="password" 
+-                       id="confirm_password" 
+-                       name="confirm_password" 
+-                       required 
+-                       placeholder="Confirm your password">
++                <label for="confirm_password">Confirm password</label>
++                <input type="password" id="confirm_password" name="confirm_password" required
++                       autocomplete="new-password" placeholder="Type it once more">
++                <div class="hint" id="matchHint" aria-live="polite"></div>
+             </div>
+ 
+-            <button type="submit" class="btn" id="registerBtn">Create Account</button>
++            <button type="submit" class="btn" id="setupBtn">Finish setup</button>
+         </form>
+ 
+-        <div class="divider">
+-            <span>Already have an account?</span>
+-        </div>
+-
+-        <div class="login-link">
+-            <a href="{{ url_for('auth.login') }}">Log in here</a>
+-        </div>
++        <p class="foot">
++            Trouble with this link? Email
++            <a href="mailto:support@screenshottracker.com">support@screenshottracker.com</a>
++        </p>
+     </div>
+ 
+     <script>
+-        // Password validation
+-        const passwordInput = document.getElementById('password');
+-        const confirmPasswordInput = document.getElementById('confirm_password');
+-        const passwordRequirements = document.getElementById('passwordRequirements');
+-        const strengthBar = document.getElementById('strengthBar');
+-
+-        // Requirements
+-        const requirements = {
+-            length: { element: document.getElementById('req-length'), regex: /.{8,}/ },
+-            uppercase: { element: document.getElementById('req-uppercase'), regex: /[A-Z]/ },
+-            lowercase: { element: document.getElementById('req-lowercase'), regex: /[a-z]/ },
+-            number: { element: document.getElementById('req-number'), regex: /\d/ },
+-            special: { element: document.getElementById('req-special'), regex: /[!@#$%^&*(),.?":{}|<>]/ }
+-        };
+-
+-        passwordInput.addEventListener('focus', function() {
+-            passwordRequirements.style.display = 'block';
+-        });
+-
+-        passwordInput.addEventListener('input', function() {
+-            const password = this.value;
+-            let strength = 0;
+-
+-            // Check each requirement
+-            for (const [key, req] of Object.entries(requirements)) {
+-                if (req.regex.test(password)) {
+-                    req.element.classList.add('met');
+-                    req.element.classList.remove('unmet');
+-                    req.element.querySelector('.requirement-icon').textContent = '✓';
+-                    strength++;
+-                } else {
+-                    req.element.classList.add('unmet');
+-                    req.element.classList.remove('met');
+-                    req.element.querySelector('.requirement-icon').textContent = '✗';
+-                }
++        (function () {
++            var form = document.getElementById('setupForm');
++            var pw = document.getElementById('password');
++            var cpw = document.getElementById('confirm_password');
++            var pwHint = document.getElementById('pwHint');
++            var matchHint = document.getElementById('matchHint');
++            var btn = document.getElementById('setupBtn');
++            var reveal = document.getElementById('revealBtn');
++
++            reveal.addEventListener('click', function () {
++                var show = pw.type === 'password';
++                pw.type = cpw.type = show ? 'text' : 'password';
++                reveal.textContent = show ? 'Hide' : 'Show';
++                reveal.setAttribute('aria-pressed', String(show));
++            });
++
++            function checkLength() {
++                var ok = pw.value.length >= 8;
++                pw.classList.toggle('error', pw.value.length > 0 && !ok);
++                pwHint.classList.toggle('bad', pw.value.length > 0 && !ok);
++                pwHint.textContent = (pw.value.length > 0 && !ok)
++                    ? 'A little longer — 8 characters minimum.'
++                    : "At least 8 characters. That's the only rule.";
++                return ok;
+             }
+ 
+-            // Update strength bar
+-            strengthBar.className = 'password-strength-bar';
+-            if (strength < 3) {
+-                strengthBar.classList.add('strength-weak');
+-            } else if (strength < 5) {
+-                strengthBar.classList.add('strength-medium');
+-            } else {
+-                strengthBar.classList.add('strength-strong');
+-            }
+-        });
+-
+-        // Confirm password validation
+-        confirmPasswordInput.addEventListener('input', function() {
+-            if (this.value !== passwordInput.value) {
+-                this.setCustomValidity('Passwords do not match');
+-                this.classList.add('error');
+-            } else {
+-                this.setCustomValidity('');
+-                this.classList.remove('error');
+-            }
+-        });
+-
+-        // Form submission
+-        document.getElementById('registerForm').addEventListener('submit', function(e) {
+-            const password = passwordInput.value;
+-            const confirmPassword = confirmPasswordInput.value;
+-
+-            if (password !== confirmPassword) {
+-                e.preventDefault();
+-                confirmPasswordInput.setCustomValidity('Passwords do not match');
+-                confirmPasswordInput.reportValidity();
+-                return;
++            // Only complain once they've started the second field, so the form
++            // isn't shouting "doesn't match" at someone mid-keystroke.
++            function checkMatch() {
++                if (!cpw.value) {
++                    matchHint.textContent = '';
++                    matchHint.classList.remove('bad', 'good');
++                    cpw.classList.remove('error', 'ok');
++                    return false;
++                }
++                var same = pw.value === cpw.value;
++                cpw.classList.toggle('error', !same);
++                cpw.classList.toggle('ok', same);
++                matchHint.classList.toggle('bad', !same);
++                matchHint.classList.toggle('good', same);
++                matchHint.textContent = same ? 'Passwords match.' : "These don't match yet.";
++                return same;
+             }
+ 
+-            // Disable button to prevent double submission
+-            const registerBtn = document.getElementById('registerBtn');
+-            registerBtn.disabled = true;
+-            registerBtn.textContent = 'Creating Account...';
+-        });
++            pw.addEventListener('input', function () { checkLength(); checkMatch(); });
++            cpw.addEventListener('input', checkMatch);
++
++            form.addEventListener('submit', function (e) {
++                if (!checkLength()) {
++                    e.preventDefault();
++                    pw.focus();
++                    return;
++                }
++                if (pw.value !== cpw.value) {
++                    e.preventDefault();
++                    checkMatch();
++                    cpw.focus();
++                    return;
++                }
++                btn.disabled = true;
++                btn.textContent = 'Setting up…';
++            });
++        })();
+     </script>
+ </body>
+-</html>
+\ No newline at end of file
++</html>
+diff --git a/templates/landing.html b/templates/landing.html
+index d7dfddc..8a45954 100644
+--- a/templates/landing.html
++++ b/templates/landing.html
+@@ -4,8 +4,8 @@
+     <meta charset="UTF-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+     {% include 'partials/gtag.html' %}
+-    <title>Amazon Screenshot Tracker - Capture Your Success Automatically</title>
+-    <meta name="description" content="Automatically capture screenshots when your Amazon products achieve bestseller status. Track rankings, set category goals, and get instant notifications.">
++    <title>Screenshot Tracker - Capture Your Amazon Bestseller Badge Before It Disappears</title>
++    <meta name="description" content="Amazon shows and hides bestseller badges without warning. We check your book's page every hour and email you the full-page screenshot the moment a badge appears.">
+     <meta name="facebook-domain-verification" content="rkch02n9yb1lb25ncudpl8hafli0bo" />
+     <meta property="og:type" content="website">
+     <meta property="og:site_name" content="Screenshot Tracker">
+@@ -25,902 +25,814 @@
+     <link rel="icon" type="image/png" sizes="32x32" href="/static/screenshots/favicon-32.png">
+     <link rel="apple-touch-icon" href="/static/screenshots/apple-touch-icon.png">
+     <style>
+-        * {
+-            margin: 0;
+-            padding: 0;
+-            box-sizing: border-box;
+-        }
++        /* Palette note: --navy is sampled from the logo artwork (icon-512.png),
++           which is flattened onto #010b1b with no alpha channel. Matching the site
++           to the asset lets the logo PNG sit on the nav with no visible edge. */
++        :root {
++            --navy: #010b1b;
++            --navy-mid: #12263f;
++            --orange: #ff9900;
++            --orange-deep: #e07d00;
++            --ink: #1a1a1a;
++            --muted: #5c6672;
++            --line: #e4e7eb;
++            --wash: #f6f7f9;
++        }
++
++        * { margin: 0; padding: 0; box-sizing: border-box; }
+ 
+         body {
+             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+             line-height: 1.6;
+-            color: #333;
++            color: var(--ink);
+             overflow-x: hidden;
++            background: #fff;
+         }
+ 
+-        /* Navigation */
++        img { max-width: 100%; }
++
++        /* ---------- Navigation ---------- */
+         nav {
+-            background-color: #232f3e;
+-            padding: 15px 0;
++            background-color: var(--navy);
++            padding: 10px 0;
+             position: fixed;
+             width: 100%;
+             top: 0;
+             z-index: 1000;
+-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
++            box-shadow: 0 1px 0 rgba(255,255,255,0.06);
+         }
+ 
+         .nav-container {
+-            max-width: 1200px;
++            max-width: 1120px;
+             margin: 0 auto;
+             padding: 0 20px;
+             display: flex;
+             justify-content: space-between;
+             align-items: center;
++            gap: 12px;
+         }
+ 
++        /* Wordmark stays live text rather than an image lockup: it keeps the nav
++           on one line at 390px (the old emoji + text wrapped to 107px tall) and
++           stays crisp at every density. */
+         .logo {
+-            color: white;
+-            font-size: 24px;
+-            font-weight: bold;
++            color: #fff;
++            font-size: 19px;
++            font-weight: 700;
++            letter-spacing: -0.01em;
+             text-decoration: none;
++            display: flex;
++            align-items: center;
++            gap: 10px;
++            white-space: nowrap;
++            min-width: 0;
++        }
++
++        .logo img {
++            width: 34px;
++            height: 34px;
++            border-radius: 7px;
++            display: block;
++            flex: 0 0 auto;
+         }
+ 
+         .nav-links {
+             display: flex;
+-            gap: 20px;
++            gap: 10px;
+             align-items: center;
++            flex: 0 0 auto;
+         }
+ 
+         .nav-links a {
+-            color: white;
++            color: #fff;
+             text-decoration: none;
+-            padding: 8px 20px;
+-            border-radius: 5px;
+-            transition: all 0.3s;
++            padding: 8px 16px;
++            border-radius: 6px;
++            font-size: 15px;
++            transition: background-color 0.2s, color 0.2s;
+         }
+ 
+-        .nav-links a:hover {
+-            background-color: rgba(255,255,255,0.1);
+-        }
++        .nav-links .btn-login:hover { background-color: rgba(255,255,255,0.1); }
+ 
+-        .nav-links .btn-login {
+-            background-color: transparent;
+-            border: 2px solid #ff9900;
++        .nav-links .btn-plans {
++            background-color: var(--orange);
++            color: #12100a;
++            font-weight: 700;
+         }
+ 
+-        .nav-links .btn-signup {
+-            background-color: #ff9900;
+-        }
++        .nav-links .btn-plans:hover { background-color: #ffad2e; }
+ 
+-        /* Hero Section */
++        /* ---------- Hero ----------
++           Split in two. The dark band carries the nav and the problem statement;
++           everything from the CTA down sits on white. Reasons: the hero capture is
++           a screenshot of a white Amazon page, so on navy it read as a bright hole
++           in a dark frame, and an orange button has more contrast against white
++           than against a dark field it already glows on. The band keeps the
++           headline, and everything from the subheadline down is dark-on-white.
++           The three-line headline gives the band enough mass to read as a
++           deliberate masthead rather than an oversized nav bar, and moving the
++           subcopy out lifts the CTA about 86px higher up the page. */
+         .hero {
+-            background: linear-gradient(135deg, #232f3e 0%, #ff9900 100%);
+-            color: white;
+-            padding: 120px 20px 80px;
++            background: linear-gradient(180deg, var(--navy-mid) 0%, var(--navy) 100%);
++            color: #fff;
++            padding: 92px 20px 44px;
+             text-align: center;
+-            margin-top: 60px;
+         }
+ 
+-        .hero h1 {
+-            font-size: 48px;
+-            margin-bottom: 20px;
+-            animation: fadeInUp 0.8s ease;
++        .hero-continue {
++            background: #fff;
++            padding: 38px 20px 54px;
++            text-align: center;
+         }
+ 
+-        .hero p {
+-            font-size: 20px;
+-            margin-bottom: 40px;
+-            opacity: 0.9;
+-            max-width: 600px;
+-            margin-left: auto;
+-            margin-right: auto;
+-            animation: fadeInUp 0.8s ease 0.2s both;
++        .hero-inner { max-width: 820px; margin: 0 auto; }
++
++        .hero h1 {
++            font-size: clamp(30px, 5.6vw, 50px);
++            line-height: 1.14;
++            letter-spacing: -0.02em;
++            margin-bottom: 0;
+         }
+ 
+-        .cta-buttons {
+-            display: flex;
+-            gap: 20px;
+-            justify-content: center;
+-            flex-wrap: wrap;
+-            animation: fadeInUp 0.8s ease 0.4s both;
++        .hero h1 .accent { color: var(--orange); }
++
++        /* The forced line break helps the two-sentence headline balance on wide
++           screens; below 760px the text wraps naturally and the break is dropped. */
++        @media (max-width: 760px) { .hide-sm { display: none; } }
++
++        /* Dark-on-white. #48535f gives ~7.5:1 against white, comfortably past AA
++           for the 19px body size. */
++        .hero-lede {
++            font-size: clamp(16px, 2.1vw, 19px);
++            color: #48535f;
++            max-width: 660px;
++            margin: 0 auto 28px;
+         }
+ 
+         .btn {
+-            padding: 15px 40px;
++            padding: 16px 38px;
+             font-size: 18px;
+-            font-weight: bold;
++            font-weight: 700;
+             text-decoration: none;
+-            border-radius: 5px;
+-            transition: all 0.3s;
++            border-radius: 7px;
+             display: inline-block;
+             cursor: pointer;
+             border: none;
++            transition: transform 0.15s, box-shadow 0.15s, background-color 0.2s;
+         }
+ 
+         .btn-primary {
+-            background-color: white;
+-            color: #232f3e;
++            background-color: var(--orange);
++            color: #12100a;
++            box-shadow: 0 6px 20px rgba(255,153,0,0.28);
+         }
+ 
+-        .btn-secondary {
+-            background-color: transparent;
+-            color: white;
+-            border: 2px solid white;
++        .btn-primary:hover {
++            background-color: #ffad2e;
++            transform: translateY(-2px);
++            box-shadow: 0 10px 26px rgba(255,153,0,0.36);
+         }
+ 
+-        .btn:hover {
+-            transform: translateY(-2px);
+-            box-shadow: 0 5px 15px rgba(0,0,0,0.3);
++        /* Single primary CTA by design. The old hero ran "Create Free Account"
++           beside an equally weighted "See How It Works"; a competing second
++           button splits intent, so the secondary is a text link now. */
++        /* Sits on white now, so these are dark-on-light. */
++        .hero-micro {
++            margin-top: 14px;
++            font-size: 14.5px;
++            color: var(--muted);
+         }
+ 
+-        /* Features Section */
+-        .features {
+-            padding: 80px 20px;
+-            background-color: #f8f9fa;
++        .hero-micro a { color: #33404f; text-decoration: underline; text-underline-offset: 3px; }
++        .hero-micro a:hover { color: var(--navy); }
++
++        .hero-shot {
++            max-width: 720px;
++            margin: 36px auto 0;
++            border-radius: 10px;
++            overflow: hidden;
++            background: #fff;
++            border: 1px solid var(--line);
++            box-shadow: 0 14px 34px rgba(1, 11, 27, 0.13);
+         }
+ 
+-        .container {
+-            max-width: 1200px;
+-            margin: 0 auto;
++        .hero-shot img { display: block; width: 100%; height: auto; }
++
++        .hero-shot figcaption {
++            padding: 11px 16px;
++            font-size: 13.5px;
++            color: var(--muted);
++            background: #fbfcfd;
++            border-top: 1px solid var(--line);
++            text-align: left;
+         }
+ 
++        /* ---------- Shared section furniture ---------- */
++        .container { max-width: 1120px; margin: 0 auto; }
++
+         .section-title {
+             text-align: center;
+-            font-size: 36px;
+-            margin-bottom: 20px;
+-            color: #232f3e;
++            font-size: clamp(25px, 3.4vw, 34px);
++            letter-spacing: -0.015em;
++            margin-bottom: 14px;
++            color: var(--navy);
+         }
+ 
+         .section-subtitle {
+             text-align: center;
+-            font-size: 18px;
+-            color: #666;
+-            margin-bottom: 50px;
+-            max-width: 600px;
+-            margin-left: auto;
+-            margin-right: auto;
++            font-size: 17px;
++            color: var(--muted);
++            margin: 0 auto 44px;
++            max-width: 620px;
+         }
+ 
+-        .feature-grid {
+-            display: grid;
+-            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+-            gap: 40px;
+-        }
++        /* ---------- Proof (moved directly below the hero) ---------- */
++        .demo-section { padding: 68px 20px; background-color: var(--wash); text-align: center; }
+ 
+-        .feature-card {
+-            background: white;
+-            padding: 40px 30px;
+-            border-radius: 10px;
+-            box-shadow: 0 2px 20px rgba(0,0,0,0.08);
+-            text-align: center;
+-            transition: transform 0.3s;
++        .proof-frame {
++            background: linear-gradient(45deg, var(--orange), var(--navy));
++            padding: 3px;
++            border-radius: 12px;
++            max-width: 700px;
++            margin: 0 auto;
++            box-shadow: 0 12px 32px rgba(1, 11, 27, 0.14);
+         }
+ 
+-        .feature-card:hover {
+-            transform: translateY(-5px);
+-            box-shadow: 0 5px 30px rgba(0,0,0,0.15);
++        .proof-inner { background: #fff; border-radius: 9px; overflow: hidden; }
++
++        .proof-mailhead {
++            display: flex;
++            align-items: center;
++            gap: 12px;
++            padding: 14px 18px;
++            border-bottom: 1px solid #ececec;
++            background: #fafafa;
++            text-align: left;
+         }
+ 
+-        .feature-icon {
+-            font-size: 48px;
+-            margin-bottom: 20px;
+-            display: inline-block;
++        .proof-avatar {
++            flex: 0 0 auto;
++            width: 38px;
++            height: 38px;
++            border-radius: 50%;
++            background: var(--navy);
++            color: var(--orange);
++            display: flex;
++            align-items: center;
++            justify-content: center;
++            font-size: 19px;
+         }
+ 
+-        .feature-card h3 {
+-            color: #232f3e;
+-            margin-bottom: 15px;
+-            font-size: 24px;
++        .proof-meta { flex: 1 1 auto; min-width: 0; }
++
++        .proof-from {
++            font-size: 0.85rem;
++            font-weight: 600;
++            color: var(--navy);
++            white-space: nowrap;
++            overflow: hidden;
++            text-overflow: ellipsis;
+         }
+ 
+-        .feature-card p {
++        .proof-from span { font-weight: 400; color: #8a8a8a; }
++
++        .proof-subject {
++            font-size: 0.85rem;
+             color: #666;
+-            line-height: 1.8;
++            white-space: nowrap;
++            overflow: hidden;
++            text-overflow: ellipsis;
+         }
+ 
+-        /* How It Works */
+-        .how-it-works {
+-            padding: 80px 20px;
+-            background-color: white;
++        .proof-time {
++            flex: 0 0 auto;
++            font-size: 0.8rem;
++            color: #8a8a8a;
++            font-variant-numeric: tabular-nums;
+         }
+ 
+-        .steps {
+-            display: grid;
+-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+-            gap: 40px;
+-            margin-top: 50px;
+-        }
++        .proof-body { padding: 24px 22px 20px; text-align: left; }
+ 
+-        .step {
+-            text-align: center;
+-            position: relative;
+-        }
++        .proof-h { margin: 0 0 16px; font-size: 1.35rem; line-height: 1.25; color: var(--ink); }
+ 
+-        .step-number {
+-            width: 60px;
+-            height: 60px;
+-            background-color: #ff9900;
+-            color: white;
+-            border-radius: 50%;
++        .proof-body p { margin: 0 0 13px; font-size: 1rem; line-height: 1.6; color: #333; }
++        .proof-body p:last-of-type { margin-bottom: 0; }
++        .proof-body strong { color: var(--ink); }
++        .proof-stamp { font-style: italic; color: #555 !important; }
++
++        .proof-attach {
+             display: flex;
+             align-items: center;
+-            justify-content: center;
+-            font-size: 24px;
+-            font-weight: bold;
+-            margin: 0 auto 20px;
++            gap: 10px;
++            margin-top: 18px;
++            padding: 12px 14px;
++            border: 1px solid var(--line);
++            border-radius: 7px;
++            background: #fbfbfb;
+         }
+ 
+-        .step h3 {
+-            color: #232f3e;
+-            margin-bottom: 10px;
++        .proof-file {
++            font-size: 0.9rem;
++            font-weight: 600;
++            color: var(--navy);
++            overflow: hidden;
++            text-overflow: ellipsis;
++            white-space: nowrap;
+         }
+ 
+-        .step p {
+-            color: #666;
+-        }
+-
+-        /* Screenshot Demo */
+-        .demo-section {
+-            padding: 80px 20px;
+-            background-color: #f8f9fa;
+-            text-align: center;
+-        }
++        .proof-size { margin-left: auto; flex: 0 0 auto; font-size: 0.8rem; color: #8a8a8a; }
+ 
+-        .demo-image {
+-            max-width: 800px;
+-            width: 100%;
+-            margin: 50px auto;
++        .proof-archive {
++            display: flex;
++            align-items: center;
++            gap: 22px;
++            max-width: 700px;
++            margin: 24px auto 0;
++            padding: 18px;
++            border: 1px solid var(--line);
+             border-radius: 10px;
+-            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
++            background: #fff;
++            text-align: left;
+         }
+ 
+-        /* Pricing */
+-        .pricing {
+-            padding: 80px 20px;
+-            background-color: white;
++        .proof-archive-img {
++            flex: 0 0 auto;
++            width: 118px;
++            height: 170px;
++            overflow: hidden;
++            border: 1px solid #ddd;
++            border-radius: 5px;
++            background: #fff;
++            -webkit-mask-image: linear-gradient(to bottom, #000 62%, transparent 100%);
++            mask-image: linear-gradient(to bottom, #000 62%, transparent 100%);
+         }
+ 
+-        .pricing-container {
++        .proof-archive-img img { display: block; width: 100%; height: auto; }
++
++        .proof-archive-text { font-size: 0.95rem; line-height: 1.6; color: #555; }
++        .proof-archive-text strong { color: var(--navy); }
++
++        /* ---------- Features ---------- */
++        .features { padding: 68px 20px; background-color: #fff; }
++
++        /* Cut from six cards to three. "Secure & Private" and "Lightning Fast"
++           answered objections nobody had, and the six-card grid was pushing the
++           proof section 4,555px down the page on mobile. */
++        .feature-grid {
+             display: grid;
+-            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+-            gap: 40px;
+-            margin-top: 50px;
++            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
++            gap: 26px;
+         }
+ 
+-        .pricing-tier {
+-            background: white;
++        .feature-card {
++            background: #fff;
++            padding: 30px 26px;
+             border-radius: 10px;
+-            padding: 40px;
+-            box-shadow: 0 2px 20px rgba(0,0,0,0.08);
+-            border: 2px solid transparent;
+-            transition: all 0.3s;
++            border: 1px solid var(--line);
++            text-align: left;
+         }
+ 
+-        .pricing-tier:hover {
+-            border-color: #ff9900;
+-            transform: translateY(-5px);
++        .feature-icon {
++            width: 42px;
++            height: 42px;
++            margin-bottom: 16px;
++            color: var(--orange-deep);
+         }
+ 
+-        .tier-subtitle {
+-            color: #666;
+-            margin-bottom: 20px;
+-        }
++        .feature-icon svg { width: 100%; height: 100%; display: block; }
++
++        .feature-card h3 { color: var(--navy); margin-bottom: 10px; font-size: 19px; }
++        .feature-card p { color: var(--muted); font-size: 15.5px; line-height: 1.65; }
+ 
+-        .tier-features {
+-            list-style: none;
+-            padding: 20px 0;
+-            border-bottom: 1px solid #eee;
+-            margin-bottom: 30px;
++        /* ---------- How it works ---------- */
++        .how-it-works { padding: 68px 20px; background-color: var(--wash); }
++
++        .steps {
++            display: grid;
++            grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
++            gap: 30px;
++            margin-top: 8px;
+         }
+ 
+-        .tier-features li {
+-            padding: 8px 0;
+-            color: #666;
++        .step { text-align: center; }
++
++        .step-number {
++            width: 48px;
++            height: 48px;
++            background-color: var(--orange);
++            color: #12100a;
++            border-radius: 50%;
++            display: flex;
++            align-items: center;
++            justify-content: center;
++            font-size: 20px;
++            font-weight: 700;
++            margin: 0 auto 14px;
+         }
+ 
+-        .tier-features li:before {
+-            content: "✓";
+-            color: #28a745;
+-            font-weight: bold;
+-            margin-right: 10px;
++        .step h3 { color: var(--navy); margin-bottom: 8px; font-size: 17px; }
++        .step p { color: var(--muted); font-size: 15px; }
++
++        /* ---------- Pricing ---------- */
++        .pricing { padding: 68px 20px 76px; background-color: #fff; }
++
++        .pricing-container {
++            display: grid;
++            grid-template-columns: repeat(auto-fit, minmax(330px, 1fr));
++            gap: 28px;
++            max-width: 940px;
++            margin: 0 auto;
+         }
+ 
+-        .price-options {
++        .pricing-tier {
++            background: #fff;
++            border-radius: 12px;
++            padding: 30px 28px 28px;
++            border: 1px solid var(--line);
+             display: flex;
+             flex-direction: column;
+-            gap: 15px;
+         }
+ 
++        .pricing-tier h3 { font-size: 22px; color: var(--navy); }
++        .tier-subtitle { color: var(--muted); margin-bottom: 18px; font-size: 15px; }
++
++        .tier-features { list-style: none; padding: 0 0 18px; border-bottom: 1px solid var(--line); margin-bottom: 20px; }
++        .tier-features li { padding: 6px 0; color: #48535f; font-size: 15.5px; }
++        .tier-features li:before { content: "✓"; color: #1e874b; font-weight: bold; margin-right: 9px; }
++
++        .price-options { display: flex; flex-direction: column; gap: 12px; }
++
++        /* Every price is now a submit button that goes straight to Stripe.
++           Previously these were inert divs, so a visitor who had already decided
++           had no way to buy without registering first. */
+         .price-option {
+-            padding: 15px;
+-            background: #f8f9fa;
+-            border-radius: 8px;
++            padding: 14px 16px;
++            background: var(--wash);
++            border: 1px solid var(--line);
++            border-radius: 9px;
+             display: flex;
+-            justify-content: space-between;
+             align-items: center;
++            gap: 12px;
+             position: relative;
++            width: 100%;
++            font: inherit;
++            text-align: left;
++            cursor: pointer;
++            transition: border-color 0.15s, transform 0.15s, box-shadow 0.15s;
+         }
+ 
+-        .price-option.featured {
+-            background: linear-gradient(135deg, #ff9900 0%, #ff7700 100%);
+-            color: white;
++        .price-option:hover {
++            border-color: var(--orange);
++            transform: translateY(-1px);
++            box-shadow: 0 5px 16px rgba(1,11,27,0.09);
+         }
+ 
+-        .price-option .price {
+-            font-size: 24px;
+-            font-weight: bold;
+-        }
++        .price-option:disabled { opacity: 0.6; cursor: wait; }
+ 
+-        .price-option .period {
+-            color: #666;
+-        }
++        .price-option .price { font-size: 21px; font-weight: 700; color: var(--navy); }
++        .price-option .period { color: var(--muted); font-size: 14.5px; }
++        .price-option .po-text { display: flex; flex-direction: column; min-width: 0; }
++        .price-option .po-note { font-size: 13px; color: var(--muted); }
++        .price-option .po-go { margin-left: auto; flex: 0 0 auto; color: var(--orange-deep); font-weight: 700; font-size: 14.5px; }
+ 
+-        .price-option.featured .period {
+-            color: white;
+-            opacity: 0.9;
+-        }
++        .price-option.featured { background: linear-gradient(135deg, var(--orange) 0%, #ff7a00 100%); border-color: transparent; }
++        .price-option.featured .price,
++        .price-option.featured .period,
++        .price-option.featured .po-note,
++        .price-option.featured .po-go { color: #12100a; }
++        .price-option.featured .period,
++        .price-option.featured .po-note { opacity: 0.85; }
+ 
++        /* Exactly one of these on the page. Both tiers carried a "Most Popular"
++           badge before, which cancels the signal out. */
+         .badge {
+             position: absolute;
+             top: -10px;
+-            right: 20px;
+-            background: #28a745;
+-            color: white;
+-            padding: 4px 12px;
++            right: 16px;
++            background: #1e874b;
++            color: #fff;
++            padding: 3px 11px;
+             border-radius: 20px;
+-            font-size: 12px;
++            font-size: 11.5px;
++            font-weight: 700;
++            letter-spacing: 0.02em;
+         }
+ 
+-        .savings {
+-            background: #28a745;
+-            color: white;
+-            padding: 4px 12px;
+-            border-radius: 20px;
+-            font-size: 12px;
+-        }
++        .savings { background: #1e874b; color: #fff; padding: 3px 10px; border-radius: 20px; font-size: 11.5px; font-weight: 700; }
++
++        .pricing-foot { text-align: center; margin-top: 30px; color: var(--muted); font-size: 14.5px; }
++        .pricing-foot a { color: var(--orange-deep); }
+ 
+-        /* Free signup banner */
+-        .free-signup-note {
+-            background-color: #d4edda;
+-            border: 1px solid #c3e6cb;
+-            color: #155724;
+-            padding: 15px 20px;
++        .checkout-error {
++            display: none;
++            max-width: 600px;
++            margin: 20px auto 0;
++            padding: 12px 16px;
+             border-radius: 8px;
++            background: #fdecea;
++            border: 1px solid #f5c6c2;
++            color: #8a1c13;
++            font-size: 15px;
+             text-align: center;
+-            margin-bottom: 30px;
+         }
+ 
+-        .free-signup-note strong {
+-            color: #0d5524;
+-        }
++        /* ---------- Contact + footer ---------- */
++        .contact-section { background-color: var(--navy); color: #fff; padding: 44px 20px; text-align: center; }
++        .contact-section h2 { color: #fff; margin-bottom: 12px; font-size: 22px; }
++        .contact-section p { color: #9fb0c4; margin-bottom: 12px; }
++        .contact-section a { color: var(--orange); text-decoration: none; font-size: 19px; }
++        .contact-section a:hover { text-decoration: underline; }
+ 
+-        /* Contact */
+-        .contact-section {
+-            background-color: #232f3e;
+-            color: white;
+-            padding: 40px 20px;
+-            margin-top: 60px;
+-            text-align: center;
+-        }
+-        .contact-section h2 {
+-            color: white;
+-            margin-bottom: 20px;
+-        }
+-        .contact-section a {
+-            color: #ff9900;
+-            text-decoration: none;
+-            font-size: 20px;
+-        }
+-        .contact-section a:hover {
+-            text-decoration: underline;
+-        }
+-
+-        /* Footer */
+-        footer {
+-            background-color: #232f3e;
+-            color: white;
+-            padding: 40px 20px;
+-            text-align: center;
+-        }
++        footer { background-color: var(--navy); color: #fff; padding: 0 20px 36px; text-align: center; }
+ 
+-        .footer-links {
+-            display: flex;
+-            justify-content: center;
+-            gap: 30px;
+-            margin-bottom: 20px;
+-            flex-wrap: wrap;
+-        }
++        .footer-links { display: flex; justify-content: center; gap: 26px; margin-bottom: 16px; flex-wrap: wrap; }
++        .footer-links a { color: #fff; text-decoration: none; opacity: 0.75; }
++        .footer-links a:hover { opacity: 1; }
+ 
+-        .footer-links a {
+-            color: white;
+-            text-decoration: none;
+-            opacity: 0.8;
+-            transition: opacity 0.3s;
++        /* ---------- Responsive ---------- */
++        @media (max-width: 760px) {
++            .hero { padding: 80px 18px 34px; }
++            .hero-continue { padding: 30px 18px 44px; }
++            .feature-grid { grid-template-columns: 1fr; }
++            .pricing-container { grid-template-columns: 1fr; }
++            .proof-archive { flex-direction: column; align-items: flex-start; gap: 16px; }
++            .proof-archive-img { width: 100px; height: 146px; }
++            .proof-time, .proof-size { display: none; }
++            .proof-body { padding: 20px 16px 18px; }
++            .proof-h { font-size: 1.15rem; }
+         }
+ 
+-        .footer-links a:hover {
+-            opacity: 1;
++        /* Keeps the nav on one line without crowding at 390px. The old nav wrapped
++           to two lines (107px tall) and overlapped the hero. */
++        @media (max-width: 560px) {
++            .logo { font-size: 15.5px; gap: 8px; }
++            .logo img { width: 29px; height: 29px; }
++            .nav-links { gap: 4px; }
++            .nav-links a { padding: 7px 11px; font-size: 13.5px; }
++            .nav-container { padding: 0 14px; }
+         }
+ 
+-        /* Animations */
+-        @keyframes fadeInUp {
+-            from {
+-                opacity: 0;
+-                transform: translateY(30px);
+-            }
+-            to {
+-                opacity: 1;
+-                transform: translateY(0);
+-            }
++        @media (max-width: 400px) {
++            .logo { font-size: 14.5px; }
++            .nav-links a { padding: 6px 9px; font-size: 13px; }
++            .btn { padding: 15px 22px; font-size: 16.5px; width: 100%; }
++            .hero h1 { font-size: 27px; }
++            .hero-lede { font-size: 15.5px; }
+         }
+ 
+-        /* Responsive */
+-        @media (max-width: 768px) {
+-            .hero h1 {
+-                font-size: 36px;
+-            }
+-
+-            .hero p {
+-                font-size: 18px;
+-            }
+-
+-            .feature-grid {
+-                grid-template-columns: 1fr;
+-            }
+-
+-            .nav-links {
+-                gap: 10px;
+-            }
+-
+-            .nav-links a {
+-                padding: 8px 15px;
+-                font-size: 14px;
+-            }
+-
+-            .pricing-container {
+-                grid-template-columns: 1fr;
+-            }
++        @media (prefers-reduced-motion: reduce) {
++            * { transition: none !important; }
+         }
+     </style>
+ </head>
+ <body>
+     <!-- Navigation -->
+-    <nav>
++    <nav id="siteNav">
+         <div class="nav-container">
+-            <a href="/" class="logo">🏆 Screenshot Tracker</a>
++            <a href="/" class="logo">
++                <img src="{{ url_for('static', filename='screenshots/icon-512.png') }}"
++                     width="34" height="34" alt="">
++                <span>Screenshot Tracker</span>
++            </a>
+             <div class="nav-links">
+-                <a href="{{ url_for('auth.login') }}" class="btn-login">Log In</a>
+-                <!-- CHANGED: Now goes to register, not pricing -->
+-                <a href="{{ url_for('auth.register') }}" class="btn-signup">Sign Up Free</a>
++                <a href="{{ url_for('auth.login') }}" class="btn-login">Log in</a>
++                <a href="#pricing" class="btn-plans">See plans</a>
+             </div>
+         </div>
+     </nav>
+ 
+-    <!-- Hero Section -->
+-    <section class="hero">
+-        <h1>Never Miss Your Amazon Bestseller Moment</h1>
+-        <p>Automatically capture screenshots when your books achieve bestseller status. Get instant proof of your success, delivered to your inbox.</p>
+-        <div class="cta-buttons">
+-            <!-- CHANGED: Primary CTA goes to register -->
+-            <a href="{{ url_for('auth.register') }}" class="btn btn-primary">Create Free Account</a>
+-            <a href="#how-it-works" class="btn btn-secondary">See How It Works</a>
++    <!-- Hero -->
++    <section class="hero" id="top">
++        <div class="hero-inner">
++            <h1>Amazon hides your bestseller badge without warning.<br class="hide-sm">
++                <span class="accent">We screenshot it before it's gone.</span></h1>
+         </div>
+     </section>
+ 
+-    <!-- Features -->
+-    <section class="features">
++    <!-- The gradient stops at the headline. Everything from here down is
++         dark-on-white, including the capture, which is itself a screenshot of a
++         white Amazon page and read as a bright hole when framed in navy. -->
++    <section class="hero-continue">
++        <div class="hero-inner">
++            <p class="hero-lede">
++                We check your book's Amazon page every hour, day and night. The moment a
++                bestseller or #1 New Release badge appears, you get the full-page screenshot
++                in your inbox — timestamped, archived, and ready for your newsletter, your
++                cover, or your press kit.
++            </p>
++            <a href="#pricing" class="btn btn-primary">Start tracking my book</a>
++            <p class="hero-micro">
++                Cancel anytime · From $14.99 · <a href="#how-it-works">See how it works</a>
++            </p>
++
++            <!-- The badge is the product, so it has to be legible. At 390px the full
++                 738px-wide capture scales the badge down to roughly 5px of text.
++                 The mobile source is a 2x crop of the title-and-badge region of the
++                 same capture, so the badge reads at close to 1:1. -->
++            <figure class="hero-shot">
++                <picture>
++                    <source media="(max-width: 700px)"
++                            srcset="{{ url_for('static', filename='screenshots/badge-hero-mobile.webp') }}"
++                            width="976" height="200">
++                    <img src="{{ url_for('static', filename='screenshots/badge-hero.webp') }}"
++                         width="738" height="294" fetchpriority="high"
++                         alt="Amazon listing for Murder In Cavendish Square by Ann Sutton, showing the #1 New Release badge in British &amp; Irish Humor &amp; Satire.">
++                </picture>
++                <figcaption>A real capture — the badge exactly as Amazon displayed it, at 02:26 UTC.</figcaption>
++            </figure>
++        </div>
++    </section>
++
++    <!-- Proof. Moved above the features grid: it was starting 4,555px down on a
++         390px viewport, which is 5.4 screens, and it is the only real evidence
++         on the page. -->
++    <section class="demo-section">
+         <div class="container">
+-            <h2 class="section-title">Everything You Need to Track Your Success</h2>
+-            <p class="section-subtitle">Powerful features designed specifically for Amazon sellers and authors</p>
++            <h2 class="section-title">This is what lands in your inbox</h2>
++            <p class="section-subtitle">
++                The moment a badge appears — with the full-page screenshot attached and
++                archived to your dashboard.
++            </p>
++
++            <div class="proof-frame">
++                <div class="proof-inner">
++                    <div class="proof-mailhead">
++                        <div class="proof-avatar" aria-hidden="true">🏆</div>
++                        <div class="proof-meta">
++                            <div class="proof-from">Screenshot Tracker <span>&lt;noreply@mail.screenshottracker.com&gt;</span></div>
++                            <!-- Subject now matches the badge in the capture below.
++                                 It previously read "Bestseller Badge captured" while the
++                                 body and screenshot both said "#1 New Release". -->
++                            <div class="proof-subject">🎉 Achievement Unlocked! — #1 New Release captured</div>
++                        </div>
++                        <div class="proof-time">2:26 AM</div>
++                    </div>
+ 
+-            <div class="feature-grid">
+-                <div class="feature-card">
+-                    <div class="feature-icon">📸</div>
+-                    <h3>Automatic Screenshots</h3>
+-                    <p>Our system checks your products every hour and captures high-quality screenshots the moment they achieve bestseller status.</p>
++                    <div class="proof-body">
++                        <h3 class="proof-h">🎉 Achievement Unlocked!</h3>
++                        <p>
++                            Your book <strong>Murder In Cavendish Square: A Dodo Dorchester Mystery
++                            Book 15</strong> has achieved: <strong>#1 New Release</strong>
++                        </p>
++                        <p class="proof-stamp">Captured July 31, 2026 at 02:26 UTC</p>
++                        <p>
++                            The full page screenshot is attached — your badge and ranking as they
++                            appeared on Amazon at the moment of capture. It's also saved to your
++                            dashboard.
++                        </p>
++
++                        <div class="proof-attach">
++                            <span aria-hidden="true">📎</span>
++                            <span class="proof-file">bestseller-badge-2026-07-31.png</span>
++                            <span class="proof-size">Full page capture</span>
++                        </div>
++                    </div>
+                 </div>
++            </div>
+ 
+-                <div class="feature-card">
+-                    <div class="feature-icon">🎯</div>
+-                    <h3>Custom Category Tracking</h3>
+-                    <p>Track specific categories like "British Historical Fiction" or "Health, Fitness & Dieting". Set custom rank goals for each category.</p>
++            <div class="proof-archive">
++                <div class="proof-archive-img">
++                    <img src="{{ url_for('static', filename='screenshots/full-capture-thumb.webp') }}"
++                         width="520" height="942" loading="lazy"
++                         alt="The full Amazon product page as captured, from the header down to the author bio.">
+                 </div>
++                <p class="proof-archive-text">
++                    <strong>The whole page, not just the badge.</strong> Every capture archives
++                    the complete listing — rankings, review count, categories and all — so you
++                    have the full context months later, when the badge is long gone and you
++                    need it for a newsletter or a cover.
++                </p>
++            </div>
+ 
+-                <div class="feature-card">
+-                    <div class="feature-icon">📧</div>
+-                    <h3>Instant Email Alerts</h3>
+-                    <p>Get notified immediately when your product hits bestseller status. Screenshots are attached and ready to share.</p>
+-                </div>
++            <p class="section-subtitle" style="margin: 26px auto 0;">
++                Sent at <strong>2:26 in the morning</strong>. Amazon never announces these
++                badges and gives no warning before they disappear — this one was caught and
++                archived while the author slept.
++            </p>
++        </div>
++    </section>
++
++    <!-- TESTIMONIAL SLOT — drop 2–3 customer quotes in here once you have them.
++         This position (after proof, before features) is where they do the most work. -->
+ 
++    <!-- Features -->
++    <section class="features">
++        <div class="container">
++            <h2 class="section-title">What you get</h2>
++            <p class="section-subtitle">Built for one job: catching the badge and keeping the evidence.</p>
++
++            <div class="feature-grid">
+                 <div class="feature-card">
+-                    <div class="feature-icon">📊</div>
+-                    <h3>Rank History</h3>
+-                    <p>Track your product's ranking over time. See trends, improvements, and identify what's working for your listings.</p>
++                    <div class="feature-icon" aria-hidden="true">
++                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
++                            <path d="M3 8a2 2 0 0 1 2-2h2.5l1.2-1.8A1 1 0 0 1 9.5 4h5a1 1 0 0 1 .8.4L16.5 6H19a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
++                            <circle cx="12" cy="12.5" r="3.4"/>
++                        </svg>
++                    </div>
++                    <h3>Hourly automatic capture</h3>
++                    <p>We check your listing every hour, around the clock. When a badge appears, the screenshot is taken and emailed to you without you doing anything.</p>
+                 </div>
+ 
+                 <div class="feature-card">
+-                    <div class="feature-icon">🔒</div>
+-                    <h3>Secure & Private</h3>
+-                    <p>Your data is encrypted and secure. Only you can access your product information and screenshots.</p>
++                    <div class="feature-icon" aria-hidden="true">
++                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
++                            <circle cx="12" cy="12" r="8.5"/>
++                            <circle cx="12" cy="12" r="4.6"/>
++                            <circle cx="12" cy="12" r="1.1" fill="currentColor"/>
++                        </svg>
++                    </div>
++                    <h3>Track the categories you care about</h3>
++                    <p>Watch specific categories like "British Historical Fiction" or "Health, Fitness &amp; Dieting", and set the rank you want to be told about.</p>
+                 </div>
+ 
+                 <div class="feature-card">
+-                    <div class="feature-icon">⚡</div>
+-                    <h3>Lightning Fast</h3>
+-                    <p>Advanced scraping technology ensures reliable monitoring.</p>
++                    <div class="feature-icon" aria-hidden="true">
++                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
++                            <path d="M3 18.5 8.5 13l3.5 3.2L20.5 8"/>
++                            <path d="M15.5 8h5v5"/>
++                            <path d="M3 21h18"/>
++                        </svg>
++                    </div>
++                    <h3>Rank history you can go back to</h3>
++                    <p>Every capture is archived with its timestamp, so you can show where a book ranked months after Amazon stopped displaying it.</p>
+                 </div>
+             </div>
+         </div>
+     </section>
+ 
+-    <!-- How It Works - UPDATED with 4 steps -->
++    <!-- How It Works -->
+     <section class="how-it-works" id="how-it-works">
+         <div class="container">
+-            <h2 class="section-title">Simple as 1-2-3-4</h2>
+-            <p class="section-subtitle">Get started in minutes, no technical knowledge required</p>
++            <h2 class="section-title">How it works</h2>
++            <p class="section-subtitle">Set up once, in about two minutes.</p>
+ 
+             <div class="steps">
+                 <div class="step">
+                     <div class="step-number">1</div>
+-                    <h3>Create Free Account</h3>
+-                    <p>Sign up with your email. No credit card required to create an account.</p>
++                    <h3>Pick a plan</h3>
++                    <p>Choose the plan that matches your launch. Cancel whenever you want.</p>
+                 </div>
+ 
+                 <div class="step">
+                     <div class="step-number">2</div>
+-                    <h3>Choose Your Plan</h3>
+-                    <p>When you're ready to track, select a plan that fits your needs.</p>
++                    <h3>Set your password</h3>
++                    <p>Straight after checkout — no waiting on an email to get started.</p>
+                 </div>
+ 
+                 <div class="step">
+                     <div class="step-number">3</div>
+-                    <h3>Add Your Products</h3>
+-                    <p>Paste your Amazon product URLs. Set target categories and rankings.</p>
++                    <h3>Paste your Amazon link</h3>
++                    <p>Add your book's product URL and pick the categories to watch.</p>
+                 </div>
+ 
+                 <div class="step">
+                     <div class="step-number">4</div>
+-                    <h3>Get Notified</h3>
+-                    <p>We capture screenshots automatically and email them to you instantly.</p>
++                    <h3>Go to sleep</h3>
++                    <p>We watch every hour and email the screenshot the moment a badge shows up.</p>
+                 </div>
+             </div>
+         </div>
+     </section>
+ 
+-    <!-- Screenshot Demo -->
+-    <!--
+-      ============================================================================
+-      PROOF SECTION — drop-in replacement for the "Screenshot Demo" placeholder
+-      ============================================================================
+-
+-      HOW TO USE
+-      1. Delete the block marked "PREVIEW ONLY" below. It exists so this file
+-         renders correctly on its own; your site already defines .container,
+-         .section-title and .section-subtitle.
+-      2. Copy the <style> block marked "KEEP" into your stylesheet (or leave it
+-         inline in landing.html — it's scoped to .proof-* so it won't collide).
+-      3. Replace the whole existing <section class="demo-section">...</section>
+-         with the markup marked "KEEP" at the bottom.
+-
+-      4. Copy the three files in /img/ into your Flask static folder at
+-         static/img/. The template uses url_for(); if you're pasting into a plain
+-         HTML page instead, change the src values to /static/img/<filename>.
+-
+-      BEFORE YOU SHIP — four things to change:
+-      - The sender address is a placeholder. Put your real Resend "from" address in.
+-      - Confirm you have permission to name this book and author publicly.
+-      - The email says "Bestseller Badge" but the capture shows "#1 New Release."
+-        Side by side on one page, that mismatch is visible. Either relabel in the
+-        email template or pick a matched pair.
+-      - Re-export the images from the original attachment if you can — see the
+-        decision log, R3.1. The current ones came from a phone screenshot and are
+-        softer than they need to be.
+-      ============================================================================
+-    -->
+-
+-    <!-- ============ KEEP: STYLES ============ -->
+-    <style>
+-      .proof-frame {
+-        background: linear-gradient(45deg, #ff9900, #232f3e);
+-        padding: 4px;
+-        border-radius: 12px;
+-        max-width: 720px;
+-        margin: 44px auto 0;
+-        box-shadow: 0 12px 32px rgba(35, 47, 62, 0.16);
+-      }
+-      .proof-inner {
+-        background: #fff;
+-        border-radius: 9px;
+-        overflow: hidden;
+-      }
+-
+-      /* inbox chrome — makes it read as a delivered email, not a text block */
+-      .proof-mailhead {
+-        display: flex;
+-        align-items: center;
+-        gap: 12px;
+-        padding: 14px 18px;
+-        border-bottom: 1px solid #ececec;
+-        background: #fafafa;
+-      }
+-      .proof-avatar {
+-        flex: 0 0 auto;
+-        width: 38px;
+-        height: 38px;
+-        border-radius: 50%;
+-        background: #232f3e;
+-        color: #ff9900;
+-        display: flex;
+-        align-items: center;
+-        justify-content: center;
+-        font-size: 19px;
+-      }
+-      .proof-meta { flex: 1 1 auto; min-width: 0; }
+-      .proof-from {
+-        font-size: 0.85rem;
+-        font-weight: 600;
+-        color: #232f3e;
+-        white-space: nowrap;
+-        overflow: hidden;
+-        text-overflow: ellipsis;
+-      }
+-      .proof-from span { font-weight: 400; color: #8a8a8a; }
+-      .proof-subject {
+-        font-size: 0.85rem;
+-        color: #666;
+-        white-space: nowrap;
+-        overflow: hidden;
+-        text-overflow: ellipsis;
+-      }
+-      .proof-time {
+-        flex: 0 0 auto;
+-        font-size: 0.8rem;
+-        color: #8a8a8a;
+-        font-variant-numeric: tabular-nums;
+-      }
+-
+-      /* email body — reproduces your actual notification */
+-      .proof-body { padding: 26px 24px 22px; }
+-      .proof-h {
+-        margin: 0 0 18px;
+-        font-size: 1.45rem;
+-        line-height: 1.25;
+-        color: #1a1a1a;
+-      }
+-      .proof-body p {
+-        margin: 0 0 14px;
+-        font-size: 1rem;
+-        line-height: 1.6;
+-        color: #333;
+-      }
+-      .proof-body p:last-of-type { margin-bottom: 0; }
+-      .proof-body strong { color: #1a1a1a; }
+-      .proof-stamp {
+-        font-style: italic;
+-        color: #555 !important;
+-      }
+-
+-      /* attachment row */
+-      .proof-attach {
+-        display: flex;
+-        align-items: center;
+-        gap: 10px;
+-        margin-top: 20px;
+-        padding: 12px 14px;
+-        border: 1px solid #e4e4e4;
+-        border-radius: 7px;
+-        background: #fbfbfb;
+-      }
+-      .proof-file {
+-        font-size: 0.9rem;
+-        font-weight: 600;
+-        color: #232f3e;
+-        overflow: hidden;
+-        text-overflow: ellipsis;
+-        white-space: nowrap;
+-      }
+-      .proof-size {
+-        margin-left: auto;
+-        flex: 0 0 auto;
+-        font-size: 0.8rem;
+-        color: #8a8a8a;
+-      }
+-
+-      /* the captured screenshot itself */
+-      .proof-shot {
+-        max-width: 720px;
+-        margin: 22px auto 0;
+-        border: 1px solid #e4e4e4;
+-        border-radius: 10px;
+-        overflow: hidden;
+-        background: #fff;
+-      }
+-      .proof-shot img {
+-        display: block;
+-        width: 100%;
+-        height: auto;
+-      }
+-      .proof-shot figcaption {
+-        padding: 12px 16px;
+-        font-size: 0.85rem;
+-        color: #666;
+-        border-top: 1px solid #ececec;
+-        background: #fafafa;
+-      }
+-
+-      /* "the whole page, not just the badge" */
+-      .proof-archive {
+-        display: flex;
+-        align-items: center;
+-        gap: 22px;
+-        max-width: 720px;
+-        margin: 22px auto 0;
+-        padding: 18px;
+-        border: 1px solid #ececec;
+-        border-radius: 10px;
+-        background: #fafafa;
+-      }
+-      .proof-archive-img {
+-        flex: 0 0 auto;
+-        width: 132px;
+-        height: 190px;
+-        overflow: hidden;
+-        border: 1px solid #ddd;
+-        border-radius: 5px;
+-        background: #fff;
+-        -webkit-mask-image: linear-gradient(to bottom, #000 62%, transparent 100%);
+-        mask-image: linear-gradient(to bottom, #000 62%, transparent 100%);
+-      }
+-      .proof-archive-img img {
+-        display: block;
+-        width: 100%;
+-        height: auto;
+-      }
+-      .proof-archive-text {
+-        font-size: 0.95rem;
+-        line-height: 1.6;
+-        color: #555;
+-      }
+-      .proof-archive-text strong { color: #232f3e; }
+-      .proof-archive-text a { color: #232f3e; }
+-
+-      .proof-caption {
+-        max-width: 640px;
+-        margin: 26px auto 0;
+-        text-align: center;
+-        font-size: 0.98rem;
+-        line-height: 1.65;
+-        color: #555;
+-      }
+-      .proof-caption strong { color: #232f3e; }
+-
+-      @media (max-width: 600px) {
+-        .proof-frame { margin-top: 32px; }
+-        .proof-body { padding: 20px 16px 18px; }
+-        .proof-h { font-size: 1.2rem; }
+-        .proof-body p { font-size: 0.95rem; }
+-        .proof-mailhead { padding: 12px 14px; gap: 10px; }
+-        .proof-avatar { width: 32px; height: 32px; font-size: 16px; }
+-        .proof-time { display: none; }
+-        .proof-size { display: none; }
+-      }
+-    </style>
+-    <!-- ============ END STYLES ============ -->
+-
+-
+-    <!-- ============ KEEP: MARKUP — replaces the old demo-section ============ -->
+-    <section class="demo-section">
+-      <div class="container">
+-        <h2 class="section-title">Capture Your Success</h2>
+-        <p class="section-subtitle">
+-          This is what lands in your inbox the moment a badge appears — with the full
+-          page screenshot attached and archived to your dashboard.
+-        </p>
+-
+-        <div class="proof-frame">
+-          <div class="proof-inner">
+-
+-            <div class="proof-mailhead">
+-              <div class="proof-avatar" aria-hidden="true">🏆</div>
+-              <div class="proof-meta">
+-                <!-- TODO: replace with your real Resend sending address -->
+-                <div class="proof-from">Screenshot Tracker <span>&lt;noreply@screenshottracker.com&gt;</span></div>
+-                <div class="proof-subject">🎉 Achievement Unlocked! — Bestseller Badge captured</div>
+-              </div>
+-              <div class="proof-time">2:26 AM</div>
+-            </div>
+-
+-            <div class="proof-body">
+-              <h3 class="proof-h">🎉 Achievement Unlocked!</h3>
+-              <p>
+-                Your book <strong>Murder In Cavendish Square: A Dodo Dorchester Mystery
+-                Book 15</strong> has achieved: <strong>#1 New Release</strong>
+-              </p>
+-              <p class="proof-stamp">Captured July 31, 2026 at 02:26 UTC</p>
+-              <p>
+-                The full page screenshot is attached — your badge and ranking as they
+-                appeared on Amazon at the moment of capture. It's also saved to your
+-                dashboard.
+-              </p>
+-
+-              <div class="proof-attach">
+-                <span aria-hidden="true">📎</span>
+-                <span class="proof-file">bestseller-badge-2026-07-31.png</span>
+-                <span class="proof-size">Full page capture</span>
+-              </div>
+-            </div>
+-
+-          </div>
+-        </div>
+-
+-        <!-- The attached capture. Files are in /img/ — copy to your static folder. -->
+-        <figure class="proof-shot">
+-          <img src="{{ url_for('static', filename='screenshots/badge-hero.webp') }}"
+-               width="738" height="294" loading="lazy"
+-               alt="Amazon listing for Murder In Cavendish Square by Ann Sutton, showing the orange #1 New Release badge in British &amp; Irish Humor &amp; Satire.">
+-          <figcaption>The attachment — the badge exactly as Amazon displayed it at 02:26 UTC.</figcaption>
+-        </figure>
+-
+-        <div class="proof-archive">
+-          <div class="proof-archive-img">
+-            <img src="{{ url_for('static', filename='screenshots/full-capture-thumb.webp') }}"
+-                 width="520" height="942" loading="lazy"
+-                 alt="The full Amazon product page as captured, from the header down to the author bio.">
+-          </div>
+-          <p class="proof-archive-text">
+-            <strong>The whole page, not just the badge.</strong> Every capture archives
+-            the complete listing — rankings, review count, categories and all — so you
+-            have the full context months later, when the badge is long gone and you
+-            need it for a newsletter or a cover.
+-          </p>
+-        </div>
+-
+-        <p class="proof-caption">
+-          A real capture, sent at <strong>2:26 in the morning</strong>. Amazon never
+-          announces these badges and gives no warning before they disappear — this one
+-          was caught and archived while the author slept.
+-        </p>
+-      </div>
+-    </section>
+-    <!-- ============ END MARKUP ============ -->
+-
+     <!-- Pricing -->
+     <section class="pricing" id="pricing">
+         <div class="container">
+-            <h2 class="section-title">Choose Your Plan</h2>
+-            <p class="section-subtitle">Create a free account first, then subscribe when you're ready to track</p>
+-
+-            <!-- Free signup note -->
+-            <div class="free-signup-note">
+-                <strong>✨ Free to Sign Up!</strong> Create your account now and explore the dashboard. 
+-                You'll only need to subscribe when you want to start tracking products.
+-            </div>
++            <h2 class="section-title">Choose your plan</h2>
++            <p class="section-subtitle">Pick a plan and you're tracking in about two minutes.</p>
+ 
+             <div class="pricing-container">
+                 <div class="pricing-tier">
+                     <h3>Author</h3>
+-                    <p class="tier-subtitle">Perfect for individual authors</p>
++                    <p class="tier-subtitle">For individual authors</p>
+                     <ul class="tier-features">
+-                        <li>Track up to 2 products</li>
+-                        <li>Hourly monitoring</li>
+-                        <li>Email notifications</li>
+-                        <li>Bestseller and ranking screenshots</li>
++                        <li>Track up to 2 books</li>
++                        <li>Checked every hour, day and night</li>
++                        <li>Email alert with the screenshot attached</li>
++                        <li>Full-page captures archived to your dashboard</li>
+                     </ul>
+                     <div class="price-options">
+-                        <div class="price-option">
+-                            <span class="price">$14.99</span>
+-                            <span class="period">weekly</span>
+-                        </div>
+-                        <div class="price-option featured">
+-                            <span class="price">$29.99</span>
+-                            <span class="period">monthly</span>
++                        <button type="button" class="price-option" data-price-id="{{ author_weekly_price_id }}">
++                            <span class="po-text">
++                                <span><span class="price">$14.99</span> <span class="period">/ week</span></span>
++                                <span class="po-note">Launch Week — for a single launch</span>
++                            </span>
++                            <span class="po-go" aria-hidden="true">Choose →</span>
++                        </button>
++                        <button type="button" class="price-option featured" data-price-id="{{ author_monthly_price_id }}">
+                             <span class="badge">Most Popular</span>
+-                        </div>
+-                        <div class="price-option">
+-                            <span class="price">$299.99</span>
+-                            <span class="period">annually</span>
+-                            <span class="savings">Save $60!</span>
+-                        </div>
++                            <span class="po-text">
++                                <span><span class="price">$29.99</span> <span class="period">/ month</span></span>
++                                <span class="po-note">Badges appear unannounced — stay covered</span>
++                            </span>
++                            <span class="po-go" aria-hidden="true">Choose →</span>
++                        </button>
++                        <button type="button" class="price-option" data-price-id="{{ author_yearly_price_id }}">
++                            <span class="po-text">
++                                <span><span class="price">$24.99</span> <span class="period">/ month, billed annually</span></span>
++                                <span class="po-note">$299.99 a year</span>
++                            </span>
++                            <span class="savings">Save 17%</span>
++                        </button>
+                     </div>
+                 </div>
+ 
+@@ -928,86 +840,119 @@
+                     <h3>Publisher</h3>
+                     <p class="tier-subtitle">For publishers and agencies</p>
+                     <ul class="tier-features">
+-                        <li>Track up to 5 products</li>
+-                        <li>Hourly monitoring</li>
+-                        <li>Priority email notifications</li>
+-                        <li>All bestseller and ranking screenshots</li>
++                        <li>Track up to 5 books</li>
++                        <li>Checked every hour, day and night</li>
++                        <li>Email alert with the screenshot attached</li>
++                        <li>Full-page captures archived to your dashboard</li>
+                     </ul>
+                     <div class="price-options">
+-                        <div class="price-option">
+-                            <span class="price">$29.99</span>
+-                            <span class="period">weekly</span>
+-                        </div>
+-                        <div class="price-option featured">
+-                            <span class="price">$59.99</span>
+-                            <span class="period">monthly</span>
+-                            <span class="badge">Most Popular</span>
+-                        </div>
+-                        <div class="price-option">
+-                            <span class="price">$599.99</span>
+-                            <span class="period">annually</span>
+-                            <span class="savings">Save $120!</span>
+-                        </div>
++                        <button type="button" class="price-option" data-price-id="{{ publisher_weekly_price_id }}">
++                            <span class="po-text">
++                                <span><span class="price">$29.99</span> <span class="period">/ week</span></span>
++                                <span class="po-note">Launch Week — for a single launch</span>
++                            </span>
++                            <span class="po-go" aria-hidden="true">Choose →</span>
++                        </button>
++                        <button type="button" class="price-option" data-price-id="{{ publisher_monthly_price_id }}">
++                            <span class="po-text">
++                                <span><span class="price">$59.99</span> <span class="period">/ month</span></span>
++                                <span class="po-note">Badges appear unannounced — stay covered</span>
++                            </span>
++                            <span class="po-go" aria-hidden="true">Choose →</span>
++                        </button>
++                        <button type="button" class="price-option" data-price-id="{{ publisher_yearly_price_id }}">
++                            <span class="po-text">
++                                <span><span class="price">$49.99</span> <span class="period">/ month, billed annually</span></span>
++                                <span class="po-note">$599.99 a year</span>
++                            </span>
++                            <span class="savings">Save 17%</span>
++                        </button>
+                     </div>
+                 </div>
+             </div>
+ 
+-            <div style="text-align: center; margin-top: 40px;">
+-                <!-- CHANGED: Goes to register first -->
+-                <a href="{{ url_for('auth.register') }}" class="btn btn-primary" style="background-color: #ff9900; color: white;">
+-                    Create Free Account
+-                </a>
+-                <p style="margin-top: 15px; color: #666; font-size: 14px;">
+-                    Already have an account? <a href="{{ url_for('auth.login') }}" style="color: #ff9900;">Log in</a>
+-                </p>
+-            </div>
++            <div class="checkout-error" id="checkoutError" role="alert"></div>
++
++            <p class="pricing-foot">
++                Cancel anytime from your account — access continues to the end of the paid term.
++                See our <a href="/refunds">refund policy</a>.<br>
++                Already have an account? <a href="{{ url_for('auth.login') }}">Log in</a>
++            </p>
+         </div>
+     </section>
+ 
+     <!-- Footer -->
+     <footer>
+         <div class="contact-section">
+-            <h2>Need Help?</h2>
++            <h2>Need help?</h2>
+             <p>We're here to help you track your Amazon success</p>
+             <a href="mailto:support@screenshottracker.com">support@screenshottracker.com</a>
+         </div>
+ 
+-        <div class="container">
++        <div class="container" style="padding-top: 30px;">
+             <div class="footer-links">
+-                <a href="/terms">Terms of Service</a> | 
+-                <a href="/privacy">Privacy Policy</a> | 
++                <a href="/terms">Terms of Service</a>
++                <a href="/privacy">Privacy Policy</a>
+                 <a href="/refunds">Refund Policy</a>
+             </div>
+-            <p style="opacity: 0.6;">© 2025 Screenshot Tracker. Not affiliated with Amazon.</p>
++            <p style="opacity: 0.6;">© 2026 Screenshot Tracker. Not affiliated with Amazon.</p>
+         </div>
+     </footer>
+ 
+     <script>
+         // Smooth scrolling for anchor links
+-        document.querySelectorAll('a[href^="#"]').forEach(anchor => {
++        document.querySelectorAll('a[href^="#"]').forEach(function (anchor) {
+             anchor.addEventListener('click', function (e) {
++                var target = document.querySelector(this.getAttribute('href'));
++                if (!target) return;
+                 e.preventDefault();
+-                const target = document.querySelector(this.getAttribute('href'));
+-                if (target) {
+-                    target.scrollIntoView({
+-                        behavior: 'smooth',
+-                        block: 'start'
+-                    });
+-                }
++                target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+             });
+         });
+ 
+-        // Add scroll effect to navigation
+-        window.addEventListener('scroll', function() {
+-            const nav = document.querySelector('nav');
+-            if (window.scrollY > 50) {
+-                nav.style.backgroundColor = 'rgba(35, 47, 62, 0.95)';
+-                nav.style.backdropFilter = 'blur(10px)';
+-            } else {
+-                nav.style.backgroundColor = '#232f3e';
+-                nav.style.backdropFilter = 'none';
++        // Checkout straight from the landing page. /create_checkout does not require
++        // a login, and the Stripe webhook provisions the account afterwards, so a
++        // visitor who has already decided never has to register first.
++        (function () {
++            var errorBox = document.getElementById('checkoutError');
++
++            function showError(msg) {
++                errorBox.textContent = msg;
++                errorBox.style.display = 'block';
+             }
+-        });
++
++            document.querySelectorAll('.price-option').forEach(function (btn) {
++                btn.addEventListener('click', function () {
++                    var priceId = btn.getAttribute('data-price-id');
++                    if (!priceId) {
++                        showError('That plan is not available right now. Please email support@screenshottracker.com.');
++                        return;
++                    }
++
++                    errorBox.style.display = 'none';
++                    btn.disabled = true;
++
++                    fetch('/create_checkout', {
++                        method: 'POST',
++                        headers: { 'Content-Type': 'application/json' },
++                        body: JSON.stringify({ price_id: priceId })
++                    })
++                        .then(function (r) { return r.json(); })
++                        .then(function (data) {
++                            if (data && data.url) {
++                                window.location = data.url;
++                            } else {
++                                btn.disabled = false;
++                                showError('We could not start checkout. Please try again, or email support@screenshottracker.com.');
++                            }
++                        })
++                        .catch(function () {
++                            btn.disabled = false;
++                            showError('We could not reach the payment service. Please check your connection and try again.');
++                        });
++                });
++            });
++        })();
+     </script>
+ </body>
+-</html>
+\ No newline at end of file
++</html>
+diff --git a/templates/pricing.html b/templates/pricing.html
+index 2362deb..0c71efe 100644
+--- a/templates/pricing.html
++++ b/templates/pricing.html
+@@ -1,352 +1,310 @@
+ <!DOCTYPE html>
+-<html>
++<html lang="en">
+ <head>
+-    <title>Pricing - Screenshot Tracker</title>
+     <meta charset="UTF-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+     {% include 'partials/gtag.html' %}
+-    <script src="https://cdn.paddle.com/paddle/paddle.js"></script>
++    <title>Plans &amp; Pricing | Screenshot Tracker</title>
++    <link rel="icon" href="/static/screenshots/favicon.ico" sizes="any">
++    <!-- Paddle.js removed: checkout runs entirely through Stripe /create_checkout.
++         Leaving it loaded was dead weight, and a live risk that a purchase could
++         bypass /success and go untracked by the Google Ads conversion tag. -->
+     <style>
+-        * {
+-            margin: 0;
+-            padding: 0;
+-            box-sizing: border-box;
++        :root {
++            --navy: #010b1b;
++            --orange: #ff9900;
++            --orange-deep: #e07d00;
++            --ink: #1a1a1a;
++            --muted: #5c6672;
++            --line: #e4e7eb;
++            --wash: #f6f7f9;
+         }
+ 
++        * { margin: 0; padding: 0; box-sizing: border-box; }
++
+         body {
+             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
++            background: var(--wash);
++            color: var(--ink);
+             line-height: 1.6;
+-            color: #333;
+-            background-color: #f5f5f5;
+         }
+ 
+-        nav {
+-            background-color: #232f3e;
+-            padding: 15px 0;
+-            position: fixed;
+-            width: 100%;
+-            top: 0;
+-            z-index: 1000;
+-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+-        }
++        nav { background: var(--navy); padding: 10px 0; }
+ 
+         .nav-container {
+-            max-width: 1200px;
++            max-width: 1000px;
+             margin: 0 auto;
+             padding: 0 20px;
+             display: flex;
+             justify-content: space-between;
+             align-items: center;
++            gap: 12px;
+         }
+ 
+         .logo {
+-            color: white;
+-            font-size: 24px;
+-            font-weight: bold;
++            color: #fff;
++            font-size: 19px;
++            font-weight: 700;
+             text-decoration: none;
++            display: flex;
++            align-items: center;
++            gap: 10px;
++            white-space: nowrap;
+         }
+ 
+-        /* Main container */
+-        .container {
+-            max-width: 1200px;
+-            margin: 100px auto 40px;
+-            padding: 0 20px;
+-        }
++        .logo img { width: 34px; height: 34px; border-radius: 7px; display: block; flex: 0 0 auto; }
+ 
+-        h1 {
+-            text-align: center;
+-            color: #232f3e;
+-            font-size: 42px;
+-            margin-bottom: 20px;
++        .nav-links a {
++            color: #fff;
++            text-decoration: none;
++            padding: 8px 16px;
++            border-radius: 6px;
++            font-size: 15px;
+         }
+ 
+-        .subtitle {
+-            text-align: center;
+-            color: #666;
+-            font-size: 18px;
+-            margin-bottom: 50px;
+-        }
++        .nav-links a:hover { background: rgba(255,255,255,0.1); }
++
++        .wrap { max-width: 1000px; margin: 0 auto; padding: 46px 20px 70px; }
++
++        h1 { font-size: clamp(26px, 4vw, 34px); color: var(--navy); text-align: center; letter-spacing: -0.015em; }
++
++        .sub { text-align: center; color: var(--muted); margin: 10px auto 38px; max-width: 580px; }
+ 
+-        /* Pricing grid */
+         .pricing-grid {
+             display: grid;
+-            grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
+-            gap: 40px;
+-            margin-bottom: 60px;
++            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
++            gap: 26px;
+         }
+ 
+         .tier-section {
+-            background: white;
+-            border-radius: 10px;
+-            padding: 40px;
+-            box-shadow: 0 2px 20px rgba(0,0,0,0.08);
++            background: #fff;
++            border: 1px solid var(--line);
++            border-radius: 12px;
++            padding: 30px 28px 28px;
+         }
+ 
+-        .tier-section h2 {
+-            color: #232f3e;
+-            font-size: 32px;
+-            margin-bottom: 10px;
+-        }
++        .tier-section h2 { font-size: 22px; color: var(--navy); }
++        .tier-section .tier-sub { color: var(--muted); font-size: 15px; margin-bottom: 18px; }
+ 
+-        .tier-section > p {
+-            color: #666;
+-            margin-bottom: 30px;
+-        }
++        .tier-features { list-style: none; padding: 0 0 18px; border-bottom: 1px solid var(--line); margin-bottom: 20px; }
++        .tier-features li { padding: 6px 0; color: #48535f; font-size: 15.5px; }
++        .tier-features li:before { content: "✓"; color: #1e874b; font-weight: bold; margin-right: 9px; }
+ 
+-        /* Plan cards */
+-        .plan-options {
+-            display: grid;
+-            grid-template-columns: repeat(3, 1fr);
+-            gap: 20px;
+-            margin-top: 30px;
+-        }
++        .plan-list { display: flex; flex-direction: column; gap: 12px; }
+ 
+         .plan-card {
+-            background: #f8f9fa;
+-            border-radius: 8px;
+-            padding: 25px;
+-            text-align: center;
+-            border: 2px solid transparent;
+-            transition: all 0.3s;
++            padding: 14px 16px;
++            background: var(--wash);
++            border: 1px solid var(--line);
++            border-radius: 9px;
++            display: flex;
++            align-items: center;
++            gap: 12px;
+             position: relative;
+-        }
+-
+-        .plan-card:hover {
+-            border-color: #ff9900;
+-            transform: translateY(-5px);
+-        }
+-
+-        .plan-card.featured {
+-            background: linear-gradient(135deg, #ff9900 0%, #ff7700 100%);
+-            color: white;
+-            transform: scale(1.05);
+-        }
+-
+-        .plan-card h3 {
+-            font-size: 20px;
+-            margin-bottom: 15px;
+-            color: #232f3e;
+-        }
+-
+-        .plan-card.featured h3 {
+-            color: white;
+-        }
+-
+-        .price {
+-            font-size: 32px;
+-            font-weight: bold;
+-            margin: 20px 0;
+-            color: #232f3e;
+-        }
+-
+-        .plan-card.featured .price {
+-            color: white;
+-        }
+-
+-        .savings {
+-            background: #28a745;
+-            color: white;
+-            padding: 4px 12px;
+-            border-radius: 20px;
+-            font-size: 12px;
+-            display: inline-block;
+-            margin-bottom: 20px;
+-        }
+-
+-        /* Features list */
+-        .features-list {
+-            list-style: none;
++            width: 100%;
++            font: inherit;
+             text-align: left;
+-            margin: 20px 0;
+-        }
+-
+-        .features-list li {
+-            padding: 8px 0;
+-            color: #666;
+-        }
+-
+-        .features-list li:before {
+-            content: "✓";
+-            color: #28a745;
+-            font-weight: bold;
+-            margin-right: 10px;
+-        }
+-
+-        /* Buttons */
+-        button {
+-            background-color: #ff9900;
+-            color: white;
+-            border: none;
+-            padding: 12px 30px;
+-            font-size: 16px;
+-            font-weight: bold;
+-            border-radius: 5px;
+             cursor: pointer;
+-            transition: all 0.3s;
+-            width: 100%;
+-        }
+-
+-        button:hover {
+-            background-color: #e88b00;
+-            transform: translateY(-2px);
+-        }
+-
+-        .plan-card.featured button {
+-            background-color: white;
+-            color: #ff9900;
++            transition: border-color 0.15s, transform 0.15s, box-shadow 0.15s;
++        }
++
++        .plan-card:hover { border-color: var(--orange); transform: translateY(-1px); box-shadow: 0 5px 16px rgba(1,11,27,0.09); }
++        .plan-card:disabled { opacity: 0.6; cursor: wait; }
++
++        .plan-card .price { font-size: 21px; font-weight: 700; color: var(--navy); }
++        .plan-card .period { color: var(--muted); font-size: 14.5px; }
++        .plan-card .pc-text { display: flex; flex-direction: column; min-width: 0; }
++        .plan-card .pc-note { font-size: 13px; color: var(--muted); }
++        .plan-card .pc-go { margin-left: auto; flex: 0 0 auto; color: var(--orange-deep); font-weight: 700; font-size: 14.5px; }
++
++        .plan-card.featured { background: linear-gradient(135deg, var(--orange) 0%, #ff7a00 100%); border-color: transparent; }
++        .plan-card.featured .price,
++        .plan-card.featured .period,
++        .plan-card.featured .pc-note,
++        .plan-card.featured .pc-go { color: #12100a; }
++        .plan-card.featured .period,
++        .plan-card.featured .pc-note { opacity: 0.85; }
++
++        /* One badge on the page, on Author Monthly. Two "Most Popular" markers
++           cancel each other out. */
++        .badge {
++            position: absolute;
++            top: -10px;
++            right: 16px;
++            background: #1e874b;
++            color: #fff;
++            padding: 3px 11px;
++            border-radius: 20px;
++            font-size: 11.5px;
++            font-weight: 700;
+         }
+ 
+-        .plan-card.featured button:hover {
+-            background-color: #f5f5f5;
+-        }
++        .savings { background: #1e874b; color: #fff; padding: 3px 10px; border-radius: 20px; font-size: 11.5px; font-weight: 700; }
+ 
+-        /* Footer */
+-        footer {
+-            background-color: #232f3e;
+-            color: white;
+-            padding: 40px 20px;
++        .checkout-error {
++            display: none;
++            max-width: 600px;
++            margin: 22px auto 0;
++            padding: 12px 16px;
++            border-radius: 8px;
++            background: #fdecea;
++            border: 1px solid #f5c6c2;
++            color: #8a1c13;
++            font-size: 15px;
+             text-align: center;
+-            margin-top: 80px;
+         }
+ 
+-        .footer-links {
+-            display: flex;
+-            justify-content: center;
+-            gap: 30px;
+-            margin-bottom: 20px;
+-        }
++        .foot { text-align: center; margin-top: 30px; color: var(--muted); font-size: 14.5px; }
++        .foot a { color: var(--orange-deep); }
+ 
+-        .footer-links a {
+-            color: white;
+-            text-decoration: none;
+-            opacity: 0.8;
+-        }
+-
+-        .footer-links a:hover {
+-            opacity: 1;
+-        }
+-
+-        /* Responsive */
+-        @media (max-width: 768px) {
+-            .pricing-grid {
+-                grid-template-columns: 1fr;
+-            }
+-
+-            .plan-options {
+-                grid-template-columns: 1fr;
+-            }
+-
+-            h1 {
+-                font-size: 32px;
+-            }
++        @media (max-width: 420px) {
++            .logo { font-size: 16.5px; }
++            .logo img { width: 30px; height: 30px; }
++            .nav-links a { padding: 7px 12px; font-size: 14px; }
+         }
+     </style>
+ </head>
+ <body>
+-    <div class="container">
+-        <h1>Choose Your Plan</h1>
++    <nav>
++        <div class="nav-container">
++            <a href="/" class="logo">
++                <img src="{{ url_for('static', filename='screenshots/icon-512.png') }}" width="34" height="34" alt="">
++                <span>Screenshot Tracker</span>
++            </a>
++            <div class="nav-links">
++                <a href="{{ url_for('auth.login') }}">Log in</a>
++            </div>
++        </div>
++    </nav>
++
++    <div class="wrap">
++        <h1>Choose your plan</h1>
++        <p class="sub">Pick a plan and you're tracking in about two minutes.</p>
+ 
+         <div class="pricing-grid">
+-            <!-- Author Plans -->
+             <div class="tier-section">
+                 <h2>Author</h2>
+-                <p>For individual authors tracking their books</p>
+-
+-                <div class="plan-card">
+-                    <h3>Weekly</h3>
+-                    <div class="price">$14.99</div>
+-                    <button onclick="subscribe('{{ author_weekly_price_id }}', this)">Subscribe</button>
+-                </div>
+-
+-                <div class="plan-card featured">
+-                    <h3>Monthly</h3>
+-                    <div class="price">$29.99</div>
+-                    <button onclick="subscribe('{{ author_monthly_price_id }}', this)">Subscribe</button>
+-                </div>
+-
+-                <div class="plan-card">
+-                    <h3>Annual</h3>
+-                    <div class="price">$299.99</div>
+-                    <p class="savings">Save $60!</p>
+-                    <button onclick="subscribe('{{ author_yearly_price_id }}', this)">Subscribe</button>
++                <p class="tier-sub">For individual authors</p>
++                <ul class="tier-features">
++                    <li>Track up to 2 books</li>
++                    <li>Checked every hour, day and night</li>
++                    <li>Email alert with the screenshot attached</li>
++                    <li>Full-page captures archived to your dashboard</li>
++                </ul>
++                <div class="plan-list">
++                    <button type="button" class="plan-card" data-price-id="{{ author_weekly_price_id }}">
++                        <span class="pc-text">
++                            <span><span class="price">$14.99</span> <span class="period">/ week</span></span>
++                            <span class="pc-note">Launch Week — for a single launch</span>
++                        </span>
++                        <span class="pc-go" aria-hidden="true">Choose →</span>
++                    </button>
++                    <button type="button" class="plan-card featured" data-price-id="{{ author_monthly_price_id }}">
++                        <span class="badge">Most Popular</span>
++                        <span class="pc-text">
++                            <span><span class="price">$29.99</span> <span class="period">/ month</span></span>
++                            <span class="pc-note">Badges appear unannounced — stay covered</span>
++                        </span>
++                        <span class="pc-go" aria-hidden="true">Choose →</span>
++                    </button>
++                    <button type="button" class="plan-card" data-price-id="{{ author_yearly_price_id }}">
++                        <span class="pc-text">
++                            <span><span class="price">$24.99</span> <span class="period">/ month, billed annually</span></span>
++                            <span class="pc-note">$299.99 a year</span>
++                        </span>
++                        <span class="savings">Save 17%</span>
++                    </button>
+                 </div>
+             </div>
+ 
+-            <!-- Publisher Plans -->
+             <div class="tier-section">
+                 <h2>Publisher</h2>
+-                <p>For publishers managing multiple products</p>
+-
+-                <div class="plan-card">
+-                    <h3>Weekly</h3>
+-                    <div class="price">$29.99</div>
+-                    <button onclick="subscribe('{{ publisher_weekly_price_id }}', this)">Subscribe</button>
+-                </div>
+-
+-                <div class="plan-card featured">
+-                    <h3>Monthly</h3>
+-                    <div class="price">$59.99</div>
+-                    <button onclick="subscribe('{{ publisher_monthly_price_id }}', this)">Subscribe</button>
+-                </div>
+-
+-                <div class="plan-card">
+-                    <h3>Annual</h3>
+-                    <div class="price">$599.99</div>
+-                    <p class="savings">Save $120!</p>
+-                    <button onclick="subscribe('{{ publisher_yearly_price_id }}', this)">Subscribe</button>
++                <p class="tier-sub">For publishers and agencies</p>
++                <ul class="tier-features">
++                    <li>Track up to 5 books</li>
++                    <li>Checked every hour, day and night</li>
++                    <li>Email alert with the screenshot attached</li>
++                    <li>Full-page captures archived to your dashboard</li>
++                </ul>
++                <div class="plan-list">
++                    <button type="button" class="plan-card" data-price-id="{{ publisher_weekly_price_id }}">
++                        <span class="pc-text">
++                            <span><span class="price">$29.99</span> <span class="period">/ week</span></span>
++                            <span class="pc-note">Launch Week — for a single launch</span>
++                        </span>
++                        <span class="pc-go" aria-hidden="true">Choose →</span>
++                    </button>
++                    <button type="button" class="plan-card" data-price-id="{{ publisher_monthly_price_id }}">
++                        <span class="pc-text">
++                            <span><span class="price">$59.99</span> <span class="period">/ month</span></span>
++                            <span class="pc-note">Badges appear unannounced — stay covered</span>
++                        </span>
++                        <span class="pc-go" aria-hidden="true">Choose →</span>
++                    </button>
++                    <button type="button" class="plan-card" data-price-id="{{ publisher_yearly_price_id }}">
++                        <span class="pc-text">
++                            <span><span class="price">$49.99</span> <span class="period">/ month, billed annually</span></span>
++                            <span class="pc-note">$599.99 a year</span>
++                        </span>
++                        <span class="savings">Save 17%</span>
++                    </button>
+                 </div>
+             </div>
+         </div>
+-    </div>
+ 
+-    <!-- Footer -->
+-    <footer>
+-        <div class="footer-links">
+-            <a href="/terms">Terms</a>
+-            <a href="/privacy">Privacy</a>
+-            <a href="/refunds">Refunds</a>
+-        </div>
+-        <p style="opacity: 0.6;">© 2025 Screenshot Tracker</p>
+-    </footer>
++        <div class="checkout-error" id="checkoutError" role="alert"></div>
++
++        <p class="foot">
++            Cancel anytime from your account — access continues to the end of the paid term.
++            See our <a href="/refunds">refund policy</a>.
++        </p>
++
++        <p class="foot">
++            <a href="/terms">Terms</a> · <a href="/privacy">Privacy</a> · <a href="/refunds">Refunds</a>
++        </p>
++    </div>
+ 
+     <script>
+-        async function subscribe(priceId, button) {
+-            // Store original text
+-            const originalText = button.textContent;
+-            
+-            // Show loading state
+-            button.disabled = true;
+-            button.textContent = 'Loading...';
+-
+-            try {
+-                const response = await fetch('/create_checkout', {
+-                    method: 'POST',
+-                    headers: {
+-                        'Content-Type': 'application/json',
+-                        'X-CSRFToken': '{{ csrf_token() }}'
+-                    },
+-                    body: JSON.stringify({
+-                        price_id: priceId
+-                    })
+-                });
++        (function () {
++            var errorBox = document.getElementById('checkoutError');
+ 
+-                const data = await response.json();
+-
+-                if (data.url) {
+-                    // Redirect to Stripe Checkout
+-                    window.location.href = data.url;
+-                } else {
+-                    alert('Error creating checkout session. Please try again.');
+-                    button.disabled = false;
+-                    button.textContent = originalText;
+-                }
+-            } catch (error) {
+-                console.error('Error:', error);
+-                alert('Something went wrong. Please try again.');
+-                button.disabled = false;
+-                button.textContent = originalText;
++            function showError(msg) {
++                errorBox.textContent = msg;
++                errorBox.style.display = 'block';
+             }
+-        }
++
++            document.querySelectorAll('.plan-card').forEach(function (btn) {
++                btn.addEventListener('click', function () {
++                    var priceId = btn.getAttribute('data-price-id');
++                    if (!priceId) {
++                        showError('That plan is not available right now. Please email support@screenshottracker.com.');
++                        return;
++                    }
++
++                    errorBox.style.display = 'none';
++                    btn.disabled = true;
++
++                    fetch('/create_checkout', {
++                        method: 'POST',
++                        headers: { 'Content-Type': 'application/json' },
++                        body: JSON.stringify({ price_id: priceId })
++                    })
++                        .then(function (r) { return r.json(); })
++                        .then(function (data) {
++                            if (data && data.url) {
++                                window.location = data.url;
++                            } else {
++                                btn.disabled = false;
++                                showError('We could not start checkout. Please try again, or email support@screenshottracker.com.');
++                            }
++                        })
++                        .catch(function () {
++                            btn.disabled = false;
++                            showError('We could not reach the payment service. Please check your connection and try again.');
++                        });
++                });
++            });
++        })();
+     </script>
+ </body>
+-</html>
+\ No newline at end of file
++</html>
+diff --git a/templates/success.html b/templates/success.html
+index 62c2bcc..5895c43 100644
+--- a/templates/success.html
++++ b/templates/success.html
+@@ -1,67 +1,350 @@
+ <!DOCTYPE html>
+-<html>
++<html lang="en">
+ <head>
+-    <title>Payment Successful - Screenshot Tracker</title>
+     <meta charset="UTF-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+     {% include 'partials/gtag.html' %}
++    <title>Payment Successful | Screenshot Tracker</title>
++    <link rel="icon" href="/static/screenshots/favicon.ico" sizes="any">
+     <style>
++        :root {
++            --navy: #010b1b;
++            --orange: #ff9900;
++            --orange-deep: #e07d00;
++            --ink: #1a1a1a;
++            --muted: #5c6672;
++            --line: #e4e7eb;
++        }
++
++        * { margin: 0; padding: 0; box-sizing: border-box; }
++
+         body {
+             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+-            background: #f5f5f5;
+-            margin: 0;
+-            padding: 0;
++            background: #f6f7f9;
++            color: var(--ink);
++            line-height: 1.6;
++            padding: 30px 18px 60px;
+         }
+-        .container {
+-            max-width: 600px;
+-            margin: 100px auto;
+-            padding: 40px;
+-            background: white;
+-            border-radius: 10px;
+-            box-shadow: 0 2px 20px rgba(0,0,0,0.1);
+-            text-align: center;
++
++        .brand {
++            display: flex;
++            align-items: center;
++            justify-content: center;
++            gap: 10px;
++            margin-bottom: 26px;
++            color: var(--navy);
++            font-weight: 700;
++            font-size: 19px;
++            text-decoration: none;
+         }
+-        .success-icon {
+-            font-size: 72px;
+-            margin-bottom: 20px;
++
++        .brand img { width: 34px; height: 34px; border-radius: 7px; display: block; }
++
++        .container {
++            max-width: 540px;
++            margin: 0 auto;
++            background: #fff;
++            padding: 34px 32px 32px;
++            border-radius: 12px;
++            border: 1px solid var(--line);
++            box-shadow: 0 8px 28px rgba(1, 11, 27, 0.07);
+         }
+-        h1 {
+-            color: #28a745;
+-            margin-bottom: 20px;
++
++        .success-icon { font-size: 46px; text-align: center; line-height: 1; }
++
++        h1 { color: #1e874b; margin: 12px 0 8px; font-size: 25px; text-align: center; }
++
++        .lede { color: var(--muted); text-align: center; margin-bottom: 26px; }
++
++        .form-group { margin-bottom: 18px; }
++
++        label { display: block; font-weight: 600; font-size: 14.5px; margin-bottom: 6px; color: #33404f; }
++
++        input[type="text"], input[type="email"], input[type="password"] {
++            width: 100%;
++            padding: 12px 14px;
++            border: 1px solid #cfd6de;
++            border-radius: 8px;
++            font-size: 16px;
++            font-family: inherit;
+         }
+-        p {
+-            color: #666;
+-            margin-bottom: 30px;
+-            line-height: 1.6;
++
++        input:focus { outline: none; border-color: var(--orange); box-shadow: 0 0 0 3px rgba(255,153,0,0.15); }
++        input[readonly] { background: #f2f4f7; color: var(--muted); }
++
++        .hint { font-size: 13.5px; color: var(--muted); margin-top: 6px; }
++        .hint.bad { color: #b3261e; }
++        .hint.good { color: #14653a; }
++
++        input.error { border-color: #d93025; }
++        input.ok { border-color: #1e874b; }
++
++        /* A reveal toggle alongside the confirm field: confirming catches a
++           mismatch, but only being able to see the password tells you which of
++           the two is the typo. */
++        .label-row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
++
++        .reveal {
++            background: none;
++            border: none;
++            padding: 0;
++            font: inherit;
++            font-size: 13.5px;
++            font-weight: 600;
++            color: var(--orange-deep);
++            cursor: pointer;
++            text-decoration: underline;
++            text-underline-offset: 2px;
+         }
+-        .email-note {
+-            background: #f0f8ff;
+-            padding: 20px;
++
++        .btn {
++            width: 100%;
++            padding: 14px 20px;
++            background: var(--orange);
++            color: #12100a;
++            border: none;
+             border-radius: 8px;
++            font-size: 17px;
++            font-weight: 700;
++            cursor: pointer;
++            font-family: inherit;
++        }
++
++        .btn:hover { background: #ffad2e; }
++        .btn:disabled { opacity: 0.6; cursor: not-allowed; }
++
++        .note {
++            background: #eef4fb;
++            border: 1px solid #d6e4f5;
++            padding: 16px 18px;
++            border-radius: 9px;
+             margin: 20px 0;
++            font-size: 15px;
++            color: #2c3e52;
++        }
++
++        .flash { padding: 12px 15px; border-radius: 8px; margin-bottom: 16px; font-size: 15px; }
++        .flash.error { background: #fdecea; border: 1px solid #f5c6c2; color: #8a1c13; }
++        .flash.success { background: #e8f6ee; border: 1px solid #c3e6d0; color: #14653a; }
++
++        .pending { text-align: center; color: var(--muted); }
++
++        .spinner {
++            width: 26px;
++            height: 26px;
++            margin: 0 auto 14px;
++            border: 3px solid #e2e6eb;
++            border-top-color: var(--orange);
++            border-radius: 50%;
++            animation: spin 0.9s linear infinite;
+         }
++
++        @keyframes spin { to { transform: rotate(360deg); } }
++
++        @media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 3s; } }
++
++        .foot { text-align: center; margin-top: 22px; font-size: 14.5px; color: var(--muted); }
++        .foot a { color: var(--orange-deep); }
+     </style>
+ </head>
+ <body>
++    <a href="/" class="brand">
++        <img src="{{ url_for('static', filename='screenshots/icon-512.png') }}" width="34" height="34" alt="">
++        <span>Screenshot Tracker</span>
++    </a>
++
+     <div class="container">
+         <div class="success-icon">✅</div>
+-        <h1>Payment Successful!</h1>
+-        <p>Thank you for subscribing to Screenshot Tracker.</p>
++        <h1>Payment successful</h1>
++
++        {% with messages = get_flashed_messages(with_categories=true) %}
++            {% if messages %}
++                {% for category, message in messages %}
++                    <div class="flash {{ category }}">{{ message }}</div>
++                {% endfor %}
++            {% endif %}
++        {% endwith %}
++
++        {# Setting the password happens right here rather than only through an
++           emailed link. With free accounts gone this is the only route to access,
++           and the emailed setup token expires in 24 hours - so a customer who pays
++           overnight and misses the email would otherwise be a live charge with no
++           account. The email still goes out as a backup. #}
++        {% if setup and setup.state == 'ready' %}
++            <p class="lede">One last step — choose a password and you're in.</p>
++
++            <form method="POST" action="{{ url_for('auth.complete_registration') }}" id="setupForm">
++                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
++                <input type="hidden" name="token" value="{{ setup.token }}">
++
++                <div class="form-group">
++                    <label for="email">Email address</label>
++                    <input type="email" id="email" name="email" value="{{ setup.email }}" readonly>
++                </div>
+ 
+-        <div class="email-note">
+-            <strong>Check your email!</strong><br>
+-            We've sent instructions to complete your account setup.
+-            <br><br>
+-            If you don't see it, check your spam folder.
+-        </div>
++                <div class="form-group">
++                    <label for="full_name">Your name</label>
++                    <input type="text" id="full_name" name="full_name" autocomplete="name" placeholder="Jane Author">
++                </div>
+ 
+-        <p>Questions? Email us at <a href="mailto:support@screenshottracker.com">support@screenshottracker.com</a></p>
++                <div class="form-group">
++                    <div class="label-row">
++                        <label for="password">Choose a password</label>
++                        <button type="button" class="reveal" id="revealBtn" aria-pressed="false"
++                                aria-controls="password confirm_password">Show</button>
++                    </div>
++                    <input type="password" id="password" name="password" required minlength="8"
++                           autocomplete="new-password" placeholder="At least 8 characters">
++                    <div class="hint" id="pwHint">At least 8 characters. That's the only rule.</div>
++                </div>
++
++                <div class="form-group">
++                    <label for="confirm_password">Confirm password</label>
++                    <input type="password" id="confirm_password" name="confirm_password" required
++                           autocomplete="new-password" placeholder="Type it once more">
++                    <div class="hint" id="matchHint" aria-live="polite"></div>
++                </div>
++
++                <button type="submit" class="btn" id="setupBtn">Finish setup</button>
++            </form>
++
++        {% elif setup and setup.state == 'done' %}
++            <p class="lede">Your subscription is active and your account is ready.</p>
++            <a href="{{ url_for('auth.login') }}" class="btn" style="display:block;text-align:center;text-decoration:none;">Log in</a>
++
++        {% elif setup and setup.state == 'pending' %}
++            {# Stripe redirects the browser here immediately, but the webhook that
++               creates the account row is asynchronous. Poll until it lands, then
++               swap in the password form without the customer doing anything. #}
++            <div class="pending" id="pendingBox">
++                <div class="spinner" aria-hidden="true"></div>
++                <p><strong>Finalising your subscription…</strong></p>
++                <p class="hint">This usually takes a few seconds. Keep this page open.</p>
++            </div>
++
++        {% else %}
++            <p class="lede">Thank you for subscribing to Screenshot Tracker.</p>
++            <div class="note">
++                <strong>Check your email.</strong><br>
++                We've sent a link to finish setting up your account. If you don't see it
++                within a few minutes, check your spam folder.
++            </div>
++        {% endif %}
++
++        <p class="foot">
++            Questions? Email <a href="mailto:support@screenshottracker.com">support@screenshottracker.com</a>
++        </p>
+     </div>
+ 
++    {% if setup and setup.state == 'ready' %}
++    <script>
++        (function () {
++            var form = document.getElementById('setupForm');
++            var pw = document.getElementById('password');
++            var cpw = document.getElementById('confirm_password');
++            var pwHint = document.getElementById('pwHint');
++            var matchHint = document.getElementById('matchHint');
++            var btn = document.getElementById('setupBtn');
++            var reveal = document.getElementById('revealBtn');
++
++            reveal.addEventListener('click', function () {
++                var show = pw.type === 'password';
++                pw.type = cpw.type = show ? 'text' : 'password';
++                reveal.textContent = show ? 'Hide' : 'Show';
++                reveal.setAttribute('aria-pressed', String(show));
++            });
++
++            function checkLength() {
++                var ok = pw.value.length >= 8;
++                pw.classList.toggle('error', pw.value.length > 0 && !ok);
++                pwHint.classList.toggle('bad', pw.value.length > 0 && !ok);
++                pwHint.textContent = (pw.value.length > 0 && !ok)
++                    ? 'A little longer — 8 characters minimum.'
++                    : "At least 8 characters. That's the only rule.";
++                return ok;
++            }
++
++            // Only complain once they've actually started the second field, so the
++            // form isn't shouting "doesn't match" at someone mid-keystroke.
++            function checkMatch() {
++                if (!cpw.value) {
++                    matchHint.textContent = '';
++                    matchHint.classList.remove('bad', 'good');
++                    cpw.classList.remove('error', 'ok');
++                    return false;
++                }
++                var same = pw.value === cpw.value;
++                cpw.classList.toggle('error', !same);
++                cpw.classList.toggle('ok', same);
++                matchHint.classList.toggle('bad', !same);
++                matchHint.classList.toggle('good', same);
++                matchHint.textContent = same ? 'Passwords match.' : "These don't match yet.";
++                return same;
++            }
++
++            pw.addEventListener('input', function () { checkLength(); checkMatch(); });
++            cpw.addEventListener('input', checkMatch);
++
++            form.addEventListener('submit', function (e) {
++                if (!checkLength()) {
++                    e.preventDefault();
++                    pw.focus();
++                    return;
++                }
++                if (pw.value !== cpw.value) {
++                    e.preventDefault();
++                    checkMatch();
++                    cpw.focus();
++                    return;
++                }
++                btn.disabled = true;
++                btn.textContent = 'Setting up…';
++            });
++        })();
++    </script>
++    {% endif %}
++
++    {% if setup and setup.state == 'pending' %}
++    <script>
++        (function () {
++            var sessionId = {{ (request.args.get('session_id') or '')|tojson }};
++            var box = document.getElementById('pendingBox');
++            var tries = 0;
++            var MAX_TRIES = 15;   // ~30 seconds at 2s intervals
++
++            function fallback() {
++                box.innerHTML =
++                    '<p><strong>Your payment went through.</strong></p>' +
++                    '<p class="hint">We\\'re still finishing your account setup. ' +
++                    'We\\'ve emailed you a link to set your password — check your inbox ' +
++                    '(and your spam folder) in a few minutes.</p>';
++            }
++
++            function poll() {
++                if (tries++ >= MAX_TRIES) { fallback(); return; }
++
++                fetch('/success/setup_status?session_id=' + encodeURIComponent(sessionId))
++                    .then(function (r) { return r.json(); })
++                    .then(function (data) {
++                        if (data && (data.state === 'ready' || data.state === 'done')) {
++                            // Reload so the server renders the form (and its CSRF token)
++                            // rather than building a form in JavaScript.
++                            window.location.reload();
++                        } else {
++                            setTimeout(poll, 2000);
++                        }
++                    })
++                    .catch(function () { setTimeout(poll, 2000); });
++            }
++
++            if (sessionId) { setTimeout(poll, 2000); } else { fallback(); }
++        })();
++    </script>
++    {% endif %}
++
+     {% if conversion and conversion.fire %}
+     <!-- Google Ads: purchase conversion. Only rendered when the Stripe session
+-         was retrieved server-side and payment_status == 'paid', so a page
+-         reload or a direct hit on /success never counts a false sale. -->
++         was verified as paid; transaction_id dedupes page reloads. -->
+     <script>
+       gtag('set', 'user_data', { "email": "{{ conversion.email }}" });
+       gtag('event', 'conversion', {
+@@ -73,4 +356,4 @@
+     </script>
+     {% endif %}
+ </body>
+-</html>
+\ No newline at end of file
++</html>
+-- 
+2.43.0
+

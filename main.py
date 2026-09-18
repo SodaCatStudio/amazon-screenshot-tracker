@@ -3252,132 +3252,25 @@ def setup_account():
 # Authentication routes with best practices
 @auth.route('/register', methods=['GET', 'POST'])
 def register():
-    """Free registration - no payment required"""
-    if request.method == 'POST':
-        email = request.form.get('email', '').lower().strip()
-        password = request.form.get('password')
-        confirm_password = request.form.get('confirm_password')
-        full_name = request.form.get('full_name', '').strip()
+    """Retired: free self-service registration no longer exists.
 
-        # Validation
-        if not email or not password or not full_name:
-            flash('All fields are required', 'error')
-            return render_template('auth/register.html', email=email, full_name=full_name)
+    Why this route is gone rather than merely unlinked. It was public,
+    unauthenticated, created a `users` row from nothing but an email and a
+    password, and carried NO rate limit (compare `login()` below, which has
+    `@limiter.limit("10 per hour per ip")`) - so it fell back to the global
+    default of 50/hour per IP. That is how the fake signups got in, and the real
+    damage was not the junk rows but the bounces: bad addresses degrade the
+    Resend sending reputation that the badge-alert emails depend on.
 
-        if password != confirm_password:
-            flash('Passwords do not match', 'error')
-            return render_template('auth/register.html', email=email, full_name=full_name)
+    Accounts are now created only by `handle_checkout_completed`, which runs off
+    a signature-verified Stripe `checkout.session.completed` webhook. Creating an
+    account therefore requires a completed card payment, which bots do not do.
 
-        # Password strength validation
-        if len(password) < 8:
-            flash('Password must be at least 8 characters long', 'error')
-            return render_template('auth/register.html', email=email, full_name=full_name)
-
-        conn = get_db()
-        cursor = conn.cursor()
-
-        try:
-            # Check if user already exists
-            if get_db_type() == 'postgresql':
-                cursor.execute("SELECT id FROM users WHERE email = %s", (email,))
-            else:
-                cursor.execute("SELECT id FROM users WHERE email = ?", (email,))
-
-            if cursor.fetchone():
-                flash('Email already registered. Please log in.', 'error')
-                conn.close()
-                return render_template('auth/register.html', email=email, full_name=full_name)
-
-            # Generate verification token
-            verification_token = secrets.token_urlsafe(32)
-            verification_expiry = datetime.now() + timedelta(hours=24)
-            password_hash = generate_password_hash(password)
-
-            print(f"📝 Creating new user: {email}")
-            print(f"   Verification token: {verification_token[:20]}...")
-
-            # Create user with FREE tier (no subscription yet)
-            if get_db_type() == 'postgresql':
-                cursor.execute("""
-                    INSERT INTO users (
-                        email,
-                        password_hash,
-                        full_name,
-                        is_verified,
-                        verification_token,
-                        verification_token_expiry,
-                        subscription_status,
-                        subscription_tier,
-                        max_products
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """, (
-                    email,
-                    password_hash,
-                    full_name,
-                    False,
-                    verification_token,
-                    verification_expiry,
-                    'inactive',  # No subscription yet
-                    'free',      # Free tier
-                    0            # Can't add products yet
-                ))
-            else:
-                cursor.execute("""
-                    INSERT INTO users (
-                        email,
-                        password_hash,
-                        full_name,
-                        is_verified,
-                        verification_token,
-                        verification_token_expiry,
-                        subscription_status,
-                        subscription_tier,
-                        max_products
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    email,
-                    password_hash,
-                    full_name,
-                    0,
-                    verification_token,
-                    verification_expiry,
-                    'inactive',
-                    'free',
-                    0
-                ))
-
-            conn.commit()
-            print(f"✅ User registered: {email}")
-
-            # Send verification email
-            if email_notifier.is_configured():
-                print(f"📧 Sending verification email to {email}...")
-                success = email_notifier.send_verification_email(email, verification_token)
-
-                if success:
-                    print(f"✅ Verification email sent to {email}")
-                    flash('Account created! Please check your email to verify your account.', 'success')
-                else:
-                    print(f"❌ Failed to send verification email to {email}")
-                    flash('Account created but email verification failed. Please contact support.', 'warning')
-            else:
-                print("⚠️ Email system not configured")
-                flash('Account created! Email verification temporarily unavailable. Contact support.', 'warning')
-
-            conn.close()
-            return redirect(url_for('auth.login'))
-
-        except Exception as e:
-            print(f"❌ Registration error: {e}")
-            import traceback
-            traceback.print_exc()
-            conn.rollback()
-            conn.close()
-            flash('An error occurred during registration. Please try again.', 'error')
-            return render_template('auth/register.html', email=email, full_name=full_name)
-
-    # GET request
-    return render_template('auth/register.html')
+    301 rather than deleting the route so that indexed links and any old ad URLs
+    pointing at /register keep working instead of hitting a 404. There is no form
+    left here to abuse.
+    """
+    return redirect('/#pricing', code=301)
 
 @app.route('/login_success')
 @login_required
@@ -4042,11 +3935,28 @@ def complete_registration():
 
     if request.method == 'POST':
         password = request.form.get('password')
+        confirm_password = request.form.get('confirm_password')
         full_name = request.form.get('full_name')
         
-        # Validate required fields
+        # Validate required fields. The 8-character rule is enforced here, not just
+        # in the template: the client-side checklist was relaxed from five rules
+        # (upper/lower/number/special) to a single length rule, and client-side
+        # validation is a hint, not enforcement.
         if not password:
             flash('Password is required', 'error')
+            return render_template('complete_registration.html', email=email, token=token)
+
+        if len(password) < 8:
+            flash('Password must be at least 8 characters long', 'error')
+            return render_template('complete_registration.html', email=email, token=token)
+
+        # Both setup forms (/success and this page) send confirm_password. Checked
+        # here as well as in the browser: client-side validation is a convenience,
+        # and a mismatch that slipped through would lock a paying customer out of
+        # the account they just bought. Only enforced when the field is present, so
+        # an older emailed setup link that renders without it still works.
+        if confirm_password is not None and password != confirm_password:
+            flash('Those passwords do not match. Please retype them.', 'error')
             return render_template('complete_registration.html', email=email, token=token)
 
         # Verify user has active subscription
@@ -4940,6 +4850,23 @@ def test_email():
     except Exception as e:
         return f"Email test failed: {str(e)}", 500
 
+def _plan_price_ids():
+    """Stripe price IDs for the plan buttons.
+
+    Shared by /pricing and the landing page. The landing page's pricing cards used
+    to be inert markup, so a visitor who had already decided had no way to pay
+    without registering first; they post to /create_checkout now and need these.
+    """
+    return {
+        'author_weekly_price_id': os.environ.get('STRIPE_AUTHOR_WEEKLY_PRICE'),
+        'author_monthly_price_id': os.environ.get('STRIPE_AUTHOR_MONTHLY_PRICE'),
+        'author_yearly_price_id': os.environ.get('STRIPE_AUTHOR_YEARLY_PRICE'),
+        'publisher_weekly_price_id': os.environ.get('STRIPE_PUBLISHER_WEEKLY_PRICE'),
+        'publisher_monthly_price_id': os.environ.get('STRIPE_PUBLISHER_MONTHLY_PRICE'),
+        'publisher_yearly_price_id': os.environ.get('STRIPE_PUBLISHER_YEARLY_PRICE'),
+    }
+
+
 @app.route('/')
 def index():
     """Landing page - properly handle authenticated users"""
@@ -4952,7 +4879,7 @@ def index():
             return dashboard_view()
         else:
             print("🔍 INDEX: Showing landing page for anonymous user")
-            return render_template('landing.html')
+            return render_template('landing.html', **_plan_price_ids())
 
     except Exception as e:
         print(f"❌ INDEX: Error: {e}")
@@ -4960,7 +4887,7 @@ def index():
         traceback.print_exc()
 
         # If there's an error, show landing page
-        return render_template('landing.html')
+        return render_template('landing.html', **_plan_price_ids())
 
 @app.route('/debug/baseline_screenshots')
 @admin_required
@@ -5826,14 +5753,7 @@ def add_product():
 @app.route('/pricing')
 def pricing():
     """Pricing page with Stripe price IDs"""
-    return render_template('pricing.html',
-        author_weekly_price_id=os.environ.get('STRIPE_AUTHOR_WEEKLY_PRICE'),
-        author_monthly_price_id=os.environ.get('STRIPE_AUTHOR_MONTHLY_PRICE'),
-        author_yearly_price_id=os.environ.get('STRIPE_AUTHOR_YEARLY_PRICE'),
-        publisher_weekly_price_id=os.environ.get('STRIPE_PUBLISHER_WEEKLY_PRICE'),
-        publisher_monthly_price_id=os.environ.get('STRIPE_PUBLISHER_MONTHLY_PRICE'),
-        publisher_yearly_price_id=os.environ.get('STRIPE_PUBLISHER_YEARLY_PRICE')
-    )
+    return render_template('pricing.html', **_plan_price_ids())
 
 @app.route('/cancel_subscription', methods=['GET', 'POST'])
 @login_required
@@ -8259,9 +8179,101 @@ def subscription_success():
         except Exception as e:
             print(f"⚠️ Could not verify checkout session for conversion: {e}")
 
+    # Post-payment account setup now happens on this page instead of only via the
+    # emailed link. With the free-account flow removed, this is the ONLY way a
+    # paying customer gets access, and setup_token_expiry is 24 hours - so a
+    # customer who pays at 2am and misses the email becomes a live charge with no
+    # account (a refund or a chargeback). The email still goes out as a backup.
+    #
+    # Safe because the email comes from the Stripe session we just verified as
+    # paid, never from client input, and session ids are unguessable.
+    setup = _setup_state_for_session(session_id)
+
     return render_template('success.html',
-        message="Payment successful! Check your email to complete setup.",
-        conversion=conversion)
+        message="Payment successful! Set your password to finish setting up.",
+        conversion=conversion,
+        setup=setup)
+
+
+def _setup_state_for_session(session_id):
+    """Resolve the setup token for a paid Stripe Checkout session.
+
+    Returns one of:
+      {'state': 'none'}     - no/invalid session id, fall back to "check your email"
+      {'state': 'pending'}  - session is paid but the webhook has not landed yet
+      {'state': 'ready', 'email': ..., 'token': ...} - render the password form
+      {'state': 'done'}     - this account already has a password set
+
+    'pending' exists because Stripe redirects the browser here immediately while
+    the webhook that creates the row is asynchronous; the template polls until
+    this flips to 'ready'.
+    """
+    if not session_id:
+        return {'state': 'none'}
+
+    try:
+        cs = stripe.checkout.Session.retrieve(session_id)
+        if cs.payment_status != 'paid':
+            return {'state': 'none'}
+        email = (cs.customer_details.email if cs.customer_details else None) or cs.get('customer_email')
+        if not email:
+            return {'state': 'none'}
+        email = email.strip().lower()
+    except Exception as e:
+        print(f"⚠️ Could not verify checkout session for setup: {e}")
+        return {'state': 'none'}
+
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(q("""
+            SELECT password_hash, setup_token, setup_token_expiry
+            FROM users WHERE LOWER(email) = LOWER(%s)
+        """), (email,))
+        row = cursor.fetchone()
+    except Exception as e:
+        print(f"⚠️ Setup lookup failed for {email}: {e}")
+        return {'state': 'none'}
+    finally:
+        conn.close()
+
+    if not row:
+        # Webhook has not created the row yet.
+        return {'state': 'pending'}
+
+    password_hash = row['password_hash'] if not isinstance(row, tuple) else row[0]
+    setup_token = row['setup_token'] if not isinstance(row, tuple) else row[1]
+    token_expiry = row['setup_token_expiry'] if not isinstance(row, tuple) else row[2]
+
+    if password_hash:
+        # Existing registered user who just upgraded - they already have credentials.
+        return {'state': 'done'}
+
+    if not setup_token:
+        return {'state': 'pending'}
+
+    # Guarded because Postgres may hand back a timezone-aware datetime while
+    # datetime.now() is naive, and comparing the two raises TypeError. An expiry
+    # we cannot evaluate should not block a paying customer from setting a
+    # password - complete_registration() re-checks the token in SQL anyway.
+    try:
+        if token_expiry and token_expiry < datetime.now(getattr(token_expiry, 'tzinfo', None)):
+            return {'state': 'none'}
+    except TypeError:
+        pass
+
+    return {'state': 'ready', 'email': email, 'token': setup_token}
+
+
+@app.route('/success/setup_status')
+@limiter.limit("60 per hour per ip")
+def success_setup_status():
+    """Poll target for the /success page while the Stripe webhook lands.
+
+    Gated by the same verified-paid session id as /success, so it cannot be used
+    to enumerate accounts: it only ever reports on the session's own email.
+    """
+    return jsonify(_setup_state_for_session(request.args.get('session_id')))
 
 @app.route('/cancel')
 def subscription_cancel():
