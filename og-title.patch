@@ -1,0 +1,39 @@
+From 1345960c21dbf52080d2d3e33dc07d76c24db2c4 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 18 Sep 2026 01:15:12 -0600
+Subject: [PATCH] Align og:title / twitter:title with the live headline
+
+Social and messaging link previews were still showing the pre-rebuild headline
+"Never Miss Your Amazon Bestseller Moment".
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0112RzCriTqyJSvH1NucpVG6
+---
+ templates/landing.html | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/templates/landing.html b/templates/landing.html
+index 9d72dd9..d59e0bf 100644
+--- a/templates/landing.html
++++ b/templates/landing.html
+@@ -10,7 +10,7 @@
+     <meta property="og:type" content="website">
+     <meta property="og:site_name" content="Screenshot Tracker">
+     <meta property="og:url" content="https://screenshottracker.com/">
+-    <meta property="og:title" content="Never Miss Your Amazon Bestseller Moment">
++    <meta property="og:title" content="Amazon hides your bestseller badge without warning. We screenshot it before it's gone.">
+     <meta property="og:description" content="We watch your book's Amazon page every hour and email you the screenshot the moment a bestseller badge appears.">
+     <meta property="og:image" content="https://screenshottracker.com/static/screenshots/og-card.png">
+     <meta property="og:image:width" content="1200">
+@@ -18,7 +18,7 @@
+     <meta property="og:image:alt" content="A captured #1 New Release badge on an Amazon book listing.">
+ 
+     <meta name="twitter:card" content="summary_large_image">
+-    <meta name="twitter:title" content="Never Miss Your Amazon Bestseller Moment">
++    <meta name="twitter:title" content="Amazon hides your bestseller badge without warning. We screenshot it before it's gone.">
+     <meta name="twitter:description" content="We watch your book's Amazon page every hour and email you the screenshot the moment a bestseller badge appears.">
+     <meta name="twitter:image" content="https://screenshottracker.com/static/screenshots/og-card.png">
+     <link rel="icon" href="/static/screenshots/favicon.ico" sizes="any">
+-- 
+2.43.0
+
