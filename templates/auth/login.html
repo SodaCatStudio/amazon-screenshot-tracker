@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="robots" content="noindex, nofollow">
     {% include 'partials/gtag.html' %}
-    <title>Login - Amazon Bestseller Monitor</title>
+    <title>Log in - Screenshot Tracker</title>
     <style>
         * {
             margin: 0;
@@ -37,15 +37,33 @@
             margin-bottom: 30px;
         }
 
+        /* Same lockup as the landing page and /success: the real logo mark with the
+           wordmark kept as live text. Navy #010b1b is sampled from icon-512.png. */
+        .logo a {
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            text-decoration: none;
+            color: #010b1b;
+        }
+
+        .logo img {
+            width: 36px;
+            height: 36px;
+            border-radius: 8px;
+            flex: none;
+        }
+
         .logo h1 {
-            color: #232f3e;
-            font-size: 24px;
-            margin-bottom: 5px;
+            color: #010b1b;
+            font-size: 22px;
+            line-height: 1;
         }
 
         .logo p {
-            color: #666;
+            color: #48535f;
             font-size: 14px;
+            margin-top: 12px;
         }
 
         .form-group {
@@ -254,8 +272,11 @@
 <body>
     <div class="auth-container">
         <div class="logo">
-            <h1>🏆 Amazon Bestseller Monitor</h1>
-            <p>Track your products' success</p>
+            <a href="/">
+                <img src="{{ url_for('static', filename='screenshots/icon-512.png') }}" alt="">
+                <h1>Screenshot Tracker</h1>
+            </a>
+            <p>Log in to your account</p>
         </div>
 
         {% with messages = get_flashed_messages(with_categories=true) %}
@@ -321,8 +342,10 @@
         <div class="register-link">
             {# Points at pricing, not the retired /register form: accounts are now
                created by the Stripe webhook after checkout. #}
-            Don't have an account? <a href="{{ url_for('pricing') }}">See plans</a><br>
-            Need to verify your email? <a href="{{ url_for('auth.resend_verification') }}">Resend verification</a>
+            Don't have an account? <a href="{{ url_for('pricing') }}">See plans</a>
+            {# "Resend verification" link removed: accounts are created verified by the
+               Stripe webhook, so there is no unverified state for a new customer to be
+               in. The route still exists for any legacy account that needs it. #}
         </div>
     </div>
 
