@@ -286,21 +286,40 @@
 
                     fetch('/create_checkout', {
                         method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
+                        headers: {
+                            'Content-Type': 'application/json',
+                            // CSRFProtect guards every POST (WTF_CSRF_CHECK_DEFAULT=True in
+                            // main.py) and /create_checkout is not csrf-exempt. Without this
+                            // header the POST is rejected with an HTML 400 before the route runs.
+                            'X-CSRFToken': '{{ csrf_token() }}'
+                        },
                         body: JSON.stringify({ price_id: priceId })
                     })
-                        .then(function (r) { return r.json(); })
+                        .then(function (r) {
+                            if (!r.ok) {
+                                // A server-side rejection (CSRF, rate limit, 5xx) returns HTML,
+                                // so parse nothing and name the status instead of blaming the
+                                // visitor's connection.
+                                throw new Error('HTTP ' + r.status);
+                            }
+                            return r.json();
+                        })
                         .then(function (data) {
                             if (data && data.url) {
                                 window.location = data.url;
                             } else {
                                 btn.disabled = false;
-                                showError('We could not start checkout. Please try again, or email support@screenshottracker.com.');
+                                showError((data && data.error) || 'We could not start checkout. Please try again, or email support@screenshottracker.com.');
                             }
                         })
-                        .catch(function () {
+                        .catch(function (err) {
                             btn.disabled = false;
-                            showError('We could not reach the payment service. Please check your connection and try again.');
+                            console.error('create_checkout failed:', err);
+                            if (err && /^HTTP \d+/.test(err.message)) {
+                                showError('Checkout could not be started (' + err.message + '). Please try again, or email support@screenshottracker.com.');
+                            } else {
+                                showError('We could not reach the payment service. Please check your connection and try again.');
+                            }
                         });
                 });
             });

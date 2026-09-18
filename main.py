@@ -8245,7 +8245,11 @@ def _setup_state_for_session(session_id):
     setup_token = row['setup_token'] if not isinstance(row, tuple) else row[1]
     token_expiry = row['setup_token_expiry'] if not isinstance(row, tuple) else row[2]
 
-    if password_hash:
+    # The webhook stores the placeholder 'PENDING_SETUP' (the column is NOT NULL),
+    # which is truthy - a bare `if password_hash:` reported every brand-new
+    # customer as 'done' and sent them to a login page with no password set.
+    # Mirror the check handle_checkout_completed() uses.
+    if password_hash not in (None, '', 'PENDING_SETUP'):
         # Existing registered user who just upgraded - they already have credentials.
         return {'state': 'done'}
 

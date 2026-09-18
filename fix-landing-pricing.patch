@@ -1,0 +1,1616 @@
+From f42205cdc16ac98f52981fdd09ac9308108e44f6 Mon Sep 17 00:00:00 2001
+From: Josh Matern <josh.matern@gmail.com>
+Date: Fri, 18 Sep 2026 00:58:51 -0600
+Subject: [PATCH] Repair appended templates, restore CSRF header on checkout,
+ fix /success setup state
+
+- landing.html, success.html, auth/login.html contained two concatenated documents
+  (old content appended after new); replaced with the clean rebuild versions.
+- Checkout fetch in landing.html and pricing.html lacked the X-CSRFToken header, so
+  CSRFProtect rejected every POST with an HTML 400 before /create_checkout ran.
+  Header restored; .catch() now reports HTTP status instead of blaming the network.
+- _setup_state_for_session treated the 'PENDING_SETUP' placeholder hash as a real
+  password, so new customers saw "account ready, log in" with no password set.
+  Now mirrors the webhook's placeholder-aware check.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0112RzCriTqyJSvH1NucpVG6
+---
+ main.py                   |    6 +-
+ templates/auth/login.html |  358 -------------
+ templates/landing.html    | 1042 +------------------------------------
+ templates/pricing.html    |   29 +-
+ templates/success.html    |   75 ---
+ 5 files changed, 53 insertions(+), 1457 deletions(-)
+
+diff --git a/main.py b/main.py
+index aa0cc74..6157bfa 100644
+--- a/main.py
++++ b/main.py
+@@ -8245,7 +8245,11 @@ def _setup_state_for_session(session_id):
+     setup_token = row['setup_token'] if not isinstance(row, tuple) else row[1]
+     token_expiry = row['setup_token_expiry'] if not isinstance(row, tuple) else row[2]
+ 
+-    if password_hash:
++    # The webhook stores the placeholder 'PENDING_SETUP' (the column is NOT NULL),
++    # which is truthy - a bare `if password_hash:` reported every brand-new
++    # customer as 'done' and sent them to a login page with no password set.
++    # Mirror the check handle_checkout_completed() uses.
++    if password_hash not in (None, '', 'PENDING_SETUP'):
+         # Existing registered user who just upgraded - they already have credentials.
+         return {'state': 'done'}
+ 
+diff --git a/templates/auth/login.html b/templates/auth/login.html
+index cda6889..bce821d 100644
+--- a/templates/auth/login.html
++++ b/templates/auth/login.html
+@@ -318,364 +318,6 @@
+             <span>Need help?</span>
+         </div>
+ 
+-        <div class="register-link">
+-            Don't have an account? <a href="{{ url_for('auth.register') }}">Sign up here</a><br>
+-            Need to verify your email? <a href="{{ url_for('auth.resend_verification') }}">Resend verification</a>
+-        </div>
+-    </div>
+-
+-    <script>
+-        function togglePassword() {
+-            const passwordInput = document.getElementById('password');
+-            const toggleText = document.querySelector('.toggle-password');
+-
+-            if (passwordInput.type === 'password') {
+-                passwordInput.type = 'text';
+-                toggleText.textContent = 'Hide';
+-            } else {
+-                passwordInput.type = 'password';
+-                toggleText.textContent = 'Show';
+-            }
+-        }
+-
+-        // Prevent double submission
+-        document.getElementById('loginForm').addEventListener('submit', function(e) {
+-            const loginBtn = document.getElementById('loginBtn');
+-            loginBtn.disabled = true;
+-            loginBtn.textContent = 'Logging in...';
+-        });
+-    </script>
+-
+-    {% if request.args.get('verified') %}
+-    <!-- Google Ads: free-signup conversion. verify_email redirects here with
+-         ?verified=1 after an account is activated, so this fires once per
+-         verified signup. Optimize the campaign toward this while purchase
+-         volume is still too low for Google to learn on purchases. -->
+-    <script>
+-      gtag('event', 'conversion', { 'send_to': 'AW-18437322624/8gE8CMnLivEcEIDvzNdE' });
+-    </script>
+-    {% endif %}
+-</body>
+-</html><!DOCTYPE html>
+-<html lang="en">
+-<head>
+-    <meta charset="UTF-8">
+-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+-    <meta name="robots" content="noindex, nofollow">
+-    {% include 'partials/gtag.html' %}
+-    <title>Login - Amazon Bestseller Monitor</title>
+-    <style>
+-        * {
+-            margin: 0;
+-            padding: 0;
+-            box-sizing: border-box;
+-        }
+-
+-        body {
+-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+-            background-color: #f5f5f5;
+-            display: flex;
+-            justify-content: center;
+-            align-items: center;
+-            min-height: 100vh;
+-            padding: 20px;
+-        }
+-
+-        .auth-container {
+-            background: white;
+-            padding: 40px;
+-            border-radius: 10px;
+-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+-            width: 100%;
+-            max-width: 400px;
+-        }
+-
+-        .logo {
+-            text-align: center;
+-            margin-bottom: 30px;
+-        }
+-
+-        .logo h1 {
+-            color: #232f3e;
+-            font-size: 24px;
+-            margin-bottom: 5px;
+-        }
+-
+-        .logo p {
+-            color: #666;
+-            font-size: 14px;
+-        }
+-
+-        .form-group {
+-            margin-bottom: 20px;
+-        }
+-
+-        label {
+-            display: block;
+-            margin-bottom: 5px;
+-            color: #333;
+-            font-weight: 500;
+-            font-size: 14px;
+-        }
+-
+-        input[type="email"],
+-        input[type="password"],
+-        input[type="text"] {
+-            width: 100%;
+-            padding: 12px 15px;
+-            border: 1px solid #ddd;
+-            border-radius: 5px;
+-            font-size: 16px;
+-            transition: border-color 0.3s;
+-        }
+-
+-        input:focus {
+-            outline: none;
+-            border-color: #ff9900;
+-        }
+-
+-        .password-toggle {
+-            position: relative;
+-        }
+-
+-        .toggle-password {
+-            position: absolute;
+-            right: 15px;
+-            top: 50%;
+-            transform: translateY(-50%);
+-            cursor: pointer;
+-            color: #666;
+-            font-size: 14px;
+-            user-select: none;
+-        }
+-
+-        .remember-forgot {
+-            display: flex;
+-            justify-content: space-between;
+-            align-items: center;
+-            margin-bottom: 20px;
+-        }
+-
+-        .checkbox-wrapper {
+-            display: flex;
+-            align-items: center;
+-        }
+-
+-        .checkbox-wrapper input[type="checkbox"] {
+-            margin-right: 8px;
+-        }
+-
+-        .checkbox-wrapper label {
+-            margin-bottom: 0;
+-            font-weight: normal;
+-        }
+-
+-        .forgot-link {
+-            color: #ff9900;
+-            text-decoration: none;
+-            font-size: 14px;
+-        }
+-
+-        .forgot-link:hover {
+-            text-decoration: underline;
+-        }
+-
+-        .btn {
+-            width: 100%;
+-            padding: 14px;
+-            background-color: #ff9900;
+-            color: white;
+-            border: none;
+-            border-radius: 5px;
+-            font-size: 16px;
+-            font-weight: bold;
+-            cursor: pointer;
+-            transition: background-color 0.3s;
+-        }
+-
+-        .btn:hover {
+-            background-color: #e88b00;
+-        }
+-
+-        .btn:disabled {
+-            background-color: #ccc;
+-            cursor: not-allowed;
+-        }
+-
+-        .divider {
+-            text-align: center;
+-            margin: 25px 0;
+-            position: relative;
+-        }
+-
+-        .divider::before {
+-            content: '';
+-            position: absolute;
+-            top: 50%;
+-            left: 0;
+-            right: 0;
+-            height: 1px;
+-            background-color: #ddd;
+-        }
+-
+-        .divider span {
+-            background: white;
+-            padding: 0 15px;
+-            position: relative;
+-            color: #666;
+-            font-size: 14px;
+-        }
+-
+-        .register-link {
+-            text-align: center;
+-            margin-top: 20px;
+-            font-size: 14px;
+-            color: #666;
+-        }
+-
+-        .register-link a {
+-            color: #ff9900;
+-            text-decoration: none;
+-            font-weight: 500;
+-        }
+-
+-        .register-link a:hover {
+-            text-decoration: underline;
+-        }
+-
+-        .flash-messages {
+-            margin-bottom: 20px;
+-        }
+-
+-        .flash {
+-            padding: 12px 15px;
+-            border-radius: 5px;
+-            margin-bottom: 10px;
+-            font-size: 14px;
+-        }
+-
+-        .flash.success {
+-            background-color: #d4edda;
+-            color: #155724;
+-            border: 1px solid #c3e6cb;
+-        }
+-
+-        .flash.error {
+-            background-color: #f8d7da;
+-            color: #721c24;
+-            border: 1px solid #f5c6cb;
+-        }
+-
+-        .flash.warning {
+-            background-color: #fff3cd;
+-            color: #856404;
+-            border: 1px solid #ffeaa7;
+-        }
+-
+-        .flash.info {
+-            background-color: #d1ecf1;
+-            color: #0c5460;
+-            border: 1px solid #bee5eb;
+-        }
+-
+-        .flash a {
+-            color: inherit;
+-            font-weight: bold;
+-        }
+-
+-        .verification-help {
+-            background-color: #e8f4f8;
+-            border: 1px solid #bee5eb;
+-            padding: 15px;
+-            border-radius: 5px;
+-            margin-bottom: 20px;
+-            font-size: 14px;
+-        }
+-
+-        .verification-help a {
+-            color: #ff9900;
+-            text-decoration: none;
+-            font-weight: bold;
+-        }
+-
+-        .verification-help a:hover {
+-            text-decoration: underline;
+-        }
+-
+-        @media (max-width: 480px) {
+-            .auth-container {
+-                padding: 30px 20px;
+-            }
+-        }
+-    </style>
+-</head>
+-<body>
+-    <div class="auth-container">
+-        <div class="logo">
+-            <h1>🏆 Amazon Bestseller Monitor</h1>
+-            <p>Track your products' success</p>
+-        </div>
+-
+-        {% with messages = get_flashed_messages(with_categories=true) %}
+-            {% if messages %}
+-                <div class="flash-messages">
+-                    {% for category, message in messages %}
+-                        <div class="flash {{ category }}">{{ message|safe }}</div>
+-                    {% endfor %}
+-                </div>
+-            {% endif %}
+-        {% endwith %}
+-
+-        <!-- Add verification help box if needed -->
+-        {% if request.args.get('verification_needed') %}
+-        <div class="verification-help">
+-            <strong>📧 Email Verification Required</strong><br>
+-            Haven't received your verification email?<br>
+-            <a href="{{ url_for('auth.resend_verification') }}">Click here to resend verification email</a>
+-        </div>
+-        {% endif %}
+-
+-        <form method="POST" action="{{ url_for('auth.login') }}" id="loginForm">
+-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+-
+-            <div class="form-group">
+-                <label for="email">Email Address</label>
+-                <input type="email" 
+-                       id="email" 
+-                       name="email" 
+-                       required 
+-                       autocomplete="email"
+-                       placeholder="your@email.com">
+-            </div>
+-
+-            <div class="form-group">
+-                <label for="password">Password</label>
+-                <div class="password-toggle">
+-                    <input type="password" 
+-                           id="password" 
+-                           name="password" 
+-                           required 
+-                           autocomplete="current-password"
+-                           placeholder="Enter your password">
+-                    <span class="toggle-password" onclick="togglePassword()">Show</span>
+-                </div>
+-            </div>
+-
+-            <div class="remember-forgot">
+-                <div class="checkbox-wrapper">
+-                    <input type="checkbox" id="remember" name="remember" value="1">
+-                    <label for="remember">Remember me</label>
+-                </div>
+-                <a href="{{ url_for('auth.forgot_password') }}" class="forgot-link">Forgot password?</a>
+-            </div>
+-
+-            <button type="submit" class="btn" id="loginBtn">Log In</button>
+-        </form>
+-
+-        <div class="divider">
+-            <span>Need help?</span>
+-        </div>
+-
+         <div class="register-link">
+             {# Points at pricing, not the retired /register form: accounts are now
+                created by the Stripe webhook after checkout. #}
+diff --git a/templates/landing.html b/templates/landing.html
+index ed0bd8f..9d72dd9 100644
+--- a/templates/landing.html
++++ b/templates/landing.html
+@@ -934,21 +934,40 @@
+ 
+                     fetch('/create_checkout', {
+                         method: 'POST',
+-                        headers: { 'Content-Type': 'application/json' },
++                        headers: {
++                            'Content-Type': 'application/json',
++                            // CSRFProtect guards every POST (WTF_CSRF_CHECK_DEFAULT=True in
++                            // main.py) and /create_checkout is not csrf-exempt. Without this
++                            // header the POST is rejected with an HTML 400 before the route runs.
++                            'X-CSRFToken': '{{ csrf_token() }}'
++                        },
+                         body: JSON.stringify({ price_id: priceId })
+                     })
+-                        .then(function (r) { return r.json(); })
++                        .then(function (r) {
++                            if (!r.ok) {
++                                // A server-side rejection (CSRF, rate limit, 5xx) returns HTML,
++                                // so parse nothing and name the status instead of blaming the
++                                // visitor's connection.
++                                throw new Error('HTTP ' + r.status);
++                            }
++                            return r.json();
++                        })
+                         .then(function (data) {
+                             if (data && data.url) {
+                                 window.location = data.url;
+                             } else {
+                                 btn.disabled = false;
+-                                showError('We could not start checkout. Please try again, or email support@screenshottracker.com.');
++                                showError((data && data.error) || 'We could not start checkout. Please try again, or email support@screenshottracker.com.');
+                             }
+                         })
+-                        .catch(function () {
++                        .catch(function (err) {
+                             btn.disabled = false;
+-                            showError('We could not reach the payment service. Please check your connection and try again.');
++                            console.error('create_checkout failed:', err);
++                            if (err && /^HTTP \d+/.test(err.message)) {
++                                showError('Checkout could not be started (' + err.message + '). Please try again, or email support@screenshottracker.com.');
++                            } else {
++                                showError('We could not reach the payment service. Please check your connection and try again.');
++                            }
+                         });
+                 });
+             });
+@@ -956,1016 +975,3 @@
+     </script>
+ </body>
+ </html>
+-<!DOCTYPE html>
+-<html lang="en">
+-<head>
+-    <meta charset="UTF-8">
+-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+-    {% include 'partials/gtag.html' %}
+-    <title>Amazon Screenshot Tracker - Capture Your Success Automatically</title>
+-    <meta name="description" content="Automatically capture screenshots when your Amazon products achieve bestseller status. Track rankings, set category goals, and get instant notifications.">
+-    <meta name="facebook-domain-verification" content="rkch02n9yb1lb25ncudpl8hafli0bo" />
+-    <meta property="og:type" content="website">
+-    <meta property="og:site_name" content="Screenshot Tracker">
+-    <meta property="og:url" content="https://screenshottracker.com/">
+-    <meta property="og:title" content="Never Miss Your Amazon Bestseller Moment">
+-    <meta property="og:description" content="We watch your book's Amazon page every hour and email you the screenshot the moment a bestseller badge appears.">
+-    <meta property="og:image" content="https://screenshottracker.com/static/screenshots/og-card.png">
+-    <meta property="og:image:width" content="1200">
+-    <meta property="og:image:height" content="630">
+-    <meta property="og:image:alt" content="A captured #1 New Release badge on an Amazon book listing.">
+-
+-    <meta name="twitter:card" content="summary_large_image">
+-    <meta name="twitter:title" content="Never Miss Your Amazon Bestseller Moment">
+-    <meta name="twitter:description" content="We watch your book's Amazon page every hour and email you the screenshot the moment a bestseller badge appears.">
+-    <meta name="twitter:image" content="https://screenshottracker.com/static/screenshots/og-card.png">
+-    <link rel="icon" href="/static/screenshots/favicon.ico" sizes="any">
+-    <link rel="icon" type="image/png" sizes="32x32" href="/static/screenshots/favicon-32.png">
+-    <link rel="apple-touch-icon" href="/static/screenshots/apple-touch-icon.png">
+-    <style>
+-        * {
+-            margin: 0;
+-            padding: 0;
+-            box-sizing: border-box;
+-        }
+-
+-        body {
+-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+-            line-height: 1.6;
+-            color: #333;
+-            overflow-x: hidden;
+-        }
+-
+-        /* Navigation */
+-        nav {
+-            background-color: #232f3e;
+-            padding: 15px 0;
+-            position: fixed;
+-            width: 100%;
+-            top: 0;
+-            z-index: 1000;
+-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+-        }
+-
+-        .nav-container {
+-            max-width: 1200px;
+-            margin: 0 auto;
+-            padding: 0 20px;
+-            display: flex;
+-            justify-content: space-between;
+-            align-items: center;
+-        }
+-
+-        .logo {
+-            color: white;
+-            font-size: 24px;
+-            font-weight: bold;
+-            text-decoration: none;
+-        }
+-
+-        .nav-links {
+-            display: flex;
+-            gap: 20px;
+-            align-items: center;
+-        }
+-
+-        .nav-links a {
+-            color: white;
+-            text-decoration: none;
+-            padding: 8px 20px;
+-            border-radius: 5px;
+-            transition: all 0.3s;
+-        }
+-
+-        .nav-links a:hover {
+-            background-color: rgba(255,255,255,0.1);
+-        }
+-
+-        .nav-links .btn-login {
+-            background-color: transparent;
+-            border: 2px solid #ff9900;
+-        }
+-
+-        .nav-links .btn-signup {
+-            background-color: #ff9900;
+-        }
+-
+-        /* Hero Section */
+-        .hero {
+-            background: linear-gradient(135deg, #232f3e 0%, #ff9900 100%);
+-            color: white;
+-            padding: 120px 20px 80px;
+-            text-align: center;
+-            margin-top: 60px;
+-        }
+-
+-        .hero h1 {
+-            font-size: 48px;
+-            margin-bottom: 20px;
+-            animation: fadeInUp 0.8s ease;
+-        }
+-
+-        .hero p {
+-            font-size: 20px;
+-            margin-bottom: 40px;
+-            opacity: 0.9;
+-            max-width: 600px;
+-            margin-left: auto;
+-            margin-right: auto;
+-            animation: fadeInUp 0.8s ease 0.2s both;
+-        }
+-
+-        .cta-buttons {
+-            display: flex;
+-            gap: 20px;
+-            justify-content: center;
+-            flex-wrap: wrap;
+-            animation: fadeInUp 0.8s ease 0.4s both;
+-        }
+-
+-        .btn {
+-            padding: 15px 40px;
+-            font-size: 18px;
+-            font-weight: bold;
+-            text-decoration: none;
+-            border-radius: 5px;
+-            transition: all 0.3s;
+-            display: inline-block;
+-            cursor: pointer;
+-            border: none;
+-        }
+-
+-        .btn-primary {
+-            background-color: white;
+-            color: #232f3e;
+-        }
+-
+-        .btn-secondary {
+-            background-color: transparent;
+-            color: white;
+-            border: 2px solid white;
+-        }
+-
+-        .btn:hover {
+-            transform: translateY(-2px);
+-            box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+-        }
+-
+-        /* Features Section */
+-        .features {
+-            padding: 80px 20px;
+-            background-color: #f8f9fa;
+-        }
+-
+-        .container {
+-            max-width: 1200px;
+-            margin: 0 auto;
+-        }
+-
+-        .section-title {
+-            text-align: center;
+-            font-size: 36px;
+-            margin-bottom: 20px;
+-            color: #232f3e;
+-        }
+-
+-        .section-subtitle {
+-            text-align: center;
+-            font-size: 18px;
+-            color: #666;
+-            margin-bottom: 50px;
+-            max-width: 600px;
+-            margin-left: auto;
+-            margin-right: auto;
+-        }
+-
+-        .feature-grid {
+-            display: grid;
+-            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+-            gap: 40px;
+-        }
+-
+-        .feature-card {
+-            background: white;
+-            padding: 40px 30px;
+-            border-radius: 10px;
+-            box-shadow: 0 2px 20px rgba(0,0,0,0.08);
+-            text-align: center;
+-            transition: transform 0.3s;
+-        }
+-
+-        .feature-card:hover {
+-            transform: translateY(-5px);
+-            box-shadow: 0 5px 30px rgba(0,0,0,0.15);
+-        }
+-
+-        .feature-icon {
+-            font-size: 48px;
+-            margin-bottom: 20px;
+-            display: inline-block;
+-        }
+-
+-        .feature-card h3 {
+-            color: #232f3e;
+-            margin-bottom: 15px;
+-            font-size: 24px;
+-        }
+-
+-        .feature-card p {
+-            color: #666;
+-            line-height: 1.8;
+-        }
+-
+-        /* How It Works */
+-        .how-it-works {
+-            padding: 80px 20px;
+-            background-color: white;
+-        }
+-
+-        .steps {
+-            display: grid;
+-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+-            gap: 40px;
+-            margin-top: 50px;
+-        }
+-
+-        .step {
+-            text-align: center;
+-            position: relative;
+-        }
+-
+-        .step-number {
+-            width: 60px;
+-            height: 60px;
+-            background-color: #ff9900;
+-            color: white;
+-            border-radius: 50%;
+-            display: flex;
+-            align-items: center;
+-            justify-content: center;
+-            font-size: 24px;
+-            font-weight: bold;
+-            margin: 0 auto 20px;
+-        }
+-
+-        .step h3 {
+-            color: #232f3e;
+-            margin-bottom: 10px;
+-        }
+-
+-        .step p {
+-            color: #666;
+-        }
+-
+-        /* Screenshot Demo */
+-        .demo-section {
+-            padding: 80px 20px;
+-            background-color: #f8f9fa;
+-            text-align: center;
+-        }
+-
+-        .demo-image {
+-            max-width: 800px;
+-            width: 100%;
+-            margin: 50px auto;
+-            border-radius: 10px;
+-            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+-        }
+-
+-        /* Pricing */
+-        .pricing {
+-            padding: 80px 20px;
+-            background-color: white;
+-        }
+-
+-        .pricing-container {
+-            display: grid;
+-            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+-            gap: 40px;
+-            margin-top: 50px;
+-        }
+-
+-        .pricing-tier {
+-            background: white;
+-            border-radius: 10px;
+-            padding: 40px;
+-            box-shadow: 0 2px 20px rgba(0,0,0,0.08);
+-            border: 2px solid transparent;
+-            transition: all 0.3s;
+-        }
+-
+-        .pricing-tier:hover {
+-            border-color: #ff9900;
+-            transform: translateY(-5px);
+-        }
+-
+-        .tier-subtitle {
+-            color: #666;
+-            margin-bottom: 20px;
+-        }
+-
+-        .tier-features {
+-            list-style: none;
+-            padding: 20px 0;
+-            border-bottom: 1px solid #eee;
+-            margin-bottom: 30px;
+-        }
+-
+-        .tier-features li {
+-            padding: 8px 0;
+-            color: #666;
+-        }
+-
+-        .tier-features li:before {
+-            content: "✓";
+-            color: #28a745;
+-            font-weight: bold;
+-            margin-right: 10px;
+-        }
+-
+-        .price-options {
+-            display: flex;
+-            flex-direction: column;
+-            gap: 15px;
+-        }
+-
+-        .price-option {
+-            padding: 15px;
+-            background: #f8f9fa;
+-            border-radius: 8px;
+-            display: flex;
+-            justify-content: space-between;
+-            align-items: center;
+-            position: relative;
+-        }
+-
+-        .price-option.featured {
+-            background: linear-gradient(135deg, #ff9900 0%, #ff7700 100%);
+-            color: white;
+-        }
+-
+-        .price-option .price {
+-            font-size: 24px;
+-            font-weight: bold;
+-        }
+-
+-        .price-option .period {
+-            color: #666;
+-        }
+-
+-        .price-option.featured .period {
+-            color: white;
+-            opacity: 0.9;
+-        }
+-
+-        .badge {
+-            position: absolute;
+-            top: -10px;
+-            right: 20px;
+-            background: #28a745;
+-            color: white;
+-            padding: 4px 12px;
+-            border-radius: 20px;
+-            font-size: 12px;
+-        }
+-
+-        .savings {
+-            background: #28a745;
+-            color: white;
+-            padding: 4px 12px;
+-            border-radius: 20px;
+-            font-size: 12px;
+-        }
+-
+-        /* Free signup banner */
+-        .free-signup-note {
+-            background-color: #d4edda;
+-            border: 1px solid #c3e6cb;
+-            color: #155724;
+-            padding: 15px 20px;
+-            border-radius: 8px;
+-            text-align: center;
+-            margin-bottom: 30px;
+-        }
+-
+-        .free-signup-note strong {
+-            color: #0d5524;
+-        }
+-
+-        /* Contact */
+-        .contact-section {
+-            background-color: #232f3e;
+-            color: white;
+-            padding: 40px 20px;
+-            margin-top: 60px;
+-            text-align: center;
+-        }
+-        .contact-section h2 {
+-            color: white;
+-            margin-bottom: 20px;
+-        }
+-        .contact-section a {
+-            color: #ff9900;
+-            text-decoration: none;
+-            font-size: 20px;
+-        }
+-        .contact-section a:hover {
+-            text-decoration: underline;
+-        }
+-
+-        /* Footer */
+-        footer {
+-            background-color: #232f3e;
+-            color: white;
+-            padding: 40px 20px;
+-            text-align: center;
+-        }
+-
+-        .footer-links {
+-            display: flex;
+-            justify-content: center;
+-            gap: 30px;
+-            margin-bottom: 20px;
+-            flex-wrap: wrap;
+-        }
+-
+-        .footer-links a {
+-            color: white;
+-            text-decoration: none;
+-            opacity: 0.8;
+-            transition: opacity 0.3s;
+-        }
+-
+-        .footer-links a:hover {
+-            opacity: 1;
+-        }
+-
+-        /* Animations */
+-        @keyframes fadeInUp {
+-            from {
+-                opacity: 0;
+-                transform: translateY(30px);
+-            }
+-            to {
+-                opacity: 1;
+-                transform: translateY(0);
+-            }
+-        }
+-
+-        /* Responsive */
+-        @media (max-width: 768px) {
+-            .hero h1 {
+-                font-size: 36px;
+-            }
+-
+-            .hero p {
+-                font-size: 18px;
+-            }
+-
+-            .feature-grid {
+-                grid-template-columns: 1fr;
+-            }
+-
+-            .nav-links {
+-                gap: 10px;
+-            }
+-
+-            .nav-links a {
+-                padding: 8px 15px;
+-                font-size: 14px;
+-            }
+-
+-            .pricing-container {
+-                grid-template-columns: 1fr;
+-            }
+-        }
+-    </style>
+-</head>
+-<body>
+-    <!-- Navigation -->
+-    <nav>
+-        <div class="nav-container">
+-            <a href="/" class="logo">🏆 Screenshot Tracker</a>
+-            <div class="nav-links">
+-                <a href="{{ url_for('auth.login') }}" class="btn-login">Log In</a>
+-                <!-- CHANGED: Now goes to register, not pricing -->
+-                <a href="{{ url_for('auth.register') }}" class="btn-signup">Sign Up Free</a>
+-            </div>
+-        </div>
+-    </nav>
+-
+-    <!-- Hero Section -->
+-    <section class="hero">
+-        <h1>Never Miss Your Amazon Bestseller Moment</h1>
+-        <p>Automatically capture screenshots when your books achieve bestseller status. Get instant proof of your success, delivered to your inbox.</p>
+-        <div class="cta-buttons">
+-            <!-- CHANGED: Primary CTA goes to register -->
+-            <a href="{{ url_for('auth.register') }}" class="btn btn-primary">Create Free Account</a>
+-            <a href="#how-it-works" class="btn btn-secondary">See How It Works</a>
+-        </div>
+-    </section>
+-
+-    <!-- Features -->
+-    <section class="features">
+-        <div class="container">
+-            <h2 class="section-title">Everything You Need to Track Your Success</h2>
+-            <p class="section-subtitle">Powerful features designed specifically for Amazon sellers and authors</p>
+-
+-            <div class="feature-grid">
+-                <div class="feature-card">
+-                    <div class="feature-icon">📸</div>
+-                    <h3>Automatic Screenshots</h3>
+-                    <p>Our system checks your products every hour and captures high-quality screenshots the moment they achieve bestseller status.</p>
+-                </div>
+-
+-                <div class="feature-card">
+-                    <div class="feature-icon">🎯</div>
+-                    <h3>Custom Category Tracking</h3>
+-                    <p>Track specific categories like "British Historical Fiction" or "Health, Fitness & Dieting". Set custom rank goals for each category.</p>
+-                </div>
+-
+-                <div class="feature-card">
+-                    <div class="feature-icon">📧</div>
+-                    <h3>Instant Email Alerts</h3>
+-                    <p>Get notified immediately when your product hits bestseller status. Screenshots are attached and ready to share.</p>
+-                </div>
+-
+-                <div class="feature-card">
+-                    <div class="feature-icon">📊</div>
+-                    <h3>Rank History</h3>
+-                    <p>Track your product's ranking over time. See trends, improvements, and identify what's working for your listings.</p>
+-                </div>
+-
+-                <div class="feature-card">
+-                    <div class="feature-icon">🔒</div>
+-                    <h3>Secure & Private</h3>
+-                    <p>Your data is encrypted and secure. Only you can access your product information and screenshots.</p>
+-                </div>
+-
+-                <div class="feature-card">
+-                    <div class="feature-icon">⚡</div>
+-                    <h3>Lightning Fast</h3>
+-                    <p>Advanced scraping technology ensures reliable monitoring.</p>
+-                </div>
+-            </div>
+-        </div>
+-    </section>
+-
+-    <!-- How It Works - UPDATED with 4 steps -->
+-    <section class="how-it-works" id="how-it-works">
+-        <div class="container">
+-            <h2 class="section-title">Simple as 1-2-3-4</h2>
+-            <p class="section-subtitle">Get started in minutes, no technical knowledge required</p>
+-
+-            <div class="steps">
+-                <div class="step">
+-                    <div class="step-number">1</div>
+-                    <h3>Create Free Account</h3>
+-                    <p>Sign up with your email. No credit card required to create an account.</p>
+-                </div>
+-
+-                <div class="step">
+-                    <div class="step-number">2</div>
+-                    <h3>Choose Your Plan</h3>
+-                    <p>When you're ready to track, select a plan that fits your needs.</p>
+-                </div>
+-
+-                <div class="step">
+-                    <div class="step-number">3</div>
+-                    <h3>Add Your Products</h3>
+-                    <p>Paste your Amazon product URLs. Set target categories and rankings.</p>
+-                </div>
+-
+-                <div class="step">
+-                    <div class="step-number">4</div>
+-                    <h3>Get Notified</h3>
+-                    <p>We capture screenshots automatically and email them to you instantly.</p>
+-                </div>
+-            </div>
+-        </div>
+-    </section>
+-
+-    <!-- Screenshot Demo -->
+-    <!--
+-      ============================================================================
+-      PROOF SECTION — drop-in replacement for the "Screenshot Demo" placeholder
+-      ============================================================================
+-
+-      HOW TO USE
+-      1. Delete the block marked "PREVIEW ONLY" below. It exists so this file
+-         renders correctly on its own; your site already defines .container,
+-         .section-title and .section-subtitle.
+-      2. Copy the <style> block marked "KEEP" into your stylesheet (or leave it
+-         inline in landing.html — it's scoped to .proof-* so it won't collide).
+-      3. Replace the whole existing <section class="demo-section">...</section>
+-         with the markup marked "KEEP" at the bottom.
+-
+-      4. Copy the three files in /img/ into your Flask static folder at
+-         static/img/. The template uses url_for(); if you're pasting into a plain
+-         HTML page instead, change the src values to /static/img/<filename>.
+-
+-      BEFORE YOU SHIP — four things to change:
+-      - The sender address is a placeholder. Put your real Resend "from" address in.
+-      - Confirm you have permission to name this book and author publicly.
+-      - The email says "Bestseller Badge" but the capture shows "#1 New Release."
+-        Side by side on one page, that mismatch is visible. Either relabel in the
+-        email template or pick a matched pair.
+-      - Re-export the images from the original attachment if you can — see the
+-        decision log, R3.1. The current ones came from a phone screenshot and are
+-        softer than they need to be.
+-      ============================================================================
+-    -->
+-
+-    <!-- ============ KEEP: STYLES ============ -->
+-    <style>
+-      .proof-frame {
+-        background: linear-gradient(45deg, #ff9900, #232f3e);
+-        padding: 4px;
+-        border-radius: 12px;
+-        max-width: 720px;
+-        margin: 44px auto 0;
+-        box-shadow: 0 12px 32px rgba(35, 47, 62, 0.16);
+-      }
+-      .proof-inner {
+-        background: #fff;
+-        border-radius: 9px;
+-        overflow: hidden;
+-      }
+-
+-      /* inbox chrome — makes it read as a delivered email, not a text block */
+-      .proof-mailhead {
+-        display: flex;
+-        align-items: center;
+-        gap: 12px;
+-        padding: 14px 18px;
+-        border-bottom: 1px solid #ececec;
+-        background: #fafafa;
+-      }
+-      .proof-avatar {
+-        flex: 0 0 auto;
+-        width: 38px;
+-        height: 38px;
+-        border-radius: 50%;
+-        background: #232f3e;
+-        color: #ff9900;
+-        display: flex;
+-        align-items: center;
+-        justify-content: center;
+-        font-size: 19px;
+-      }
+-      .proof-meta { flex: 1 1 auto; min-width: 0; }
+-      .proof-from {
+-        font-size: 0.85rem;
+-        font-weight: 600;
+-        color: #232f3e;
+-        white-space: nowrap;
+-        overflow: hidden;
+-        text-overflow: ellipsis;
+-      }
+-      .proof-from span { font-weight: 400; color: #8a8a8a; }
+-      .proof-subject {
+-        font-size: 0.85rem;
+-        color: #666;
+-        white-space: nowrap;
+-        overflow: hidden;
+-        text-overflow: ellipsis;
+-      }
+-      .proof-time {
+-        flex: 0 0 auto;
+-        font-size: 0.8rem;
+-        color: #8a8a8a;
+-        font-variant-numeric: tabular-nums;
+-      }
+-
+-      /* email body — reproduces your actual notification */
+-      .proof-body { padding: 26px 24px 22px; }
+-      .proof-h {
+-        margin: 0 0 18px;
+-        font-size: 1.45rem;
+-        line-height: 1.25;
+-        color: #1a1a1a;
+-      }
+-      .proof-body p {
+-        margin: 0 0 14px;
+-        font-size: 1rem;
+-        line-height: 1.6;
+-        color: #333;
+-      }
+-      .proof-body p:last-of-type { margin-bottom: 0; }
+-      .proof-body strong { color: #1a1a1a; }
+-      .proof-stamp {
+-        font-style: italic;
+-        color: #555 !important;
+-      }
+-
+-      /* attachment row */
+-      .proof-attach {
+-        display: flex;
+-        align-items: center;
+-        gap: 10px;
+-        margin-top: 20px;
+-        padding: 12px 14px;
+-        border: 1px solid #e4e4e4;
+-        border-radius: 7px;
+-        background: #fbfbfb;
+-      }
+-      .proof-file {
+-        font-size: 0.9rem;
+-        font-weight: 600;
+-        color: #232f3e;
+-        overflow: hidden;
+-        text-overflow: ellipsis;
+-        white-space: nowrap;
+-      }
+-      .proof-size {
+-        margin-left: auto;
+-        flex: 0 0 auto;
+-        font-size: 0.8rem;
+-        color: #8a8a8a;
+-      }
+-
+-      /* the captured screenshot itself */
+-      .proof-shot {
+-        max-width: 720px;
+-        margin: 22px auto 0;
+-        border: 1px solid #e4e4e4;
+-        border-radius: 10px;
+-        overflow: hidden;
+-        background: #fff;
+-      }
+-      .proof-shot img {
+-        display: block;
+-        width: 100%;
+-        height: auto;
+-      }
+-      .proof-shot figcaption {
+-        padding: 12px 16px;
+-        font-size: 0.85rem;
+-        color: #666;
+-        border-top: 1px solid #ececec;
+-        background: #fafafa;
+-      }
+-
+-      /* "the whole page, not just the badge" */
+-      .proof-archive {
+-        display: flex;
+-        align-items: center;
+-        gap: 22px;
+-        max-width: 720px;
+-        margin: 22px auto 0;
+-        padding: 18px;
+-        border: 1px solid #ececec;
+-        border-radius: 10px;
+-        background: #fafafa;
+-      }
+-      .proof-archive-img {
+-        flex: 0 0 auto;
+-        width: 132px;
+-        height: 190px;
+-        overflow: hidden;
+-        border: 1px solid #ddd;
+-        border-radius: 5px;
+-        background: #fff;
+-        -webkit-mask-image: linear-gradient(to bottom, #000 62%, transparent 100%);
+-        mask-image: linear-gradient(to bottom, #000 62%, transparent 100%);
+-      }
+-      .proof-archive-img img {
+-        display: block;
+-        width: 100%;
+-        height: auto;
+-      }
+-      .proof-archive-text {
+-        font-size: 0.95rem;
+-        line-height: 1.6;
+-        color: #555;
+-      }
+-      .proof-archive-text strong { color: #232f3e; }
+-      .proof-archive-text a { color: #232f3e; }
+-
+-      .proof-caption {
+-        max-width: 640px;
+-        margin: 26px auto 0;
+-        text-align: center;
+-        font-size: 0.98rem;
+-        line-height: 1.65;
+-        color: #555;
+-      }
+-      .proof-caption strong { color: #232f3e; }
+-
+-      @media (max-width: 600px) {
+-        .proof-frame { margin-top: 32px; }
+-        .proof-body { padding: 20px 16px 18px; }
+-        .proof-h { font-size: 1.2rem; }
+-        .proof-body p { font-size: 0.95rem; }
+-        .proof-mailhead { padding: 12px 14px; gap: 10px; }
+-        .proof-avatar { width: 32px; height: 32px; font-size: 16px; }
+-        .proof-time { display: none; }
+-        .proof-size { display: none; }
+-      }
+-    </style>
+-    <!-- ============ END STYLES ============ -->
+-
+-
+-    <!-- ============ KEEP: MARKUP — replaces the old demo-section ============ -->
+-    <section class="demo-section">
+-      <div class="container">
+-        <h2 class="section-title">Capture Your Success</h2>
+-        <p class="section-subtitle">
+-          This is what lands in your inbox the moment a badge appears — with the full
+-          page screenshot attached and archived to your dashboard.
+-        </p>
+-
+-        <div class="proof-frame">
+-          <div class="proof-inner">
+-
+-            <div class="proof-mailhead">
+-              <div class="proof-avatar" aria-hidden="true">🏆</div>
+-              <div class="proof-meta">
+-                <!-- TODO: replace with your real Resend sending address -->
+-                <div class="proof-from">Screenshot Tracker <span>&lt;noreply@screenshottracker.com&gt;</span></div>
+-                <div class="proof-subject">🎉 Achievement Unlocked! — Bestseller Badge captured</div>
+-              </div>
+-              <div class="proof-time">2:26 AM</div>
+-            </div>
+-
+-            <div class="proof-body">
+-              <h3 class="proof-h">🎉 Achievement Unlocked!</h3>
+-              <p>
+-                Your book <strong>Murder In Cavendish Square: A Dodo Dorchester Mystery
+-                Book 15</strong> has achieved: <strong>#1 New Release</strong>
+-              </p>
+-              <p class="proof-stamp">Captured July 31, 2026 at 02:26 UTC</p>
+-              <p>
+-                The full page screenshot is attached — your badge and ranking as they
+-                appeared on Amazon at the moment of capture. It's also saved to your
+-                dashboard.
+-              </p>
+-
+-              <div class="proof-attach">
+-                <span aria-hidden="true">📎</span>
+-                <span class="proof-file">bestseller-badge-2026-07-31.png</span>
+-                <span class="proof-size">Full page capture</span>
+-              </div>
+-            </div>
+-
+-          </div>
+-        </div>
+-
+-        <!-- The attached capture. Files are in /img/ — copy to your static folder. -->
+-        <figure class="proof-shot">
+-          <img src="{{ url_for('static', filename='screenshots/badge-hero.webp') }}"
+-               width="738" height="294" loading="lazy"
+-               alt="Amazon listing for Murder In Cavendish Square by Ann Sutton, showing the orange #1 New Release badge in British &amp; Irish Humor &amp; Satire.">
+-          <figcaption>The attachment — the badge exactly as Amazon displayed it at 02:26 UTC.</figcaption>
+-        </figure>
+-
+-        <div class="proof-archive">
+-          <div class="proof-archive-img">
+-            <img src="{{ url_for('static', filename='screenshots/full-capture-thumb.webp') }}"
+-                 width="520" height="942" loading="lazy"
+-                 alt="The full Amazon product page as captured, from the header down to the author bio.">
+-          </div>
+-          <p class="proof-archive-text">
+-            <strong>The whole page, not just the badge.</strong> Every capture archives
+-            the complete listing — rankings, review count, categories and all — so you
+-            have the full context months later, when the badge is long gone and you
+-            need it for a newsletter or a cover.
+-          </p>
+-        </div>
+-
+-        <p class="proof-caption">
+-          A real capture, sent at <strong>2:26 in the morning</strong>. Amazon never
+-          announces these badges and gives no warning before they disappear — this one
+-          was caught and archived while the author slept.
+-        </p>
+-      </div>
+-    </section>
+-    <!-- ============ END MARKUP ============ -->
+-
+-    <!-- Pricing -->
+-    <section class="pricing" id="pricing">
+-        <div class="container">
+-            <h2 class="section-title">Choose Your Plan</h2>
+-            <p class="section-subtitle">Create a free account first, then subscribe when you're ready to track</p>
+-
+-            <!-- Free signup note -->
+-            <div class="free-signup-note">
+-                <strong>✨ Free to Sign Up!</strong> Create your account now and explore the dashboard. 
+-                You'll only need to subscribe when you want to start tracking products.
+-            </div>
+-
+-            <div class="pricing-container">
+-                <div class="pricing-tier">
+-                    <h3>Author</h3>
+-                    <p class="tier-subtitle">Perfect for individual authors</p>
+-                    <ul class="tier-features">
+-                        <li>Track up to 2 products</li>
+-                        <li>Hourly monitoring</li>
+-                        <li>Email notifications</li>
+-                        <li>Bestseller and ranking screenshots</li>
+-                    </ul>
+-                    <div class="price-options">
+-                        <div class="price-option">
+-                            <span class="price">$14.99</span>
+-                            <span class="period">weekly</span>
+-                        </div>
+-                        <div class="price-option featured">
+-                            <span class="price">$29.99</span>
+-                            <span class="period">monthly</span>
+-                            <span class="badge">Most Popular</span>
+-                        </div>
+-                        <div class="price-option">
+-                            <span class="price">$299.99</span>
+-                            <span class="period">annually</span>
+-                            <span class="savings">Save $60!</span>
+-                        </div>
+-                    </div>
+-                </div>
+-
+-                <div class="pricing-tier">
+-                    <h3>Publisher</h3>
+-                    <p class="tier-subtitle">For publishers and agencies</p>
+-                    <ul class="tier-features">
+-                        <li>Track up to 5 products</li>
+-                        <li>Hourly monitoring</li>
+-                        <li>Priority email notifications</li>
+-                        <li>All bestseller and ranking screenshots</li>
+-                    </ul>
+-                    <div class="price-options">
+-                        <div class="price-option">
+-                            <span class="price">$29.99</span>
+-                            <span class="period">weekly</span>
+-                        </div>
+-                        <div class="price-option featured">
+-                            <span class="price">$59.99</span>
+-                            <span class="period">monthly</span>
+-                            <span class="badge">Most Popular</span>
+-                        </div>
+-                        <div class="price-option">
+-                            <span class="price">$599.99</span>
+-                            <span class="period">annually</span>
+-                            <span class="savings">Save $120!</span>
+-                        </div>
+-                    </div>
+-                </div>
+-            </div>
+-
+-            <div style="text-align: center; margin-top: 40px;">
+-                <!-- CHANGED: Goes to register first -->
+-                <a href="{{ url_for('auth.register') }}" class="btn btn-primary" style="background-color: #ff9900; color: white;">
+-                    Create Free Account
+-                </a>
+-                <p style="margin-top: 15px; color: #666; font-size: 14px;">
+-                    Already have an account? <a href="{{ url_for('auth.login') }}" style="color: #ff9900;">Log in</a>
+-                </p>
+-            </div>
+-        </div>
+-    </section>
+-
+-    <!-- Footer -->
+-    <footer>
+-        <div class="contact-section">
+-            <h2>Need Help?</h2>
+-            <p>We're here to help you track your Amazon success</p>
+-            <a href="mailto:support@screenshottracker.com">support@screenshottracker.com</a>
+-        </div>
+-
+-        <div class="container">
+-            <div class="footer-links">
+-                <a href="/terms">Terms of Service</a> | 
+-                <a href="/privacy">Privacy Policy</a> | 
+-                <a href="/refunds">Refund Policy</a>
+-            </div>
+-            <p style="opacity: 0.6;">© 2025 Screenshot Tracker. Not affiliated with Amazon.</p>
+-        </div>
+-    </footer>
+-
+-    <script>
+-        // Smooth scrolling for anchor links
+-        document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+-            anchor.addEventListener('click', function (e) {
+-                e.preventDefault();
+-                const target = document.querySelector(this.getAttribute('href'));
+-                if (target) {
+-                    target.scrollIntoView({
+-                        behavior: 'smooth',
+-                        block: 'start'
+-                    });
+-                }
+-            });
+-        });
+-
+-        // Add scroll effect to navigation
+-        window.addEventListener('scroll', function() {
+-            const nav = document.querySelector('nav');
+-            if (window.scrollY > 50) {
+-                nav.style.backgroundColor = 'rgba(35, 47, 62, 0.95)';
+-                nav.style.backdropFilter = 'blur(10px)';
+-            } else {
+-                nav.style.backgroundColor = '#232f3e';
+-                nav.style.backdropFilter = 'none';
+-            }
+-        });
+-    </script>
+-</body>
+-</html>
+\ No newline at end of file
+diff --git a/templates/pricing.html b/templates/pricing.html
+index 0c71efe..955af7e 100644
+--- a/templates/pricing.html
++++ b/templates/pricing.html
+@@ -286,21 +286,40 @@
+ 
+                     fetch('/create_checkout', {
+                         method: 'POST',
+-                        headers: { 'Content-Type': 'application/json' },
++                        headers: {
++                            'Content-Type': 'application/json',
++                            // CSRFProtect guards every POST (WTF_CSRF_CHECK_DEFAULT=True in
++                            // main.py) and /create_checkout is not csrf-exempt. Without this
++                            // header the POST is rejected with an HTML 400 before the route runs.
++                            'X-CSRFToken': '{{ csrf_token() }}'
++                        },
+                         body: JSON.stringify({ price_id: priceId })
+                     })
+-                        .then(function (r) { return r.json(); })
++                        .then(function (r) {
++                            if (!r.ok) {
++                                // A server-side rejection (CSRF, rate limit, 5xx) returns HTML,
++                                // so parse nothing and name the status instead of blaming the
++                                // visitor's connection.
++                                throw new Error('HTTP ' + r.status);
++                            }
++                            return r.json();
++                        })
+                         .then(function (data) {
+                             if (data && data.url) {
+                                 window.location = data.url;
+                             } else {
+                                 btn.disabled = false;
+-                                showError('We could not start checkout. Please try again, or email support@screenshottracker.com.');
++                                showError((data && data.error) || 'We could not start checkout. Please try again, or email support@screenshottracker.com.');
+                             }
+                         })
+-                        .catch(function () {
++                        .catch(function (err) {
+                             btn.disabled = false;
+-                            showError('We could not reach the payment service. Please check your connection and try again.');
++                            console.error('create_checkout failed:', err);
++                            if (err && /^HTTP \d+/.test(err.message)) {
++                                showError('Checkout could not be started (' + err.message + '). Please try again, or email support@screenshottracker.com.');
++                            } else {
++                                showError('We could not reach the payment service. Please check your connection and try again.');
++                            }
+                         });
+                 });
+             });
+diff --git a/templates/success.html b/templates/success.html
+index 4ab2ff6..5895c43 100644
+--- a/templates/success.html
++++ b/templates/success.html
+@@ -1,79 +1,4 @@
+ <!DOCTYPE html>
+-<html>
+-<head>
+-    <title>Payment Successful - Screenshot Tracker</title>
+-    <meta charset="UTF-8">
+-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+-    {% include 'partials/gtag.html' %}
+-    <style>
+-        body {
+-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+-            background: #f5f5f5;
+-            margin: 0;
+-            padding: 0;
+-        }
+-        .container {
+-            max-width: 600px;
+-            margin: 100px auto;
+-            padding: 40px;
+-            background: white;
+-            border-radius: 10px;
+-            box-shadow: 0 2px 20px rgba(0,0,0,0.1);
+-            text-align: center;
+-        }
+-        .success-icon {
+-            font-size: 72px;
+-            margin-bottom: 20px;
+-        }
+-        h1 {
+-            color: #28a745;
+-            margin-bottom: 20px;
+-        }
+-        p {
+-            color: #666;
+-            margin-bottom: 30px;
+-            line-height: 1.6;
+-        }
+-        .email-note {
+-            background: #f0f8ff;
+-            padding: 20px;
+-            border-radius: 8px;
+-            margin: 20px 0;
+-        }
+-    </style>
+-</head>
+-<body>
+-    <div class="container">
+-        <div class="success-icon">✅</div>
+-        <h1>Payment Successful!</h1>
+-        <p>Thank you for subscribing to Screenshot Tracker.</p>
+-
+-        <div class="email-note">
+-            <strong>Check your email!</strong><br>
+-            We've sent instructions to complete your account setup.
+-            <br><br>
+-            If you don't see it, check your spam folder.
+-        </div>
+-
+-        <p>Questions? Email us at <a href="mailto:support@screenshottracker.com">support@screenshottracker.com</a></p>
+-    </div>
+-
+-    {% if conversion and conversion.fire %}
+-    <!-- Google Ads: purchase conversion. Only rendered when the Stripe session
+-         was retrieved server-side and payment_status == 'paid', so a page
+-         reload or a direct hit on /success never counts a false sale. -->
+-    <script>
+-      gtag('set', 'user_data', { "email": "{{ conversion.email }}" });
+-      gtag('event', 'conversion', {
+-        'send_to': 'AW-18437322624/OpACCMGEifEcEIDvzNdE',
+-        'value': {{ conversion.value }},
+-        'currency': '{{ conversion.currency }}',
+-        'transaction_id': '{{ conversion.txn_id }}'
+-      });
+-    </script>
+-    {% endif %}
+-</body>
+-</html><!DOCTYPE html>
+ <html lang="en">
+ <head>
+     <meta charset="UTF-8">
+-- 
+2.43.0
+
