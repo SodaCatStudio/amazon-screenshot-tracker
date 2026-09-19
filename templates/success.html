@@ -357,3 +357,2516 @@
     {% endif %}
 </body>
 </html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    {% include 'partials/gtag.html' %}
+    <title>Payment Successful | Screenshot Tracker</title>
+    <link rel="icon" href="/static/screenshots/favicon.ico" sizes="any">
+    <style>
+        :root {
+            --navy: #010b1b;
+            --orange: #ff9900;
+            --orange-deep: #e07d00;
+            --ink: #1a1a1a;
+            --muted: #5c6672;
+            --line: #e4e7eb;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f6f7f9;
+            color: var(--ink);
+            line-height: 1.6;
+            padding: 30px 18px 60px;
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            margin-bottom: 26px;
+            color: var(--navy);
+            font-weight: 700;
+            font-size: 19px;
+            text-decoration: none;
+        }
+
+        .brand img { width: 34px; height: 34px; border-radius: 7px; display: block; }
+
+        .container {
+            max-width: 540px;
+            margin: 0 auto;
+            background: #fff;
+            padding: 34px 32px 32px;
+            border-radius: 12px;
+            border: 1px solid var(--line);
+            box-shadow: 0 8px 28px rgba(1, 11, 27, 0.07);
+        }
+
+        .success-icon { font-size: 46px; text-align: center; line-height: 1; }
+
+        h1 { color: #1e874b; margin: 12px 0 8px; font-size: 25px; text-align: center; }
+
+        .lede { color: var(--muted); text-align: center; margin-bottom: 26px; }
+
+        .form-group { margin-bottom: 18px; }
+
+        label { display: block; font-weight: 600; font-size: 14.5px; margin-bottom: 6px; color: #33404f; }
+
+        input[type="text"], input[type="email"], input[type="password"] {
+            width: 100%;
+            padding: 12px 14px;
+            border: 1px solid #cfd6de;
+            border-radius: 8px;
+            font-size: 16px;
+            font-family: inherit;
+        }
+
+        input:focus { outline: none; border-color: var(--orange); box-shadow: 0 0 0 3px rgba(255,153,0,0.15); }
+        input[readonly] { background: #f2f4f7; color: var(--muted); }
+
+        .hint { font-size: 13.5px; color: var(--muted); margin-top: 6px; }
+        .hint.bad { color: #b3261e; }
+        .hint.good { color: #14653a; }
+
+        input.error { border-color: #d93025; }
+        input.ok { border-color: #1e874b; }
+
+        /* A reveal toggle alongside the confirm field: confirming catches a
+           mismatch, but only being able to see the password tells you which of
+           the two is the typo. */
+        .label-row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+
+        .reveal {
+            background: none;
+            border: none;
+            padding: 0;
+            font: inherit;
+            font-size: 13.5px;
+            font-weight: 600;
+            color: var(--orange-deep);
+            cursor: pointer;
+            text-decoration: underline;
+            text-underline-offset: 2px;
+        }
+
+        .btn {
+            width: 100%;
+            padding: 14px 20px;
+            background: var(--orange);
+            color: #12100a;
+            border: none;
+            border-radius: 8px;
+            font-size: 17px;
+            font-weight: 700;
+            cursor: pointer;
+            font-family: inherit;
+        }
+
+        .btn:hover { background: #ffad2e; }
+        .btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+        .note {
+            background: #eef4fb;
+            border: 1px solid #d6e4f5;
+            padding: 16px 18px;
+            border-radius: 9px;
+            margin: 20px 0;
+            font-size: 15px;
+            color: #2c3e52;
+        }
+
+        .flash { padding: 12px 15px; border-radius: 8px; margin-bottom: 16px; font-size: 15px; }
+        .flash.error { background: #fdecea; border: 1px solid #f5c6c2; color: #8a1c13; }
+        .flash.success { background: #e8f6ee; border: 1px solid #c3e6d0; color: #14653a; }
+
+        .pending { text-align: center; color: var(--muted); }
+
+        .spinner {
+            width: 26px;
+            height: 26px;
+            margin: 0 auto 14px;
+            border: 3px solid #e2e6eb;
+            border-top-color: var(--orange);
+            border-radius: 50%;
+            animation: spin 0.9s linear infinite;
+        }
+
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        @media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 3s; } }
+
+        .foot { text-align: center; margin-top: 22px; font-size: 14.5px; color: var(--muted); }
+        .foot a { color: var(--orange-deep); }
+    </style>
+</head>
+<body>
+    <a href="/" class="brand">
+        <img src="{{ url_for('static', filename='screenshots/icon-512.png') }}" width="34" height="34" alt="">
+        <span>Screenshot Tracker</span>
+    </a>
+
+    <div class="container">
+        <div class="success-icon">✅</div>
+        <h1>Payment successful</h1>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="flash {{ category }}">{{ message }}</div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+
+        {# Setting the password happens right here rather than only through an
+           emailed link. With free accounts gone this is the only route to access,
+           and the emailed setup token expires in 24 hours - so a customer who pays
+           overnight and misses the email would otherwise be a live charge with no
+           account. The email still goes out as a backup. #}
+        {% if setup and setup.state == 'ready' %}
+            <p class="lede">One last step — choose a password and you're in.</p>
+
+            <form method="POST" action="{{ url_for('auth.complete_registration') }}" id="setupForm">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <input type="hidden" name="token" value="{{ setup.token }}">
+
+                <div class="form-group">
+                    <label for="email">Email address</label>
+                    <input type="email" id="email" name="email" value="{{ setup.email }}" readonly>
+                </div>
+
+                <div class="form-group">
+                    <label for="full_name">Your name</label>
+                    <input type="text" id="full_name" name="full_name" autocomplete="name" placeholder="Jane Author">
+                </div>
+
+                <div class="form-group">
+                    <div class="label-row">
+                        <label for="password">Choose a password</label>
+                        <button type="button" class="reveal" id="revealBtn" aria-pressed="false"
+                                aria-controls="password confirm_password">Show</button>
+                    </div>
+                    <input type="password" id="password" name="password" required minlength="8"
+                           autocomplete="new-password" placeholder="At least 8 characters">
+                    <div class="hint" id="pwHint">At least 8 characters. That's the only rule.</div>
+                </div>
+
+                <div class="form-group">
+                    <label for="confirm_password">Confirm password</label>
+                    <input type="password" id="confirm_password" name="confirm_password" required
+                           autocomplete="new-password" placeholder="Type it once more">
+                    <div class="hint" id="matchHint" aria-live="polite"></div>
+                </div>
+
+                <button type="submit" class="btn" id="setupBtn">Finish setup</button>
+            </form>
+
+        {% elif setup and setup.state == 'done' %}
+            <p class="lede">Your subscription is active and your account is ready.</p>
+            <a href="{{ url_for('auth.login') }}" class="btn" style="display:block;text-align:center;text-decoration:none;">Log in</a>
+
+        {% elif setup and setup.state == 'pending' %}
+            {# Stripe redirects the browser here immediately, but the webhook that
+               creates the account row is asynchronous. Poll until it lands, then
+               swap in the password form without the customer doing anything. #}
+            <div class="pending" id="pendingBox">
+                <div class="spinner" aria-hidden="true"></div>
+                <p><strong>Finalising your subscription…</strong></p>
+                <p class="hint">This usually takes a few seconds. Keep this page open.</p>
+            </div>
+
+        {% else %}
+            <p class="lede">Thank you for subscribing to Screenshot Tracker.</p>
+            <div class="note">
+                <strong>Check your email.</strong><br>
+                We've sent a link to finish setting up your account. If you don't see it
+                within a few minutes, check your spam folder.
+            </div>
+        {% endif %}
+
+        <p class="foot">
+            Questions? Email <a href="mailto:support@screenshottracker.com">support@screenshottracker.com</a>
+        </p>
+    </div>
+
+    {% if setup and setup.state == 'ready' %}
+    <script>
+        (function () {
+            var form = document.getElementById('setupForm');
+            var pw = document.getElementById('password');
+            var cpw = document.getElementById('confirm_password');
+            var pwHint = document.getElementById('pwHint');
+            var matchHint = document.getElementById('matchHint');
+            var btn = document.getElementById('setupBtn');
+            var reveal = document.getElementById('revealBtn');
+
+            reveal.addEventListener('click', function () {
+                var show = pw.type === 'password';
+                pw.type = cpw.type = show ? 'text' : 'password';
+                reveal.textContent = show ? 'Hide' : 'Show';
+                reveal.setAttribute('aria-pressed', String(show));
+            });
+
+            function checkLength() {
+                var ok = pw.value.length >= 8;
+                pw.classList.toggle('error', pw.value.length > 0 && !ok);
+                pwHint.classList.toggle('bad', pw.value.length > 0 && !ok);
+                pwHint.textContent = (pw.value.length > 0 && !ok)
+                    ? 'A little longer — 8 characters minimum.'
+                    : "At least 8 characters. That's the only rule.";
+                return ok;
+            }
+
+            // Only complain once they've actually started the second field, so the
+            // form isn't shouting "doesn't match" at someone mid-keystroke.
+            function checkMatch() {
+                if (!cpw.value) {
+                    matchHint.textContent = '';
+                    matchHint.classList.remove('bad', 'good');
+                    cpw.classList.remove('error', 'ok');
+                    return false;
+                }
+                var same = pw.value === cpw.value;
+                cpw.classList.toggle('error', !same);
+                cpw.classList.toggle('ok', same);
+                matchHint.classList.toggle('bad', !same);
+                matchHint.classList.toggle('good', same);
+                matchHint.textContent = same ? 'Passwords match.' : "These don't match yet.";
+                return same;
+            }
+
+            pw.addEventListener('input', function () { checkLength(); checkMatch(); });
+            cpw.addEventListener('input', checkMatch);
+
+            form.addEventListener('submit', function (e) {
+                if (!checkLength()) {
+                    e.preventDefault();
+                    pw.focus();
+                    return;
+                }
+                if (pw.value !== cpw.value) {
+                    e.preventDefault();
+                    checkMatch();
+                    cpw.focus();
+                    return;
+                }
+                btn.disabled = true;
+                btn.textContent = 'Setting up…';
+            });
+        })();
+    </script>
+    {% endif %}
+
+    {% if setup and setup.state == 'pending' %}
+    <script>
+        (function () {
+            var sessionId = {{ (request.args.get('session_id') or '')|tojson }};
+            var box = document.getElementById('pendingBox');
+            var tries = 0;
+            var MAX_TRIES = 15;   // ~30 seconds at 2s intervals
+
+            function fallback() {
+                box.innerHTML =
+                    '<p><strong>Your payment went through.</strong></p>' +
+                    '<p class="hint">We\\'re still finishing your account setup. ' +
+                    'We\\'ve emailed you a link to set your password — check your inbox ' +
+                    '(and your spam folder) in a few minutes.</p>';
+            }
+
+            function poll() {
+                if (tries++ >= MAX_TRIES) { fallback(); return; }
+
+                fetch('/success/setup_status?session_id=' + encodeURIComponent(sessionId))
+                    .then(function (r) { return r.json(); })
+                    .then(function (data) {
+                        if (data && (data.state === 'ready' || data.state === 'done')) {
+                            // Reload so the server renders the form (and its CSRF token)
+                            // rather than building a form in JavaScript.
+                            window.location.reload();
+                        } else {
+                            setTimeout(poll, 2000);
+                        }
+                    })
+                    .catch(function () { setTimeout(poll, 2000); });
+            }
+
+            if (sessionId) { setTimeout(poll, 2000); } else { fallback(); }
+        })();
+    </script>
+    {% endif %}
+
+    {% if conversion and conversion.fire %}
+    <!-- Google Ads: purchase conversion. Only rendered when the Stripe session
+         was verified as paid; transaction_id dedupes page reloads. -->
+    <script>
+      gtag('set', 'user_data', { "email": "{{ conversion.email }}" });
+      gtag('event', 'conversion', {
+        'send_to': 'AW-18437322624/OpACCMGEifEcEIDvzNdE',
+        'value': {{ conversion.value }},
+        'currency': '{{ conversion.currency }}',
+        'transaction_id': '{{ conversion.txn_id }}'
+      });
+    </script>
+    {% endif %}
+</body>
+</html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    {% include 'partials/gtag.html' %}
+    <title>Payment Successful | Screenshot Tracker</title>
+    <link rel="icon" href="/static/screenshots/favicon.ico" sizes="any">
+    <style>
+        :root {
+            --navy: #010b1b;
+            --orange: #ff9900;
+            --orange-deep: #e07d00;
+            --ink: #1a1a1a;
+            --muted: #5c6672;
+            --line: #e4e7eb;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f6f7f9;
+            color: var(--ink);
+            line-height: 1.6;
+            padding: 30px 18px 60px;
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            margin-bottom: 26px;
+            color: var(--navy);
+            font-weight: 700;
+            font-size: 19px;
+            text-decoration: none;
+        }
+
+        .brand img { width: 34px; height: 34px; border-radius: 7px; display: block; }
+
+        .container {
+            max-width: 540px;
+            margin: 0 auto;
+            background: #fff;
+            padding: 34px 32px 32px;
+            border-radius: 12px;
+            border: 1px solid var(--line);
+            box-shadow: 0 8px 28px rgba(1, 11, 27, 0.07);
+        }
+
+        .success-icon { font-size: 46px; text-align: center; line-height: 1; }
+
+        h1 { color: #1e874b; margin: 12px 0 8px; font-size: 25px; text-align: center; }
+
+        .lede { color: var(--muted); text-align: center; margin-bottom: 26px; }
+
+        .form-group { margin-bottom: 18px; }
+
+        label { display: block; font-weight: 600; font-size: 14.5px; margin-bottom: 6px; color: #33404f; }
+
+        input[type="text"], input[type="email"], input[type="password"] {
+            width: 100%;
+            padding: 12px 14px;
+            border: 1px solid #cfd6de;
+            border-radius: 8px;
+            font-size: 16px;
+            font-family: inherit;
+        }
+
+        input:focus { outline: none; border-color: var(--orange); box-shadow: 0 0 0 3px rgba(255,153,0,0.15); }
+        input[readonly] { background: #f2f4f7; color: var(--muted); }
+
+        .hint { font-size: 13.5px; color: var(--muted); margin-top: 6px; }
+        .hint.bad { color: #b3261e; }
+        .hint.good { color: #14653a; }
+
+        input.error { border-color: #d93025; }
+        input.ok { border-color: #1e874b; }
+
+        /* A reveal toggle alongside the confirm field: confirming catches a
+           mismatch, but only being able to see the password tells you which of
+           the two is the typo. */
+        .label-row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+
+        .reveal {
+            background: none;
+            border: none;
+            padding: 0;
+            font: inherit;
+            font-size: 13.5px;
+            font-weight: 600;
+            color: var(--orange-deep);
+            cursor: pointer;
+            text-decoration: underline;
+            text-underline-offset: 2px;
+        }
+
+        .btn {
+            width: 100%;
+            padding: 14px 20px;
+            background: var(--orange);
+            color: #12100a;
+            border: none;
+            border-radius: 8px;
+            font-size: 17px;
+            font-weight: 700;
+            cursor: pointer;
+            font-family: inherit;
+        }
+
+        .btn:hover { background: #ffad2e; }
+        .btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+        .note {
+            background: #eef4fb;
+            border: 1px solid #d6e4f5;
+            padding: 16px 18px;
+            border-radius: 9px;
+            margin: 20px 0;
+            font-size: 15px;
+            color: #2c3e52;
+        }
+
+        .flash { padding: 12px 15px; border-radius: 8px; margin-bottom: 16px; font-size: 15px; }
+        .flash.error { background: #fdecea; border: 1px solid #f5c6c2; color: #8a1c13; }
+        .flash.success { background: #e8f6ee; border: 1px solid #c3e6d0; color: #14653a; }
+
+        .pending { text-align: center; color: var(--muted); }
+
+        .spinner {
+            width: 26px;
+            height: 26px;
+            margin: 0 auto 14px;
+            border: 3px solid #e2e6eb;
+            border-top-color: var(--orange);
+            border-radius: 50%;
+            animation: spin 0.9s linear infinite;
+        }
+
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        @media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 3s; } }
+
+        .foot { text-align: center; margin-top: 22px; font-size: 14.5px; color: var(--muted); }
+        .foot a { color: var(--orange-deep); }
+    </style>
+</head>
+<body>
+    <a href="/" class="brand">
+        <img src="{{ url_for('static', filename='screenshots/icon-512.png') }}" width="34" height="34" alt="">
+        <span>Screenshot Tracker</span>
+    </a>
+
+    <div class="container">
+        <div class="success-icon">✅</div>
+        <h1>Payment successful</h1>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="flash {{ category }}">{{ message }}</div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+
+        {# Setting the password happens right here rather than only through an
+           emailed link. With free accounts gone this is the only route to access,
+           and the emailed setup token expires in 24 hours - so a customer who pays
+           overnight and misses the email would otherwise be a live charge with no
+           account. The email still goes out as a backup. #}
+        {% if setup and setup.state == 'ready' %}
+            <p class="lede">One last step — choose a password and you're in.</p>
+
+            <form method="POST" action="{{ url_for('auth.complete_registration') }}" id="setupForm">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <input type="hidden" name="token" value="{{ setup.token }}">
+
+                <div class="form-group">
+                    <label for="email">Email address</label>
+                    <input type="email" id="email" name="email" value="{{ setup.email }}" readonly>
+                </div>
+
+                <div class="form-group">
+                    <label for="full_name">Your name</label>
+                    <input type="text" id="full_name" name="full_name" autocomplete="name" placeholder="Jane Author">
+                </div>
+
+                <div class="form-group">
+                    <div class="label-row">
+                        <label for="password">Choose a password</label>
+                        <button type="button" class="reveal" id="revealBtn" aria-pressed="false"
+                                aria-controls="password confirm_password">Show</button>
+                    </div>
+                    <input type="password" id="password" name="password" required minlength="8"
+                           autocomplete="new-password" placeholder="At least 8 characters">
+                    <div class="hint" id="pwHint">At least 8 characters. That's the only rule.</div>
+                </div>
+
+                <div class="form-group">
+                    <label for="confirm_password">Confirm password</label>
+                    <input type="password" id="confirm_password" name="confirm_password" required
+                           autocomplete="new-password" placeholder="Type it once more">
+                    <div class="hint" id="matchHint" aria-live="polite"></div>
+                </div>
+
+                <button type="submit" class="btn" id="setupBtn">Finish setup</button>
+            </form>
+
+        {% elif setup and setup.state == 'done' %}
+            <p class="lede">Your subscription is active and your account is ready.</p>
+            <a href="{{ url_for('auth.login') }}" class="btn" style="display:block;text-align:center;text-decoration:none;">Log in</a>
+
+        {% elif setup and setup.state == 'pending' %}
+            {# Stripe redirects the browser here immediately, but the webhook that
+               creates the account row is asynchronous. Poll until it lands, then
+               swap in the password form without the customer doing anything. #}
+            <div class="pending" id="pendingBox">
+                <div class="spinner" aria-hidden="true"></div>
+                <p><strong>Finalising your subscription…</strong></p>
+                <p class="hint">This usually takes a few seconds. Keep this page open.</p>
+            </div>
+
+        {% else %}
+            <p class="lede">Thank you for subscribing to Screenshot Tracker.</p>
+            <div class="note">
+                <strong>Check your email.</strong><br>
+                We've sent a link to finish setting up your account. If you don't see it
+                within a few minutes, check your spam folder.
+            </div>
+        {% endif %}
+
+        <p class="foot">
+            Questions? Email <a href="mailto:support@screenshottracker.com">support@screenshottracker.com</a>
+        </p>
+    </div>
+
+    {% if setup and setup.state == 'ready' %}
+    <script>
+        (function () {
+            var form = document.getElementById('setupForm');
+            var pw = document.getElementById('password');
+            var cpw = document.getElementById('confirm_password');
+            var pwHint = document.getElementById('pwHint');
+            var matchHint = document.getElementById('matchHint');
+            var btn = document.getElementById('setupBtn');
+            var reveal = document.getElementById('revealBtn');
+
+            reveal.addEventListener('click', function () {
+                var show = pw.type === 'password';
+                pw.type = cpw.type = show ? 'text' : 'password';
+                reveal.textContent = show ? 'Hide' : 'Show';
+                reveal.setAttribute('aria-pressed', String(show));
+            });
+
+            function checkLength() {
+                var ok = pw.value.length >= 8;
+                pw.classList.toggle('error', pw.value.length > 0 && !ok);
+                pwHint.classList.toggle('bad', pw.value.length > 0 && !ok);
+                pwHint.textContent = (pw.value.length > 0 && !ok)
+                    ? 'A little longer — 8 characters minimum.'
+                    : "At least 8 characters. That's the only rule.";
+                return ok;
+            }
+
+            // Only complain once they've actually started the second field, so the
+            // form isn't shouting "doesn't match" at someone mid-keystroke.
+            function checkMatch() {
+                if (!cpw.value) {
+                    matchHint.textContent = '';
+                    matchHint.classList.remove('bad', 'good');
+                    cpw.classList.remove('error', 'ok');
+                    return false;
+                }
+                var same = pw.value === cpw.value;
+                cpw.classList.toggle('error', !same);
+                cpw.classList.toggle('ok', same);
+                matchHint.classList.toggle('bad', !same);
+                matchHint.classList.toggle('good', same);
+                matchHint.textContent = same ? 'Passwords match.' : "These don't match yet.";
+                return same;
+            }
+
+            pw.addEventListener('input', function () { checkLength(); checkMatch(); });
+            cpw.addEventListener('input', checkMatch);
+
+            form.addEventListener('submit', function (e) {
+                if (!checkLength()) {
+                    e.preventDefault();
+                    pw.focus();
+                    return;
+                }
+                if (pw.value !== cpw.value) {
+                    e.preventDefault();
+                    checkMatch();
+                    cpw.focus();
+                    return;
+                }
+                btn.disabled = true;
+                btn.textContent = 'Setting up…';
+            });
+        })();
+    </script>
+    {% endif %}
+
+    {% if setup and setup.state == 'pending' %}
+    <script>
+        (function () {
+            var sessionId = {{ (request.args.get('session_id') or '')|tojson }};
+            var box = document.getElementById('pendingBox');
+            var tries = 0;
+            var MAX_TRIES = 15;   // ~30 seconds at 2s intervals
+
+            function fallback() {
+                box.innerHTML =
+                    '<p><strong>Your payment went through.</strong></p>' +
+                    '<p class="hint">We\\'re still finishing your account setup. ' +
+                    'We\\'ve emailed you a link to set your password — check your inbox ' +
+                    '(and your spam folder) in a few minutes.</p>';
+            }
+
+            function poll() {
+                if (tries++ >= MAX_TRIES) { fallback(); return; }
+
+                fetch('/success/setup_status?session_id=' + encodeURIComponent(sessionId))
+                    .then(function (r) { return r.json(); })
+                    .then(function (data) {
+                        if (data && (data.state === 'ready' || data.state === 'done')) {
+                            // Reload so the server renders the form (and its CSRF token)
+                            // rather than building a form in JavaScript.
+                            window.location.reload();
+                        } else {
+                            setTimeout(poll, 2000);
+                        }
+                    })
+                    .catch(function () { setTimeout(poll, 2000); });
+            }
+
+            if (sessionId) { setTimeout(poll, 2000); } else { fallback(); }
+        })();
+    </script>
+    {% endif %}
+
+    {% if conversion and conversion.fire %}
+    <!-- Google Ads: purchase conversion. Only rendered when the Stripe session
+         was verified as paid; transaction_id dedupes page reloads. -->
+    <script>
+      gtag('set', 'user_data', { "email": "{{ conversion.email }}" });
+      gtag('event', 'conversion', {
+        'send_to': 'AW-18437322624/OpACCMGEifEcEIDvzNdE',
+        'value': {{ conversion.value }},
+        'currency': '{{ conversion.currency }}',
+        'transaction_id': '{{ conversion.txn_id }}'
+      });
+    </script>
+    {% endif %}
+</body>
+</html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    {% include 'partials/gtag.html' %}
+    <title>Payment Successful | Screenshot Tracker</title>
+    <link rel="icon" href="/static/screenshots/favicon.ico" sizes="any">
+    <style>
+        :root {
+            --navy: #010b1b;
+            --orange: #ff9900;
+            --orange-deep: #e07d00;
+            --ink: #1a1a1a;
+            --muted: #5c6672;
+            --line: #e4e7eb;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f6f7f9;
+            color: var(--ink);
+            line-height: 1.6;
+            padding: 30px 18px 60px;
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            margin-bottom: 26px;
+            color: var(--navy);
+            font-weight: 700;
+            font-size: 19px;
+            text-decoration: none;
+        }
+
+        .brand img { width: 34px; height: 34px; border-radius: 7px; display: block; }
+
+        .container {
+            max-width: 540px;
+            margin: 0 auto;
+            background: #fff;
+            padding: 34px 32px 32px;
+            border-radius: 12px;
+            border: 1px solid var(--line);
+            box-shadow: 0 8px 28px rgba(1, 11, 27, 0.07);
+        }
+
+        .success-icon { font-size: 46px; text-align: center; line-height: 1; }
+
+        h1 { color: #1e874b; margin: 12px 0 8px; font-size: 25px; text-align: center; }
+
+        .lede { color: var(--muted); text-align: center; margin-bottom: 26px; }
+
+        .form-group { margin-bottom: 18px; }
+
+        label { display: block; font-weight: 600; font-size: 14.5px; margin-bottom: 6px; color: #33404f; }
+
+        input[type="text"], input[type="email"], input[type="password"] {
+            width: 100%;
+            padding: 12px 14px;
+            border: 1px solid #cfd6de;
+            border-radius: 8px;
+            font-size: 16px;
+            font-family: inherit;
+        }
+
+        input:focus { outline: none; border-color: var(--orange); box-shadow: 0 0 0 3px rgba(255,153,0,0.15); }
+        input[readonly] { background: #f2f4f7; color: var(--muted); }
+
+        .hint { font-size: 13.5px; color: var(--muted); margin-top: 6px; }
+        .hint.bad { color: #b3261e; }
+        .hint.good { color: #14653a; }
+
+        input.error { border-color: #d93025; }
+        input.ok { border-color: #1e874b; }
+
+        /* A reveal toggle alongside the confirm field: confirming catches a
+           mismatch, but only being able to see the password tells you which of
+           the two is the typo. */
+        .label-row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+
+        .reveal {
+            background: none;
+            border: none;
+            padding: 0;
+            font: inherit;
+            font-size: 13.5px;
+            font-weight: 600;
+            color: var(--orange-deep);
+            cursor: pointer;
+            text-decoration: underline;
+            text-underline-offset: 2px;
+        }
+
+        .btn {
+            width: 100%;
+            padding: 14px 20px;
+            background: var(--orange);
+            color: #12100a;
+            border: none;
+            border-radius: 8px;
+            font-size: 17px;
+            font-weight: 700;
+            cursor: pointer;
+            font-family: inherit;
+        }
+
+        .btn:hover { background: #ffad2e; }
+        .btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+        .note {
+            background: #eef4fb;
+            border: 1px solid #d6e4f5;
+            padding: 16px 18px;
+            border-radius: 9px;
+            margin: 20px 0;
+            font-size: 15px;
+            color: #2c3e52;
+        }
+
+        .flash { padding: 12px 15px; border-radius: 8px; margin-bottom: 16px; font-size: 15px; }
+        .flash.error { background: #fdecea; border: 1px solid #f5c6c2; color: #8a1c13; }
+        .flash.success { background: #e8f6ee; border: 1px solid #c3e6d0; color: #14653a; }
+
+        .pending { text-align: center; color: var(--muted); }
+
+        .spinner {
+            width: 26px;
+            height: 26px;
+            margin: 0 auto 14px;
+            border: 3px solid #e2e6eb;
+            border-top-color: var(--orange);
+            border-radius: 50%;
+            animation: spin 0.9s linear infinite;
+        }
+
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        @media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 3s; } }
+
+        .foot { text-align: center; margin-top: 22px; font-size: 14.5px; color: var(--muted); }
+        .foot a { color: var(--orange-deep); }
+    </style>
+</head>
+<body>
+    <a href="/" class="brand">
+        <img src="{{ url_for('static', filename='screenshots/icon-512.png') }}" width="34" height="34" alt="">
+        <span>Screenshot Tracker</span>
+    </a>
+
+    <div class="container">
+        <div class="success-icon">✅</div>
+        <h1>Payment successful</h1>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="flash {{ category }}">{{ message }}</div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+
+        {# Setting the password happens right here rather than only through an
+           emailed link. With free accounts gone this is the only route to access,
+           and the emailed setup token expires in 24 hours - so a customer who pays
+           overnight and misses the email would otherwise be a live charge with no
+           account. The email still goes out as a backup. #}
+        {% if setup and setup.state == 'ready' %}
+            <p class="lede">One last step — choose a password and you're in.</p>
+
+            <form method="POST" action="{{ url_for('auth.complete_registration') }}" id="setupForm">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <input type="hidden" name="token" value="{{ setup.token }}">
+
+                <div class="form-group">
+                    <label for="email">Email address</label>
+                    <input type="email" id="email" name="email" value="{{ setup.email }}" readonly>
+                </div>
+
+                <div class="form-group">
+                    <label for="full_name">Your name</label>
+                    <input type="text" id="full_name" name="full_name" autocomplete="name" placeholder="Jane Author">
+                </div>
+
+                <div class="form-group">
+                    <div class="label-row">
+                        <label for="password">Choose a password</label>
+                        <button type="button" class="reveal" id="revealBtn" aria-pressed="false"
+                                aria-controls="password confirm_password">Show</button>
+                    </div>
+                    <input type="password" id="password" name="password" required minlength="8"
+                           autocomplete="new-password" placeholder="At least 8 characters">
+                    <div class="hint" id="pwHint">At least 8 characters. That's the only rule.</div>
+                </div>
+
+                <div class="form-group">
+                    <label for="confirm_password">Confirm password</label>
+                    <input type="password" id="confirm_password" name="confirm_password" required
+                           autocomplete="new-password" placeholder="Type it once more">
+                    <div class="hint" id="matchHint" aria-live="polite"></div>
+                </div>
+
+                <button type="submit" class="btn" id="setupBtn">Finish setup</button>
+            </form>
+
+        {% elif setup and setup.state == 'done' %}
+            <p class="lede">Your subscription is active and your account is ready.</p>
+            <a href="{{ url_for('auth.login') }}" class="btn" style="display:block;text-align:center;text-decoration:none;">Log in</a>
+
+        {% elif setup and setup.state == 'pending' %}
+            {# Stripe redirects the browser here immediately, but the webhook that
+               creates the account row is asynchronous. Poll until it lands, then
+               swap in the password form without the customer doing anything. #}
+            <div class="pending" id="pendingBox">
+                <div class="spinner" aria-hidden="true"></div>
+                <p><strong>Finalising your subscription…</strong></p>
+                <p class="hint">This usually takes a few seconds. Keep this page open.</p>
+            </div>
+
+        {% else %}
+            <p class="lede">Thank you for subscribing to Screenshot Tracker.</p>
+            <div class="note">
+                <strong>Check your email.</strong><br>
+                We've sent a link to finish setting up your account. If you don't see it
+                within a few minutes, check your spam folder.
+            </div>
+        {% endif %}
+
+        <p class="foot">
+            Questions? Email <a href="mailto:support@screenshottracker.com">support@screenshottracker.com</a>
+        </p>
+    </div>
+
+    {% if setup and setup.state == 'ready' %}
+    <script>
+        (function () {
+            var form = document.getElementById('setupForm');
+            var pw = document.getElementById('password');
+            var cpw = document.getElementById('confirm_password');
+            var pwHint = document.getElementById('pwHint');
+            var matchHint = document.getElementById('matchHint');
+            var btn = document.getElementById('setupBtn');
+            var reveal = document.getElementById('revealBtn');
+
+            reveal.addEventListener('click', function () {
+                var show = pw.type === 'password';
+                pw.type = cpw.type = show ? 'text' : 'password';
+                reveal.textContent = show ? 'Hide' : 'Show';
+                reveal.setAttribute('aria-pressed', String(show));
+            });
+
+            function checkLength() {
+                var ok = pw.value.length >= 8;
+                pw.classList.toggle('error', pw.value.length > 0 && !ok);
+                pwHint.classList.toggle('bad', pw.value.length > 0 && !ok);
+                pwHint.textContent = (pw.value.length > 0 && !ok)
+                    ? 'A little longer — 8 characters minimum.'
+                    : "At least 8 characters. That's the only rule.";
+                return ok;
+            }
+
+            // Only complain once they've actually started the second field, so the
+            // form isn't shouting "doesn't match" at someone mid-keystroke.
+            function checkMatch() {
+                if (!cpw.value) {
+                    matchHint.textContent = '';
+                    matchHint.classList.remove('bad', 'good');
+                    cpw.classList.remove('error', 'ok');
+                    return false;
+                }
+                var same = pw.value === cpw.value;
+                cpw.classList.toggle('error', !same);
+                cpw.classList.toggle('ok', same);
+                matchHint.classList.toggle('bad', !same);
+                matchHint.classList.toggle('good', same);
+                matchHint.textContent = same ? 'Passwords match.' : "These don't match yet.";
+                return same;
+            }
+
+            pw.addEventListener('input', function () { checkLength(); checkMatch(); });
+            cpw.addEventListener('input', checkMatch);
+
+            form.addEventListener('submit', function (e) {
+                if (!checkLength()) {
+                    e.preventDefault();
+                    pw.focus();
+                    return;
+                }
+                if (pw.value !== cpw.value) {
+                    e.preventDefault();
+                    checkMatch();
+                    cpw.focus();
+                    return;
+                }
+                btn.disabled = true;
+                btn.textContent = 'Setting up…';
+            });
+        })();
+    </script>
+    {% endif %}
+
+    {% if setup and setup.state == 'pending' %}
+    <script>
+        (function () {
+            var sessionId = {{ (request.args.get('session_id') or '')|tojson }};
+            var box = document.getElementById('pendingBox');
+            var tries = 0;
+            var MAX_TRIES = 15;   // ~30 seconds at 2s intervals
+
+            function fallback() {
+                box.innerHTML =
+                    '<p><strong>Your payment went through.</strong></p>' +
+                    '<p class="hint">We\\'re still finishing your account setup. ' +
+                    'We\\'ve emailed you a link to set your password — check your inbox ' +
+                    '(and your spam folder) in a few minutes.</p>';
+            }
+
+            function poll() {
+                if (tries++ >= MAX_TRIES) { fallback(); return; }
+
+                fetch('/success/setup_status?session_id=' + encodeURIComponent(sessionId))
+                    .then(function (r) { return r.json(); })
+                    .then(function (data) {
+                        if (data && (data.state === 'ready' || data.state === 'done')) {
+                            // Reload so the server renders the form (and its CSRF token)
+                            // rather than building a form in JavaScript.
+                            window.location.reload();
+                        } else {
+                            setTimeout(poll, 2000);
+                        }
+                    })
+                    .catch(function () { setTimeout(poll, 2000); });
+            }
+
+            if (sessionId) { setTimeout(poll, 2000); } else { fallback(); }
+        })();
+    </script>
+    {% endif %}
+
+    {% if conversion and conversion.fire %}
+    <!-- Google Ads: purchase conversion. Only rendered when the Stripe session
+         was verified as paid; transaction_id dedupes page reloads. -->
+    <script>
+      gtag('set', 'user_data', { "email": "{{ conversion.email }}" });
+      gtag('event', 'conversion', {
+        'send_to': 'AW-18437322624/OpACCMGEifEcEIDvzNdE',
+        'value': {{ conversion.value }},
+        'currency': '{{ conversion.currency }}',
+        'transaction_id': '{{ conversion.txn_id }}'
+      });
+    </script>
+    {% endif %}
+</body>
+</html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    {% include 'partials/gtag.html' %}
+    <title>Payment Successful | Screenshot Tracker</title>
+    <link rel="icon" href="/static/screenshots/favicon.ico" sizes="any">
+    <style>
+        :root {
+            --navy: #010b1b;
+            --orange: #ff9900;
+            --orange-deep: #e07d00;
+            --ink: #1a1a1a;
+            --muted: #5c6672;
+            --line: #e4e7eb;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f6f7f9;
+            color: var(--ink);
+            line-height: 1.6;
+            padding: 30px 18px 60px;
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            margin-bottom: 26px;
+            color: var(--navy);
+            font-weight: 700;
+            font-size: 19px;
+            text-decoration: none;
+        }
+
+        .brand img { width: 34px; height: 34px; border-radius: 7px; display: block; }
+
+        .container {
+            max-width: 540px;
+            margin: 0 auto;
+            background: #fff;
+            padding: 34px 32px 32px;
+            border-radius: 12px;
+            border: 1px solid var(--line);
+            box-shadow: 0 8px 28px rgba(1, 11, 27, 0.07);
+        }
+
+        .success-icon { font-size: 46px; text-align: center; line-height: 1; }
+
+        h1 { color: #1e874b; margin: 12px 0 8px; font-size: 25px; text-align: center; }
+
+        .lede { color: var(--muted); text-align: center; margin-bottom: 26px; }
+
+        .form-group { margin-bottom: 18px; }
+
+        label { display: block; font-weight: 600; font-size: 14.5px; margin-bottom: 6px; color: #33404f; }
+
+        input[type="text"], input[type="email"], input[type="password"] {
+            width: 100%;
+            padding: 12px 14px;
+            border: 1px solid #cfd6de;
+            border-radius: 8px;
+            font-size: 16px;
+            font-family: inherit;
+        }
+
+        input:focus { outline: none; border-color: var(--orange); box-shadow: 0 0 0 3px rgba(255,153,0,0.15); }
+        input[readonly] { background: #f2f4f7; color: var(--muted); }
+
+        .hint { font-size: 13.5px; color: var(--muted); margin-top: 6px; }
+        .hint.bad { color: #b3261e; }
+        .hint.good { color: #14653a; }
+
+        input.error { border-color: #d93025; }
+        input.ok { border-color: #1e874b; }
+
+        /* A reveal toggle alongside the confirm field: confirming catches a
+           mismatch, but only being able to see the password tells you which of
+           the two is the typo. */
+        .label-row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+
+        .reveal {
+            background: none;
+            border: none;
+            padding: 0;
+            font: inherit;
+            font-size: 13.5px;
+            font-weight: 600;
+            color: var(--orange-deep);
+            cursor: pointer;
+            text-decoration: underline;
+            text-underline-offset: 2px;
+        }
+
+        .btn {
+            width: 100%;
+            padding: 14px 20px;
+            background: var(--orange);
+            color: #12100a;
+            border: none;
+            border-radius: 8px;
+            font-size: 17px;
+            font-weight: 700;
+            cursor: pointer;
+            font-family: inherit;
+        }
+
+        .btn:hover { background: #ffad2e; }
+        .btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+        .note {
+            background: #eef4fb;
+            border: 1px solid #d6e4f5;
+            padding: 16px 18px;
+            border-radius: 9px;
+            margin: 20px 0;
+            font-size: 15px;
+            color: #2c3e52;
+        }
+
+        .flash { padding: 12px 15px; border-radius: 8px; margin-bottom: 16px; font-size: 15px; }
+        .flash.error { background: #fdecea; border: 1px solid #f5c6c2; color: #8a1c13; }
+        .flash.success { background: #e8f6ee; border: 1px solid #c3e6d0; color: #14653a; }
+
+        .pending { text-align: center; color: var(--muted); }
+
+        .spinner {
+            width: 26px;
+            height: 26px;
+            margin: 0 auto 14px;
+            border: 3px solid #e2e6eb;
+            border-top-color: var(--orange);
+            border-radius: 50%;
+            animation: spin 0.9s linear infinite;
+        }
+
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        @media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 3s; } }
+
+        .foot { text-align: center; margin-top: 22px; font-size: 14.5px; color: var(--muted); }
+        .foot a { color: var(--orange-deep); }
+    </style>
+</head>
+<body>
+    <a href="/" class="brand">
+        <img src="{{ url_for('static', filename='screenshots/icon-512.png') }}" width="34" height="34" alt="">
+        <span>Screenshot Tracker</span>
+    </a>
+
+    <div class="container">
+        <div class="success-icon">✅</div>
+        <h1>Payment successful</h1>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="flash {{ category }}">{{ message }}</div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+
+        {# Setting the password happens right here rather than only through an
+           emailed link. With free accounts gone this is the only route to access,
+           and the emailed setup token expires in 24 hours - so a customer who pays
+           overnight and misses the email would otherwise be a live charge with no
+           account. The email still goes out as a backup. #}
+        {% if setup and setup.state == 'ready' %}
+            <p class="lede">One last step — choose a password and you're in.</p>
+
+            <form method="POST" action="{{ url_for('auth.complete_registration') }}" id="setupForm">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <input type="hidden" name="token" value="{{ setup.token }}">
+
+                <div class="form-group">
+                    <label for="email">Email address</label>
+                    <input type="email" id="email" name="email" value="{{ setup.email }}" readonly>
+                </div>
+
+                <div class="form-group">
+                    <label for="full_name">Your name</label>
+                    <input type="text" id="full_name" name="full_name" autocomplete="name" placeholder="Jane Author">
+                </div>
+
+                <div class="form-group">
+                    <div class="label-row">
+                        <label for="password">Choose a password</label>
+                        <button type="button" class="reveal" id="revealBtn" aria-pressed="false"
+                                aria-controls="password confirm_password">Show</button>
+                    </div>
+                    <input type="password" id="password" name="password" required minlength="8"
+                           autocomplete="new-password" placeholder="At least 8 characters">
+                    <div class="hint" id="pwHint">At least 8 characters. That's the only rule.</div>
+                </div>
+
+                <div class="form-group">
+                    <label for="confirm_password">Confirm password</label>
+                    <input type="password" id="confirm_password" name="confirm_password" required
+                           autocomplete="new-password" placeholder="Type it once more">
+                    <div class="hint" id="matchHint" aria-live="polite"></div>
+                </div>
+
+                <button type="submit" class="btn" id="setupBtn">Finish setup</button>
+            </form>
+
+        {% elif setup and setup.state == 'done' %}
+            <p class="lede">Your subscription is active and your account is ready.</p>
+            <a href="{{ url_for('auth.login') }}" class="btn" style="display:block;text-align:center;text-decoration:none;">Log in</a>
+
+        {% elif setup and setup.state == 'pending' %}
+            {# Stripe redirects the browser here immediately, but the webhook that
+               creates the account row is asynchronous. Poll until it lands, then
+               swap in the password form without the customer doing anything. #}
+            <div class="pending" id="pendingBox">
+                <div class="spinner" aria-hidden="true"></div>
+                <p><strong>Finalising your subscription…</strong></p>
+                <p class="hint">This usually takes a few seconds. Keep this page open.</p>
+            </div>
+
+        {% else %}
+            <p class="lede">Thank you for subscribing to Screenshot Tracker.</p>
+            <div class="note">
+                <strong>Check your email.</strong><br>
+                We've sent a link to finish setting up your account. If you don't see it
+                within a few minutes, check your spam folder.
+            </div>
+        {% endif %}
+
+        <p class="foot">
+            Questions? Email <a href="mailto:support@screenshottracker.com">support@screenshottracker.com</a>
+        </p>
+    </div>
+
+    {% if setup and setup.state == 'ready' %}
+    <script>
+        (function () {
+            var form = document.getElementById('setupForm');
+            var pw = document.getElementById('password');
+            var cpw = document.getElementById('confirm_password');
+            var pwHint = document.getElementById('pwHint');
+            var matchHint = document.getElementById('matchHint');
+            var btn = document.getElementById('setupBtn');
+            var reveal = document.getElementById('revealBtn');
+
+            reveal.addEventListener('click', function () {
+                var show = pw.type === 'password';
+                pw.type = cpw.type = show ? 'text' : 'password';
+                reveal.textContent = show ? 'Hide' : 'Show';
+                reveal.setAttribute('aria-pressed', String(show));
+            });
+
+            function checkLength() {
+                var ok = pw.value.length >= 8;
+                pw.classList.toggle('error', pw.value.length > 0 && !ok);
+                pwHint.classList.toggle('bad', pw.value.length > 0 && !ok);
+                pwHint.textContent = (pw.value.length > 0 && !ok)
+                    ? 'A little longer — 8 characters minimum.'
+                    : "At least 8 characters. That's the only rule.";
+                return ok;
+            }
+
+            // Only complain once they've actually started the second field, so the
+            // form isn't shouting "doesn't match" at someone mid-keystroke.
+            function checkMatch() {
+                if (!cpw.value) {
+                    matchHint.textContent = '';
+                    matchHint.classList.remove('bad', 'good');
+                    cpw.classList.remove('error', 'ok');
+                    return false;
+                }
+                var same = pw.value === cpw.value;
+                cpw.classList.toggle('error', !same);
+                cpw.classList.toggle('ok', same);
+                matchHint.classList.toggle('bad', !same);
+                matchHint.classList.toggle('good', same);
+                matchHint.textContent = same ? 'Passwords match.' : "These don't match yet.";
+                return same;
+            }
+
+            pw.addEventListener('input', function () { checkLength(); checkMatch(); });
+            cpw.addEventListener('input', checkMatch);
+
+            form.addEventListener('submit', function (e) {
+                if (!checkLength()) {
+                    e.preventDefault();
+                    pw.focus();
+                    return;
+                }
+                if (pw.value !== cpw.value) {
+                    e.preventDefault();
+                    checkMatch();
+                    cpw.focus();
+                    return;
+                }
+                btn.disabled = true;
+                btn.textContent = 'Setting up…';
+            });
+        })();
+    </script>
+    {% endif %}
+
+    {% if setup and setup.state == 'pending' %}
+    <script>
+        (function () {
+            var sessionId = {{ (request.args.get('session_id') or '')|tojson }};
+            var box = document.getElementById('pendingBox');
+            var tries = 0;
+            var MAX_TRIES = 15;   // ~30 seconds at 2s intervals
+
+            function fallback() {
+                box.innerHTML =
+                    '<p><strong>Your payment went through.</strong></p>' +
+                    '<p class="hint">We\\'re still finishing your account setup. ' +
+                    'We\\'ve emailed you a link to set your password — check your inbox ' +
+                    '(and your spam folder) in a few minutes.</p>';
+            }
+
+            function poll() {
+                if (tries++ >= MAX_TRIES) { fallback(); return; }
+
+                fetch('/success/setup_status?session_id=' + encodeURIComponent(sessionId))
+                    .then(function (r) { return r.json(); })
+                    .then(function (data) {
+                        if (data && (data.state === 'ready' || data.state === 'done')) {
+                            // Reload so the server renders the form (and its CSRF token)
+                            // rather than building a form in JavaScript.
+                            window.location.reload();
+                        } else {
+                            setTimeout(poll, 2000);
+                        }
+                    })
+                    .catch(function () { setTimeout(poll, 2000); });
+            }
+
+            if (sessionId) { setTimeout(poll, 2000); } else { fallback(); }
+        })();
+    </script>
+    {% endif %}
+
+    {% if conversion and conversion.fire %}
+    <!-- Google Ads: purchase conversion. Only rendered when the Stripe session
+         was verified as paid; transaction_id dedupes page reloads. -->
+    <script>
+      gtag('set', 'user_data', { "email": "{{ conversion.email }}" });
+      gtag('event', 'conversion', {
+        'send_to': 'AW-18437322624/OpACCMGEifEcEIDvzNdE',
+        'value': {{ conversion.value }},
+        'currency': '{{ conversion.currency }}',
+        'transaction_id': '{{ conversion.txn_id }}'
+      });
+    </script>
+    {% endif %}
+</body>
+</html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    {% include 'partials/gtag.html' %}
+    <title>Payment Successful | Screenshot Tracker</title>
+    <link rel="icon" href="/static/screenshots/favicon.ico" sizes="any">
+    <style>
+        :root {
+            --navy: #010b1b;
+            --orange: #ff9900;
+            --orange-deep: #e07d00;
+            --ink: #1a1a1a;
+            --muted: #5c6672;
+            --line: #e4e7eb;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f6f7f9;
+            color: var(--ink);
+            line-height: 1.6;
+            padding: 30px 18px 60px;
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            margin-bottom: 26px;
+            color: var(--navy);
+            font-weight: 700;
+            font-size: 19px;
+            text-decoration: none;
+        }
+
+        .brand img { width: 34px; height: 34px; border-radius: 7px; display: block; }
+
+        .container {
+            max-width: 540px;
+            margin: 0 auto;
+            background: #fff;
+            padding: 34px 32px 32px;
+            border-radius: 12px;
+            border: 1px solid var(--line);
+            box-shadow: 0 8px 28px rgba(1, 11, 27, 0.07);
+        }
+
+        .success-icon { font-size: 46px; text-align: center; line-height: 1; }
+
+        h1 { color: #1e874b; margin: 12px 0 8px; font-size: 25px; text-align: center; }
+
+        .lede { color: var(--muted); text-align: center; margin-bottom: 26px; }
+
+        .form-group { margin-bottom: 18px; }
+
+        label { display: block; font-weight: 600; font-size: 14.5px; margin-bottom: 6px; color: #33404f; }
+
+        input[type="text"], input[type="email"], input[type="password"] {
+            width: 100%;
+            padding: 12px 14px;
+            border: 1px solid #cfd6de;
+            border-radius: 8px;
+            font-size: 16px;
+            font-family: inherit;
+        }
+
+        input:focus { outline: none; border-color: var(--orange); box-shadow: 0 0 0 3px rgba(255,153,0,0.15); }
+        input[readonly] { background: #f2f4f7; color: var(--muted); }
+
+        .hint { font-size: 13.5px; color: var(--muted); margin-top: 6px; }
+        .hint.bad { color: #b3261e; }
+        .hint.good { color: #14653a; }
+
+        input.error { border-color: #d93025; }
+        input.ok { border-color: #1e874b; }
+
+        /* A reveal toggle alongside the confirm field: confirming catches a
+           mismatch, but only being able to see the password tells you which of
+           the two is the typo. */
+        .label-row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+
+        .reveal {
+            background: none;
+            border: none;
+            padding: 0;
+            font: inherit;
+            font-size: 13.5px;
+            font-weight: 600;
+            color: var(--orange-deep);
+            cursor: pointer;
+            text-decoration: underline;
+            text-underline-offset: 2px;
+        }
+
+        .btn {
+            width: 100%;
+            padding: 14px 20px;
+            background: var(--orange);
+            color: #12100a;
+            border: none;
+            border-radius: 8px;
+            font-size: 17px;
+            font-weight: 700;
+            cursor: pointer;
+            font-family: inherit;
+        }
+
+        .btn:hover { background: #ffad2e; }
+        .btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+        .note {
+            background: #eef4fb;
+            border: 1px solid #d6e4f5;
+            padding: 16px 18px;
+            border-radius: 9px;
+            margin: 20px 0;
+            font-size: 15px;
+            color: #2c3e52;
+        }
+
+        .flash { padding: 12px 15px; border-radius: 8px; margin-bottom: 16px; font-size: 15px; }
+        .flash.error { background: #fdecea; border: 1px solid #f5c6c2; color: #8a1c13; }
+        .flash.success { background: #e8f6ee; border: 1px solid #c3e6d0; color: #14653a; }
+
+        .pending { text-align: center; color: var(--muted); }
+
+        .spinner {
+            width: 26px;
+            height: 26px;
+            margin: 0 auto 14px;
+            border: 3px solid #e2e6eb;
+            border-top-color: var(--orange);
+            border-radius: 50%;
+            animation: spin 0.9s linear infinite;
+        }
+
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        @media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 3s; } }
+
+        .foot { text-align: center; margin-top: 22px; font-size: 14.5px; color: var(--muted); }
+        .foot a { color: var(--orange-deep); }
+    </style>
+</head>
+<body>
+    <a href="/" class="brand">
+        <img src="{{ url_for('static', filename='screenshots/icon-512.png') }}" width="34" height="34" alt="">
+        <span>Screenshot Tracker</span>
+    </a>
+
+    <div class="container">
+        <div class="success-icon">✅</div>
+        <h1>Payment successful</h1>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="flash {{ category }}">{{ message }}</div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+
+        {# Setting the password happens right here rather than only through an
+           emailed link. With free accounts gone this is the only route to access,
+           and the emailed setup token expires in 24 hours - so a customer who pays
+           overnight and misses the email would otherwise be a live charge with no
+           account. The email still goes out as a backup. #}
+        {% if setup and setup.state == 'ready' %}
+            <p class="lede">One last step — choose a password and you're in.</p>
+
+            <form method="POST" action="{{ url_for('auth.complete_registration') }}" id="setupForm">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <input type="hidden" name="token" value="{{ setup.token }}">
+
+                <div class="form-group">
+                    <label for="email">Email address</label>
+                    <input type="email" id="email" name="email" value="{{ setup.email }}" readonly>
+                </div>
+
+                <div class="form-group">
+                    <label for="full_name">Your name</label>
+                    <input type="text" id="full_name" name="full_name" autocomplete="name" placeholder="Jane Author">
+                </div>
+
+                <div class="form-group">
+                    <div class="label-row">
+                        <label for="password">Choose a password</label>
+                        <button type="button" class="reveal" id="revealBtn" aria-pressed="false"
+                                aria-controls="password confirm_password">Show</button>
+                    </div>
+                    <input type="password" id="password" name="password" required minlength="8"
+                           autocomplete="new-password" placeholder="At least 8 characters">
+                    <div class="hint" id="pwHint">At least 8 characters. That's the only rule.</div>
+                </div>
+
+                <div class="form-group">
+                    <label for="confirm_password">Confirm password</label>
+                    <input type="password" id="confirm_password" name="confirm_password" required
+                           autocomplete="new-password" placeholder="Type it once more">
+                    <div class="hint" id="matchHint" aria-live="polite"></div>
+                </div>
+
+                <button type="submit" class="btn" id="setupBtn">Finish setup</button>
+            </form>
+
+        {% elif setup and setup.state == 'done' %}
+            <p class="lede">Your subscription is active and your account is ready.</p>
+            <a href="{{ url_for('auth.login') }}" class="btn" style="display:block;text-align:center;text-decoration:none;">Log in</a>
+
+        {% elif setup and setup.state == 'pending' %}
+            {# Stripe redirects the browser here immediately, but the webhook that
+               creates the account row is asynchronous. Poll until it lands, then
+               swap in the password form without the customer doing anything. #}
+            <div class="pending" id="pendingBox">
+                <div class="spinner" aria-hidden="true"></div>
+                <p><strong>Finalising your subscription…</strong></p>
+                <p class="hint">This usually takes a few seconds. Keep this page open.</p>
+            </div>
+
+        {% else %}
+            <p class="lede">Thank you for subscribing to Screenshot Tracker.</p>
+            <div class="note">
+                <strong>Check your email.</strong><br>
+                We've sent a link to finish setting up your account. If you don't see it
+                within a few minutes, check your spam folder.
+            </div>
+        {% endif %}
+
+        <p class="foot">
+            Questions? Email <a href="mailto:support@screenshottracker.com">support@screenshottracker.com</a>
+        </p>
+    </div>
+
+    {% if setup and setup.state == 'ready' %}
+    <script>
+        (function () {
+            var form = document.getElementById('setupForm');
+            var pw = document.getElementById('password');
+            var cpw = document.getElementById('confirm_password');
+            var pwHint = document.getElementById('pwHint');
+            var matchHint = document.getElementById('matchHint');
+            var btn = document.getElementById('setupBtn');
+            var reveal = document.getElementById('revealBtn');
+
+            reveal.addEventListener('click', function () {
+                var show = pw.type === 'password';
+                pw.type = cpw.type = show ? 'text' : 'password';
+                reveal.textContent = show ? 'Hide' : 'Show';
+                reveal.setAttribute('aria-pressed', String(show));
+            });
+
+            function checkLength() {
+                var ok = pw.value.length >= 8;
+                pw.classList.toggle('error', pw.value.length > 0 && !ok);
+                pwHint.classList.toggle('bad', pw.value.length > 0 && !ok);
+                pwHint.textContent = (pw.value.length > 0 && !ok)
+                    ? 'A little longer — 8 characters minimum.'
+                    : "At least 8 characters. That's the only rule.";
+                return ok;
+            }
+
+            // Only complain once they've actually started the second field, so the
+            // form isn't shouting "doesn't match" at someone mid-keystroke.
+            function checkMatch() {
+                if (!cpw.value) {
+                    matchHint.textContent = '';
+                    matchHint.classList.remove('bad', 'good');
+                    cpw.classList.remove('error', 'ok');
+                    return false;
+                }
+                var same = pw.value === cpw.value;
+                cpw.classList.toggle('error', !same);
+                cpw.classList.toggle('ok', same);
+                matchHint.classList.toggle('bad', !same);
+                matchHint.classList.toggle('good', same);
+                matchHint.textContent = same ? 'Passwords match.' : "These don't match yet.";
+                return same;
+            }
+
+            pw.addEventListener('input', function () { checkLength(); checkMatch(); });
+            cpw.addEventListener('input', checkMatch);
+
+            form.addEventListener('submit', function (e) {
+                if (!checkLength()) {
+                    e.preventDefault();
+                    pw.focus();
+                    return;
+                }
+                if (pw.value !== cpw.value) {
+                    e.preventDefault();
+                    checkMatch();
+                    cpw.focus();
+                    return;
+                }
+                btn.disabled = true;
+                btn.textContent = 'Setting up…';
+            });
+        })();
+    </script>
+    {% endif %}
+
+    {% if setup and setup.state == 'pending' %}
+    <script>
+        (function () {
+            var sessionId = {{ (request.args.get('session_id') or '')|tojson }};
+            var box = document.getElementById('pendingBox');
+            var tries = 0;
+            var MAX_TRIES = 15;   // ~30 seconds at 2s intervals
+
+            function fallback() {
+                box.innerHTML =
+                    '<p><strong>Your payment went through.</strong></p>' +
+                    '<p class="hint">We\\'re still finishing your account setup. ' +
+                    'We\\'ve emailed you a link to set your password — check your inbox ' +
+                    '(and your spam folder) in a few minutes.</p>';
+            }
+
+            function poll() {
+                if (tries++ >= MAX_TRIES) { fallback(); return; }
+
+                fetch('/success/setup_status?session_id=' + encodeURIComponent(sessionId))
+                    .then(function (r) { return r.json(); })
+                    .then(function (data) {
+                        if (data && (data.state === 'ready' || data.state === 'done')) {
+                            // Reload so the server renders the form (and its CSRF token)
+                            // rather than building a form in JavaScript.
+                            window.location.reload();
+                        } else {
+                            setTimeout(poll, 2000);
+                        }
+                    })
+                    .catch(function () { setTimeout(poll, 2000); });
+            }
+
+            if (sessionId) { setTimeout(poll, 2000); } else { fallback(); }
+        })();
+    </script>
+    {% endif %}
+
+    {% if conversion and conversion.fire %}
+    <!-- Google Ads: purchase conversion. Only rendered when the Stripe session
+         was verified as paid; transaction_id dedupes page reloads. -->
+    <script>
+      gtag('set', 'user_data', { "email": "{{ conversion.email }}" });
+      gtag('event', 'conversion', {
+        'send_to': 'AW-18437322624/OpACCMGEifEcEIDvzNdE',
+        'value': {{ conversion.value }},
+        'currency': '{{ conversion.currency }}',
+        'transaction_id': '{{ conversion.txn_id }}'
+      });
+    </script>
+    {% endif %}
+</body>
+</html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    {% include 'partials/gtag.html' %}
+    <title>Payment Successful | Screenshot Tracker</title>
+    <link rel="icon" href="/static/screenshots/favicon.ico" sizes="any">
+    <style>
+        :root {
+            --navy: #010b1b;
+            --orange: #ff9900;
+            --orange-deep: #e07d00;
+            --ink: #1a1a1a;
+            --muted: #5c6672;
+            --line: #e4e7eb;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f6f7f9;
+            color: var(--ink);
+            line-height: 1.6;
+            padding: 30px 18px 60px;
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            margin-bottom: 26px;
+            color: var(--navy);
+            font-weight: 700;
+            font-size: 19px;
+            text-decoration: none;
+        }
+
+        .brand img { width: 34px; height: 34px; border-radius: 7px; display: block; }
+
+        .container {
+            max-width: 540px;
+            margin: 0 auto;
+            background: #fff;
+            padding: 34px 32px 32px;
+            border-radius: 12px;
+            border: 1px solid var(--line);
+            box-shadow: 0 8px 28px rgba(1, 11, 27, 0.07);
+        }
+
+        .success-icon { font-size: 46px; text-align: center; line-height: 1; }
+
+        h1 { color: #1e874b; margin: 12px 0 8px; font-size: 25px; text-align: center; }
+
+        .lede { color: var(--muted); text-align: center; margin-bottom: 26px; }
+
+        .form-group { margin-bottom: 18px; }
+
+        label { display: block; font-weight: 600; font-size: 14.5px; margin-bottom: 6px; color: #33404f; }
+
+        input[type="text"], input[type="email"], input[type="password"] {
+            width: 100%;
+            padding: 12px 14px;
+            border: 1px solid #cfd6de;
+            border-radius: 8px;
+            font-size: 16px;
+            font-family: inherit;
+        }
+
+        input:focus { outline: none; border-color: var(--orange); box-shadow: 0 0 0 3px rgba(255,153,0,0.15); }
+        input[readonly] { background: #f2f4f7; color: var(--muted); }
+
+        .hint { font-size: 13.5px; color: var(--muted); margin-top: 6px; }
+        .hint.bad { color: #b3261e; }
+        .hint.good { color: #14653a; }
+
+        input.error { border-color: #d93025; }
+        input.ok { border-color: #1e874b; }
+
+        /* A reveal toggle alongside the confirm field: confirming catches a
+           mismatch, but only being able to see the password tells you which of
+           the two is the typo. */
+        .label-row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+
+        .reveal {
+            background: none;
+            border: none;
+            padding: 0;
+            font: inherit;
+            font-size: 13.5px;
+            font-weight: 600;
+            color: var(--orange-deep);
+            cursor: pointer;
+            text-decoration: underline;
+            text-underline-offset: 2px;
+        }
+
+        .btn {
+            width: 100%;
+            padding: 14px 20px;
+            background: var(--orange);
+            color: #12100a;
+            border: none;
+            border-radius: 8px;
+            font-size: 17px;
+            font-weight: 700;
+            cursor: pointer;
+            font-family: inherit;
+        }
+
+        .btn:hover { background: #ffad2e; }
+        .btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+        .note {
+            background: #eef4fb;
+            border: 1px solid #d6e4f5;
+            padding: 16px 18px;
+            border-radius: 9px;
+            margin: 20px 0;
+            font-size: 15px;
+            color: #2c3e52;
+        }
+
+        .flash { padding: 12px 15px; border-radius: 8px; margin-bottom: 16px; font-size: 15px; }
+        .flash.error { background: #fdecea; border: 1px solid #f5c6c2; color: #8a1c13; }
+        .flash.success { background: #e8f6ee; border: 1px solid #c3e6d0; color: #14653a; }
+
+        .pending { text-align: center; color: var(--muted); }
+
+        .spinner {
+            width: 26px;
+            height: 26px;
+            margin: 0 auto 14px;
+            border: 3px solid #e2e6eb;
+            border-top-color: var(--orange);
+            border-radius: 50%;
+            animation: spin 0.9s linear infinite;
+        }
+
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        @media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 3s; } }
+
+        .foot { text-align: center; margin-top: 22px; font-size: 14.5px; color: var(--muted); }
+        .foot a { color: var(--orange-deep); }
+    </style>
+</head>
+<body>
+    <a href="/" class="brand">
+        <img src="{{ url_for('static', filename='screenshots/icon-512.png') }}" width="34" height="34" alt="">
+        <span>Screenshot Tracker</span>
+    </a>
+
+    <div class="container">
+        <div class="success-icon">✅</div>
+        <h1>Payment successful</h1>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="flash {{ category }}">{{ message }}</div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+
+        {# Setting the password happens right here rather than only through an
+           emailed link. With free accounts gone this is the only route to access,
+           and the emailed setup token expires in 24 hours - so a customer who pays
+           overnight and misses the email would otherwise be a live charge with no
+           account. The email still goes out as a backup. #}
+        {% if setup and setup.state == 'ready' %}
+            <p class="lede">One last step — choose a password and you're in.</p>
+
+            <form method="POST" action="{{ url_for('auth.complete_registration') }}" id="setupForm">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <input type="hidden" name="token" value="{{ setup.token }}">
+
+                <div class="form-group">
+                    <label for="email">Email address</label>
+                    <input type="email" id="email" name="email" value="{{ setup.email }}" readonly>
+                </div>
+
+                <div class="form-group">
+                    <label for="full_name">Your name</label>
+                    <input type="text" id="full_name" name="full_name" autocomplete="name" placeholder="Jane Author">
+                </div>
+
+                <div class="form-group">
+                    <div class="label-row">
+                        <label for="password">Choose a password</label>
+                        <button type="button" class="reveal" id="revealBtn" aria-pressed="false"
+                                aria-controls="password confirm_password">Show</button>
+                    </div>
+                    <input type="password" id="password" name="password" required minlength="8"
+                           autocomplete="new-password" placeholder="At least 8 characters">
+                    <div class="hint" id="pwHint">At least 8 characters. That's the only rule.</div>
+                </div>
+
+                <div class="form-group">
+                    <label for="confirm_password">Confirm password</label>
+                    <input type="password" id="confirm_password" name="confirm_password" required
+                           autocomplete="new-password" placeholder="Type it once more">
+                    <div class="hint" id="matchHint" aria-live="polite"></div>
+                </div>
+
+                <button type="submit" class="btn" id="setupBtn">Finish setup</button>
+            </form>
+
+        {% elif setup and setup.state == 'done' %}
+            <p class="lede">Your subscription is active and your account is ready.</p>
+            <a href="{{ url_for('auth.login') }}" class="btn" style="display:block;text-align:center;text-decoration:none;">Log in</a>
+
+        {% elif setup and setup.state == 'pending' %}
+            {# Stripe redirects the browser here immediately, but the webhook that
+               creates the account row is asynchronous. Poll until it lands, then
+               swap in the password form without the customer doing anything. #}
+            <div class="pending" id="pendingBox">
+                <div class="spinner" aria-hidden="true"></div>
+                <p><strong>Finalising your subscription…</strong></p>
+                <p class="hint">This usually takes a few seconds. Keep this page open.</p>
+            </div>
+
+        {% else %}
+            <p class="lede">Thank you for subscribing to Screenshot Tracker.</p>
+            <div class="note">
+                <strong>Check your email.</strong><br>
+                We've sent a link to finish setting up your account. If you don't see it
+                within a few minutes, check your spam folder.
+            </div>
+        {% endif %}
+
+        <p class="foot">
+            Questions? Email <a href="mailto:support@screenshottracker.com">support@screenshottracker.com</a>
+        </p>
+    </div>
+
+    {% if setup and setup.state == 'ready' %}
+    <script>
+        (function () {
+            var form = document.getElementById('setupForm');
+            var pw = document.getElementById('password');
+            var cpw = document.getElementById('confirm_password');
+            var pwHint = document.getElementById('pwHint');
+            var matchHint = document.getElementById('matchHint');
+            var btn = document.getElementById('setupBtn');
+            var reveal = document.getElementById('revealBtn');
+
+            reveal.addEventListener('click', function () {
+                var show = pw.type === 'password';
+                pw.type = cpw.type = show ? 'text' : 'password';
+                reveal.textContent = show ? 'Hide' : 'Show';
+                reveal.setAttribute('aria-pressed', String(show));
+            });
+
+            function checkLength() {
+                var ok = pw.value.length >= 8;
+                pw.classList.toggle('error', pw.value.length > 0 && !ok);
+                pwHint.classList.toggle('bad', pw.value.length > 0 && !ok);
+                pwHint.textContent = (pw.value.length > 0 && !ok)
+                    ? 'A little longer — 8 characters minimum.'
+                    : "At least 8 characters. That's the only rule.";
+                return ok;
+            }
+
+            // Only complain once they've actually started the second field, so the
+            // form isn't shouting "doesn't match" at someone mid-keystroke.
+            function checkMatch() {
+                if (!cpw.value) {
+                    matchHint.textContent = '';
+                    matchHint.classList.remove('bad', 'good');
+                    cpw.classList.remove('error', 'ok');
+                    return false;
+                }
+                var same = pw.value === cpw.value;
+                cpw.classList.toggle('error', !same);
+                cpw.classList.toggle('ok', same);
+                matchHint.classList.toggle('bad', !same);
+                matchHint.classList.toggle('good', same);
+                matchHint.textContent = same ? 'Passwords match.' : "These don't match yet.";
+                return same;
+            }
+
+            pw.addEventListener('input', function () { checkLength(); checkMatch(); });
+            cpw.addEventListener('input', checkMatch);
+
+            form.addEventListener('submit', function (e) {
+                if (!checkLength()) {
+                    e.preventDefault();
+                    pw.focus();
+                    return;
+                }
+                if (pw.value !== cpw.value) {
+                    e.preventDefault();
+                    checkMatch();
+                    cpw.focus();
+                    return;
+                }
+                btn.disabled = true;
+                btn.textContent = 'Setting up…';
+            });
+        })();
+    </script>
+    {% endif %}
+
+    {% if setup and setup.state == 'pending' %}
+    <script>
+        (function () {
+            var sessionId = {{ (request.args.get('session_id') or '')|tojson }};
+            var box = document.getElementById('pendingBox');
+            var tries = 0;
+            var MAX_TRIES = 15;   // ~30 seconds at 2s intervals
+
+            function fallback() {
+                box.innerHTML =
+                    '<p><strong>Your payment went through.</strong></p>' +
+                    '<p class="hint">We\\'re still finishing your account setup. ' +
+                    'We\\'ve emailed you a link to set your password — check your inbox ' +
+                    '(and your spam folder) in a few minutes.</p>';
+            }
+
+            function poll() {
+                if (tries++ >= MAX_TRIES) { fallback(); return; }
+
+                fetch('/success/setup_status?session_id=' + encodeURIComponent(sessionId))
+                    .then(function (r) { return r.json(); })
+                    .then(function (data) {
+                        if (data && (data.state === 'ready' || data.state === 'done')) {
+                            // Reload so the server renders the form (and its CSRF token)
+                            // rather than building a form in JavaScript.
+                            window.location.reload();
+                        } else {
+                            setTimeout(poll, 2000);
+                        }
+                    })
+                    .catch(function () { setTimeout(poll, 2000); });
+            }
+
+            if (sessionId) { setTimeout(poll, 2000); } else { fallback(); }
+        })();
+    </script>
+    {% endif %}
+
+    {% if conversion and conversion.fire %}
+    <!-- Google Ads: purchase conversion. Only rendered when the Stripe session
+         was verified as paid; transaction_id dedupes page reloads. -->
+    <script>
+      gtag('set', 'user_data', { "email": "{{ conversion.email }}" });
+      gtag('event', 'conversion', {
+        'send_to': 'AW-18437322624/OpACCMGEifEcEIDvzNdE',
+        'value': {{ conversion.value }},
+        'currency': '{{ conversion.currency }}',
+        'transaction_id': '{{ conversion.txn_id }}'
+      });
+    </script>
+    {% endif %}
+</body>
+</html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    {% include 'partials/gtag.html' %}
+    <title>Payment Successful | Screenshot Tracker</title>
+    <link rel="icon" href="/static/screenshots/favicon.ico" sizes="any">
+    <style>
+        :root {
+            --navy: #010b1b;
+            --orange: #ff9900;
+            --orange-deep: #e07d00;
+            --ink: #1a1a1a;
+            --muted: #5c6672;
+            --line: #e4e7eb;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f6f7f9;
+            color: var(--ink);
+            line-height: 1.6;
+            padding: 30px 18px 60px;
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            margin-bottom: 26px;
+            color: var(--navy);
+            font-weight: 700;
+            font-size: 19px;
+            text-decoration: none;
+        }
+
+        .brand img { width: 34px; height: 34px; border-radius: 7px; display: block; }
+
+        .container {
+            max-width: 540px;
+            margin: 0 auto;
+            background: #fff;
+            padding: 34px 32px 32px;
+            border-radius: 12px;
+            border: 1px solid var(--line);
+            box-shadow: 0 8px 28px rgba(1, 11, 27, 0.07);
+        }
+
+        .success-icon { font-size: 46px; text-align: center; line-height: 1; }
+
+        h1 { color: #1e874b; margin: 12px 0 8px; font-size: 25px; text-align: center; }
+
+        .lede { color: var(--muted); text-align: center; margin-bottom: 26px; }
+
+        .form-group { margin-bottom: 18px; }
+
+        label { display: block; font-weight: 600; font-size: 14.5px; margin-bottom: 6px; color: #33404f; }
+
+        input[type="text"], input[type="email"], input[type="password"] {
+            width: 100%;
+            padding: 12px 14px;
+            border: 1px solid #cfd6de;
+            border-radius: 8px;
+            font-size: 16px;
+            font-family: inherit;
+        }
+
+        input:focus { outline: none; border-color: var(--orange); box-shadow: 0 0 0 3px rgba(255,153,0,0.15); }
+        input[readonly] { background: #f2f4f7; color: var(--muted); }
+
+        .hint { font-size: 13.5px; color: var(--muted); margin-top: 6px; }
+        .hint.bad { color: #b3261e; }
+        .hint.good { color: #14653a; }
+
+        input.error { border-color: #d93025; }
+        input.ok { border-color: #1e874b; }
+
+        /* A reveal toggle alongside the confirm field: confirming catches a
+           mismatch, but only being able to see the password tells you which of
+           the two is the typo. */
+        .label-row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+
+        .reveal {
+            background: none;
+            border: none;
+            padding: 0;
+            font: inherit;
+            font-size: 13.5px;
+            font-weight: 600;
+            color: var(--orange-deep);
+            cursor: pointer;
+            text-decoration: underline;
+            text-underline-offset: 2px;
+        }
+
+        .btn {
+            width: 100%;
+            padding: 14px 20px;
+            background: var(--orange);
+            color: #12100a;
+            border: none;
+            border-radius: 8px;
+            font-size: 17px;
+            font-weight: 700;
+            cursor: pointer;
+            font-family: inherit;
+        }
+
+        .btn:hover { background: #ffad2e; }
+        .btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+        .note {
+            background: #eef4fb;
+            border: 1px solid #d6e4f5;
+            padding: 16px 18px;
+            border-radius: 9px;
+            margin: 20px 0;
+            font-size: 15px;
+            color: #2c3e52;
+        }
+
+        .flash { padding: 12px 15px; border-radius: 8px; margin-bottom: 16px; font-size: 15px; }
+        .flash.error { background: #fdecea; border: 1px solid #f5c6c2; color: #8a1c13; }
+        .flash.success { background: #e8f6ee; border: 1px solid #c3e6d0; color: #14653a; }
+
+        .pending { text-align: center; color: var(--muted); }
+
+        .spinner {
+            width: 26px;
+            height: 26px;
+            margin: 0 auto 14px;
+            border: 3px solid #e2e6eb;
+            border-top-color: var(--orange);
+            border-radius: 50%;
+            animation: spin 0.9s linear infinite;
+        }
+
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        @media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 3s; } }
+
+        .foot { text-align: center; margin-top: 22px; font-size: 14.5px; color: var(--muted); }
+        .foot a { color: var(--orange-deep); }
+    </style>
+</head>
+<body>
+    <a href="/" class="brand">
+        <img src="{{ url_for('static', filename='screenshots/icon-512.png') }}" width="34" height="34" alt="">
+        <span>Screenshot Tracker</span>
+    </a>
+
+    <div class="container">
+        <div class="success-icon">✅</div>
+        <h1>Payment successful</h1>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="flash {{ category }}">{{ message }}</div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+
+        {# Setting the password happens right here rather than only through an
+           emailed link. With free accounts gone this is the only route to access,
+           and the emailed setup token expires in 24 hours - so a customer who pays
+           overnight and misses the email would otherwise be a live charge with no
+           account. The email still goes out as a backup. #}
+        {% if setup and setup.state == 'ready' %}
+            <p class="lede">One last step — choose a password and you're in.</p>
+
+            <form method="POST" action="{{ url_for('auth.complete_registration') }}" id="setupForm">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <input type="hidden" name="token" value="{{ setup.token }}">
+
+                <div class="form-group">
+                    <label for="email">Email address</label>
+                    <input type="email" id="email" name="email" value="{{ setup.email }}" readonly>
+                </div>
+
+                <div class="form-group">
+                    <label for="full_name">Your name</label>
+                    <input type="text" id="full_name" name="full_name" autocomplete="name" placeholder="Jane Author">
+                </div>
+
+                <div class="form-group">
+                    <div class="label-row">
+                        <label for="password">Choose a password</label>
+                        <button type="button" class="reveal" id="revealBtn" aria-pressed="false"
+                                aria-controls="password confirm_password">Show</button>
+                    </div>
+                    <input type="password" id="password" name="password" required minlength="8"
+                           autocomplete="new-password" placeholder="At least 8 characters">
+                    <div class="hint" id="pwHint">At least 8 characters. That's the only rule.</div>
+                </div>
+
+                <div class="form-group">
+                    <label for="confirm_password">Confirm password</label>
+                    <input type="password" id="confirm_password" name="confirm_password" required
+                           autocomplete="new-password" placeholder="Type it once more">
+                    <div class="hint" id="matchHint" aria-live="polite"></div>
+                </div>
+
+                <button type="submit" class="btn" id="setupBtn">Finish setup</button>
+            </form>
+
+        {% elif setup and setup.state == 'done' %}
+            <p class="lede">Your subscription is active and your account is ready.</p>
+            <a href="{{ url_for('auth.login') }}" class="btn" style="display:block;text-align:center;text-decoration:none;">Log in</a>
+
+        {% elif setup and setup.state == 'pending' %}
+            {# Stripe redirects the browser here immediately, but the webhook that
+               creates the account row is asynchronous. Poll until it lands, then
+               swap in the password form without the customer doing anything. #}
+            <div class="pending" id="pendingBox">
+                <div class="spinner" aria-hidden="true"></div>
+                <p><strong>Finalising your subscription…</strong></p>
+                <p class="hint">This usually takes a few seconds. Keep this page open.</p>
+            </div>
+
+        {% else %}
+            <p class="lede">Thank you for subscribing to Screenshot Tracker.</p>
+            <div class="note">
+                <strong>Check your email.</strong><br>
+                We've sent a link to finish setting up your account. If you don't see it
+                within a few minutes, check your spam folder.
+            </div>
+        {% endif %}
+
+        <p class="foot">
+            Questions? Email <a href="mailto:support@screenshottracker.com">support@screenshottracker.com</a>
+        </p>
+    </div>
+
+    {% if setup and setup.state == 'ready' %}
+    <script>
+        (function () {
+            var form = document.getElementById('setupForm');
+            var pw = document.getElementById('password');
+            var cpw = document.getElementById('confirm_password');
+            var pwHint = document.getElementById('pwHint');
+            var matchHint = document.getElementById('matchHint');
+            var btn = document.getElementById('setupBtn');
+            var reveal = document.getElementById('revealBtn');
+
+            reveal.addEventListener('click', function () {
+                var show = pw.type === 'password';
+                pw.type = cpw.type = show ? 'text' : 'password';
+                reveal.textContent = show ? 'Hide' : 'Show';
+                reveal.setAttribute('aria-pressed', String(show));
+            });
+
+            function checkLength() {
+                var ok = pw.value.length >= 8;
+                pw.classList.toggle('error', pw.value.length > 0 && !ok);
+                pwHint.classList.toggle('bad', pw.value.length > 0 && !ok);
+                pwHint.textContent = (pw.value.length > 0 && !ok)
+                    ? 'A little longer — 8 characters minimum.'
+                    : "At least 8 characters. That's the only rule.";
+                return ok;
+            }
+
+            // Only complain once they've actually started the second field, so the
+            // form isn't shouting "doesn't match" at someone mid-keystroke.
+            function checkMatch() {
+                if (!cpw.value) {
+                    matchHint.textContent = '';
+                    matchHint.classList.remove('bad', 'good');
+                    cpw.classList.remove('error', 'ok');
+                    return false;
+                }
+                var same = pw.value === cpw.value;
+                cpw.classList.toggle('error', !same);
+                cpw.classList.toggle('ok', same);
+                matchHint.classList.toggle('bad', !same);
+                matchHint.classList.toggle('good', same);
+                matchHint.textContent = same ? 'Passwords match.' : "These don't match yet.";
+                return same;
+            }
+
+            pw.addEventListener('input', function () { checkLength(); checkMatch(); });
+            cpw.addEventListener('input', checkMatch);
+
+            form.addEventListener('submit', function (e) {
+                if (!checkLength()) {
+                    e.preventDefault();
+                    pw.focus();
+                    return;
+                }
+                if (pw.value !== cpw.value) {
+                    e.preventDefault();
+                    checkMatch();
+                    cpw.focus();
+                    return;
+                }
+                btn.disabled = true;
+                btn.textContent = 'Setting up…';
+            });
+        })();
+    </script>
+    {% endif %}
+
+    {% if setup and setup.state == 'pending' %}
+    <script>
+        (function () {
+            var sessionId = {{ (request.args.get('session_id') or '')|tojson }};
+            var box = document.getElementById('pendingBox');
+            var tries = 0;
+            var MAX_TRIES = 15;   // ~30 seconds at 2s intervals
+
+            function fallback() {
+                box.innerHTML =
+                    '<p><strong>Your payment went through.</strong></p>' +
+                    '<p class="hint">We\\'re still finishing your account setup. ' +
+                    'We\\'ve emailed you a link to set your password — check your inbox ' +
+                    '(and your spam folder) in a few minutes.</p>';
+            }
+
+            function poll() {
+                if (tries++ >= MAX_TRIES) { fallback(); return; }
+
+                fetch('/success/setup_status?session_id=' + encodeURIComponent(sessionId))
+                    .then(function (r) { return r.json(); })
+                    .then(function (data) {
+                        if (data && (data.state === 'ready' || data.state === 'done')) {
+                            // Reload so the server renders the form (and its CSRF token)
+                            // rather than building a form in JavaScript.
+                            window.location.reload();
+                        } else {
+                            setTimeout(poll, 2000);
+                        }
+                    })
+                    .catch(function () { setTimeout(poll, 2000); });
+            }
+
+            if (sessionId) { setTimeout(poll, 2000); } else { fallback(); }
+        })();
+    </script>
+    {% endif %}
+
+    {% if conversion and conversion.fire %}
+    <!-- Google Ads: purchase conversion. Only rendered when the Stripe session
+         was verified as paid; transaction_id dedupes page reloads. -->
+    <script>
+      gtag('set', 'user_data', { "email": "{{ conversion.email }}" });
+      gtag('event', 'conversion', {
+        'send_to': 'AW-18437322624/OpACCMGEifEcEIDvzNdE',
+        'value': {{ conversion.value }},
+        'currency': '{{ conversion.currency }}',
+        'transaction_id': '{{ conversion.txn_id }}'
+      });
+    </script>
+    {% endif %}
+</body>
+</html>

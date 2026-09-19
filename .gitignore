@@ -164,3 +164,4 @@ uv.lock
 # Local SQLite databases
 *.db
 amazon_monitor.db
+captures/

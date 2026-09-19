@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    {% include 'partials/gtag.html' %}
+    <title>Blog – Screenshot Tracker</title>
+    <meta name="description" content="Straight answers about Amazon bestseller and #1 New Release badges, from a service that watches them every hour.">
+    <link rel="canonical" href="https://screenshottracker.com/blog">
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="Screenshot Tracker">
+    <meta property="og:title" content="Screenshot Tracker Blog">
+    <meta property="og:description" content="Straight answers about Amazon bestseller badges, from a service that watches them every hour.">
+    <meta property="og:image" content="https://screenshottracker.com/static/screenshots/og-card.png">
+    <link rel="icon" href="/static/screenshots/favicon.ico" sizes="any">
+    <link rel="icon" type="image/png" sizes="32x32" href="/static/screenshots/favicon-32.png">
+    <link rel="apple-touch-icon" href="/static/screenshots/apple-touch-icon.png">
+    <style>
+        :root { --navy: #010b1b; --navy-mid: #12263f; --orange: #ff9900; --orange-deep: #e07d00; --ink: #1a1a1a; --muted: #5c6672; --line: #e4e7eb; --wash: #f6f7f9; }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif; line-height: 1.6; color: var(--ink); background: #fff; overflow-x: hidden; }
+        img { max-width: 100%; height: auto; }
+
+        nav { background-color: var(--navy); padding: 10px 0; position: fixed; width: 100%; top: 0; z-index: 1000; box-shadow: 0 1px 0 rgba(255,255,255,0.06); }
+        .nav-container { max-width: 1120px; margin: 0 auto; padding: 0 20px; display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+        .logo { color: #fff; font-size: 19px; font-weight: 700; letter-spacing: -0.01em; text-decoration: none; display: flex; align-items: center; gap: 10px; white-space: nowrap; min-width: 0; }
+        .logo img { width: 34px; height: 34px; border-radius: 7px; display: block; flex: 0 0 auto; }
+        .nav-links { display: flex; gap: 10px; align-items: center; flex: 0 0 auto; }
+        .nav-links a { color: #fff; text-decoration: none; padding: 8px 16px; border-radius: 6px; font-size: 15px; }
+        .nav-links .btn-login:hover { background-color: rgba(255,255,255,0.1); }
+        .nav-links .btn-plans { background-color: var(--orange); color: #12100a; font-weight: 700; }
+        .nav-links .btn-plans:hover { background-color: #ffad2e; }
+
+        .page-head { background: linear-gradient(180deg, var(--navy-mid) 0%, var(--navy) 100%); color: #fff; padding: 104px 20px 40px; }
+        .page-head-inner { max-width: 760px; margin: 0 auto; }
+        .page-head h1 { font-size: 36px; line-height: 1.15; letter-spacing: -0.02em; margin-bottom: 10px; }
+        .page-head p { color: #9fb0c4; font-size: 17px; }
+
+        .posts { max-width: 760px; margin: 0 auto; padding: 36px 20px 60px; }
+        .post-card { display: block; text-decoration: none; color: inherit; border: 1px solid var(--line); border-radius: 12px; padding: 22px 24px; margin-bottom: 18px; transition: border-color 0.2s, box-shadow 0.2s; }
+        .post-card:hover { border-color: var(--orange); box-shadow: 0 4px 18px rgba(1,11,27,0.08); }
+        .post-card h2 { color: var(--navy); font-size: 22px; line-height: 1.3; margin-bottom: 8px; }
+        .post-card p { color: #48535f; margin-bottom: 10px; }
+        .post-card time { color: var(--muted); font-size: 14.5px; }
+
+        .contact-section { background-color: var(--navy); color: #fff; padding: 44px 20px; text-align: center; }
+        .contact-section h2 { color: #fff; margin-bottom: 12px; font-size: 22px; }
+        .contact-section p { color: #9fb0c4; margin-bottom: 12px; }
+        .contact-section a { color: var(--orange); text-decoration: none; font-size: 19px; }
+        footer { background-color: var(--navy); color: #fff; padding: 0 20px 36px; text-align: center; }
+        .footer-links { display: flex; justify-content: center; gap: 26px; margin-bottom: 16px; flex-wrap: wrap; }
+        .footer-links a { color: #fff; text-decoration: none; opacity: 0.75; }
+        .footer-links a:hover { opacity: 1; }
+
+        @media (max-width: 760px) {
+            .page-head { padding: 84px 18px 30px; }
+            .page-head h1 { font-size: 28px; }
+            .nav-links a { padding: 8px 12px; font-size: 14px; }
+        }
+    </style>
+</head>
+<body>
+    <nav id="siteNav">
+        <div class="nav-container">
+            <a href="/" class="logo">
+                <img src="{{ url_for('static', filename='screenshots/icon-512.png') }}" width="34" height="34" alt="">
+                <span>Screenshot Tracker</span>
+            </a>
+            <div class="nav-links">
+                <a href="{{ url_for('auth.login') }}" class="btn-login">Log in</a>
+                <a href="/#pricing" class="btn-plans">See plans</a>
+            </div>
+        </div>
+    </nav>
+
+    <header class="page-head">
+        <div class="page-head-inner">
+            <h1>Amazon badges, explained</h1>
+            <p>Straight answers about bestseller and #1 New Release badges, from a service that watches them every hour.</p>
+        </div>
+    </header>
+
+    <main class="posts">
+        {% for post in posts %}
+        <a class="post-card" href="/blog/{{ post.slug }}">
+            <h2>{{ post.title }}</h2>
+            <p>{{ post.summary }}</p>
+            <time datetime="{{ post.published }}">{{ post.published }}</time>
+        </a>
+        {% endfor %}
+    </main>
+
+    <div class="contact-section">
+        <h2>Need help?</h2>
+        <p>We're here to help you track your Amazon success</p>
+        <a href="mailto:support@screenshottracker.com">support@screenshottracker.com</a>
+    </div>
+    <footer>
+        <div class="footer-links">
+            <a href="/">Home</a>
+            <a href="/terms">Terms of Service</a>
+            <a href="/privacy">Privacy Policy</a>
+            <a href="/refunds">Refund Policy</a>
+        </div>
+        <p style="opacity: 0.6;">© 2026 Screenshot Tracker. Not affiliated with Amazon.</p>
+    </footer>
+</body>
+</html>

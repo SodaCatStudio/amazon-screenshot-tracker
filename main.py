@@ -6711,6 +6711,80 @@ def refunds():
     """Refund Policy page"""
     return render_template('refunds.html')
 
+
+# ---------------------------------------------------------------------------
+# Blog (SEO pages). Each post is a standalone template under templates/blog/,
+# registered here so the slug is validated against an allow-list rather than
+# used to build a filesystem path from user input. Add a post = add a template
+# + one entry in BLOG_POSTS; the index page, sitemap and 404 handling follow.
+# ---------------------------------------------------------------------------
+BLOG_POSTS = [
+    {
+        'slug': 'how-long-does-amazon-bestseller-badge-last',
+        'title': 'How long does the Amazon bestseller badge last?',
+        'summary': 'Sometimes days, often hours. What an hourly monitor saw on real books, why the badge moves, and how to capture yours.',
+        'published': '2026-09-18',
+    },
+]
+_BLOG_BY_SLUG = {p['slug']: p for p in BLOG_POSTS}
+
+
+@app.route('/blog')
+def blog_index():
+    """Blog index - newest first"""
+    posts = sorted(BLOG_POSTS, key=lambda p: p['published'], reverse=True)
+    return render_template('blog/index.html', posts=posts)
+
+
+@app.route('/blog/<slug>')
+def blog_post(slug):
+    """Single blog post. Unknown slugs 404 (never used as a file path)."""
+    post = _BLOG_BY_SLUG.get(slug)
+    if not post:
+        return render_template('errors/404.html'), 404
+    return render_template(f"blog/{post['slug']}.html", post=post)
+
+
+@app.route('/sitemap.xml')
+def sitemap():
+    """XML sitemap so the blog pages get crawled without waiting for links."""
+    base = 'https://screenshottracker.com'
+    urls = [
+        (f'{base}/', 'weekly', '1.0', None),
+        (f'{base}/pricing', 'monthly', '0.8', None),
+        (f'{base}/blog', 'weekly', '0.7', None),
+    ] + [
+        (f"{base}/blog/{p['slug']}", 'monthly', '0.8', p['published']) for p in BLOG_POSTS
+    ]
+    body = ['<?xml version="1.0" encoding="UTF-8"?>',
+            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
+    for loc, freq, prio, lastmod in urls:
+        body.append('<url>')
+        body.append(f'<loc>{loc}</loc>')
+        if lastmod:
+            body.append(f'<lastmod>{lastmod}</lastmod>')
+        body.append(f'<changefreq>{freq}</changefreq><priority>{prio}</priority>')
+        body.append('</url>')
+    body.append('</urlset>')
+    return app.response_class('\n'.join(body), mimetype='application/xml')
+
+
+@app.route('/robots.txt')
+def robots_txt():
+    """Allow marketing pages, keep the logged-in app and admin out of the index."""
+    lines = [
+        'User-agent: *',
+        'Disallow: /dashboard',
+        'Disallow: /admin/',
+        'Disallow: /auth/',
+        'Disallow: /screenshot/',
+        'Disallow: /success',
+        'Disallow: /settings',
+        'Allow: /',
+        'Sitemap: https://screenshottracker.com/sitemap.xml',
+    ]
+    return app.response_class('\n'.join(lines) + '\n', mimetype='text/plain')
+
 @app.route('/test_encryption')
 @admin_required
 @login_required
@@ -6851,16 +6925,33 @@ def force_start_scheduler():
         """
 
 @app.route('/screenshot/<int:screenshot_id>')
+@login_required
 def view_screenshot(screenshot_id):
     # Bug fix: was hardcoded sqlite3.connect('amazon_monitor.db') — the
     # phantom-database class again; in production this read an empty local
     # file, so stored screenshots were unviewable from the dashboard.
+    #
+    # Security fix (2026-09-18): this route had no @login_required and no
+    # ownership check, so any capture could be fetched by guessing a small
+    # integer id. Captures are customers' unreleased launch evidence. The
+    # JOIN scopes the lookup to the current user's own products, so a foreign
+    # id simply returns 404 (no existence leak). Admins (ADMIN_EMAILS) keep
+    # cross-account access because /debug/all_screenshots links here.
     conn = get_db()
     cursor = conn.cursor()
 
-    cursor.execute(q('''
-        SELECT screenshot_data FROM bestseller_screenshots WHERE id = %s
-    '''), (screenshot_id,))
+    admin_emails = [e.strip().lower() for e in os.environ.get('ADMIN_EMAILS', '').split(',') if e.strip()]
+    if (current_user.email or '').lower() in admin_emails:
+        cursor.execute(q('''
+            SELECT screenshot_data FROM bestseller_screenshots WHERE id = %s
+        '''), (screenshot_id,))
+    else:
+        cursor.execute(q('''
+            SELECT s.screenshot_data
+            FROM bestseller_screenshots s
+            JOIN products p ON p.id = s.product_id
+            WHERE s.id = %s AND p.user_id = %s
+        '''), (screenshot_id, current_user.id))
 
     result = cursor.fetchone()
     conn.close()

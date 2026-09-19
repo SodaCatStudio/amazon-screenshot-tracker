@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    {% include 'partials/gtag.html' %}
+    <title>How Long Does the Amazon Bestseller Badge Last? (Real Data From Tracked Books)</title>
+    <meta name="description" content="Amazon's Best Seller badge can vanish within hours. We watched one book lose and regain it six times in three days. Here's how long badges really last and how to capture yours.">
+    <link rel="canonical" href="https://screenshottracker.com/blog/how-long-does-amazon-bestseller-badge-last">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Screenshot Tracker">
+    <meta property="og:url" content="https://screenshottracker.com/blog/how-long-does-amazon-bestseller-badge-last">
+    <meta property="og:title" content="How long does the Amazon bestseller badge last?">
+    <meta property="og:description" content="Sometimes days. Often hours. One tracked book lost and regained its badge six times in three days. Real data from an hourly monitor.">
+    <meta property="og:image" content="https://screenshottracker.com/static/screenshots/og-card.png">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta property="article:published_time" content="2026-09-18">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="How long does the Amazon bestseller badge last?">
+    <meta name="twitter:description" content="Sometimes days. Often hours. Real data from an hourly monitor.">
+    <meta name="twitter:image" content="https://screenshottracker.com/static/screenshots/og-card.png">
+    <link rel="icon" href="/static/screenshots/favicon.ico" sizes="any">
+    <link rel="icon" type="image/png" sizes="32x32" href="/static/screenshots/favicon-32.png">
+    <link rel="apple-touch-icon" href="/static/screenshots/apple-touch-icon.png">
+
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@graph": [
+        {
+          "@type": "Article",
+          "headline": "How long does the Amazon bestseller badge last?",
+          "description": "Amazon's Best Seller badge can vanish within hours. Real data from an hourly monitor on how long badges last and how to capture yours.",
+          "datePublished": "2026-09-18",
+          "dateModified": "2026-09-18",
+          "author": { "@type": "Person", "name": "Josh Matern" },
+          "publisher": {
+            "@type": "Organization",
+            "name": "Screenshot Tracker",
+            "logo": { "@type": "ImageObject", "url": "https://screenshottracker.com/static/screenshots/icon-512.png" }
+          },
+          "image": "https://screenshottracker.com/static/screenshots/og-card.png",
+          "mainEntityOfPage": "https://screenshottracker.com/blog/how-long-does-amazon-bestseller-badge-last"
+        },
+        {
+          "@type": "FAQPage",
+          "mainEntity": [
+            {
+              "@type": "Question",
+              "name": "How long does the Amazon Best Seller badge last?",
+              "acceptedAnswer": { "@type": "Answer", "text": "There is no fixed duration. The badge is shown while your book is ranked #1 in a category, and Amazon recalculates sales rank roughly every hour. In books we monitor, a badge has stayed up for days but has also disappeared within a single hour. One business book lost and regained its badge six times in under three days." }
+            },
+            {
+              "@type": "Question",
+              "name": "Why did my Amazon bestseller badge disappear?",
+              "acceptedAnswer": { "@type": "Answer", "text": "Another book outsold yours in that category during the last ranking window, so it took the #1 spot and the badge moved with it. Sales rank is relative, so a quiet hour for you or a strong hour for a competitor is enough. Amazon does not notify you when this happens." }
+            },
+            {
+              "@type": "Question",
+              "name": "How long does the #1 New Release badge last?",
+              "acceptedAnswer": { "@type": "Answer", "text": "The #1 New Release badge is only available while your book counts as a new release, roughly the first month after publication, and within that window it follows the same hour-by-hour ranking as the Best Seller badge. Once the new-release window closes the badge is gone for good, regardless of sales." }
+            },
+            {
+              "@type": "Question",
+              "name": "Can I get the Amazon bestseller badge back after it disappears?",
+              "acceptedAnswer": { "@type": "Answer", "text": "Yes, if your book returns to #1 in the category. The badge is not a one-time award; it reflects the current ranking. Books we track regularly regain a badge hours or days after losing it, which is also why it is worth capturing every time it appears." }
+            },
+            {
+              "@type": "Question",
+              "name": "How do I prove my book was an Amazon bestseller?",
+              "acceptedAnswer": { "@type": "Answer", "text": "A timestamped screenshot of the product page showing the badge and the category is the accepted proof. Amazon keeps no public history of who held a badge and when, so if you did not capture it while it was visible there is no way to retrieve it later." }
+            }
+          ]
+        }
+      ]
+    }
+    </script>
+
+    <style>
+        :root {
+            --navy: #010b1b;
+            --navy-mid: #12263f;
+            --orange: #ff9900;
+            --orange-deep: #e07d00;
+            --ink: #1a1a1a;
+            --muted: #5c6672;
+            --line: #e4e7eb;
+            --wash: #f6f7f9;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            line-height: 1.6; color: var(--ink); background: #fff; overflow-x: hidden;
+        }
+        img { max-width: 100%; height: auto; }
+        a { color: var(--orange-deep); }
+
+        /* ---------- Navigation (mirrors landing.html) ---------- */
+        nav { background-color: var(--navy); padding: 10px 0; position: fixed; width: 100%; top: 0; z-index: 1000; box-shadow: 0 1px 0 rgba(255,255,255,0.06); }
+        .nav-container { max-width: 1120px; margin: 0 auto; padding: 0 20px; display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+        .logo { color: #fff; font-size: 19px; font-weight: 700; letter-spacing: -0.01em; text-decoration: none; display: flex; align-items: center; gap: 10px; white-space: nowrap; min-width: 0; }
+        .logo img { width: 34px; height: 34px; border-radius: 7px; display: block; flex: 0 0 auto; }
+        .nav-links { display: flex; gap: 10px; align-items: center; flex: 0 0 auto; }
+        .nav-links a { color: #fff; text-decoration: none; padding: 8px 16px; border-radius: 6px; font-size: 15px; transition: background-color 0.2s, color 0.2s; }
+        .nav-links .btn-login:hover { background-color: rgba(255,255,255,0.1); }
+        .nav-links .btn-plans { background-color: var(--orange); color: #12100a; font-weight: 700; }
+        .nav-links .btn-plans:hover { background-color: #ffad2e; }
+
+        /* ---------- Article header ---------- */
+        .post-head { background: linear-gradient(180deg, var(--navy-mid) 0%, var(--navy) 100%); color: #fff; padding: 104px 20px 40px; }
+        .post-head-inner { max-width: 760px; margin: 0 auto; }
+        .post-kicker { color: var(--orange); font-weight: 700; font-size: 14px; letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 14px; }
+        .post-head h1 { font-size: 38px; line-height: 1.15; letter-spacing: -0.02em; margin-bottom: 16px; }
+        .post-meta { color: #9fb0c4; font-size: 15px; }
+        .post-meta a { color: #fff; text-decoration: none; }
+
+        /* ---------- Article body ---------- */
+        .post { max-width: 760px; margin: 0 auto; padding: 40px 20px 20px; font-size: 18px; }
+        .post p { margin-bottom: 22px; }
+        .post h2 { font-size: 27px; line-height: 1.25; color: var(--navy); margin: 44px 0 14px; letter-spacing: -0.01em; }
+        .post h3 { font-size: 20px; color: var(--navy); margin: 28px 0 10px; }
+        .post ul { margin: 0 0 22px 22px; }
+        .post li { margin-bottom: 8px; }
+        .post strong { color: var(--navy); }
+        .lede { font-size: 21px; color: #48535f; }
+
+        .callout { background: var(--wash); border-left: 4px solid var(--orange); padding: 18px 20px; border-radius: 0 8px 8px 0; margin: 0 0 26px; }
+        .callout p:last-child { margin-bottom: 0; }
+
+        figure { margin: 0 0 28px; }
+        figure img { display: block; border: 1px solid var(--line); border-radius: 8px; }
+        figcaption { font-size: 14.5px; color: var(--muted); margin-top: 10px; line-height: 1.5; }
+
+        .data-table { width: 100%; border-collapse: collapse; margin: 0 0 12px; font-size: 16px; }
+        .data-table th, .data-table td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+        .data-table th { color: var(--navy); font-size: 14px; letter-spacing: 0.03em; text-transform: uppercase; background: var(--wash); }
+        .data-table td:first-child { white-space: nowrap; }
+        .table-note { font-size: 14.5px; color: var(--muted); margin-bottom: 26px; }
+
+        /* Timeline: one row per appearance, dot per event */
+        .timeline { list-style: none; margin: 0 0 8px; padding: 0; border-left: 2px solid var(--line); }
+        .timeline li { position: relative; padding: 0 0 14px 22px; font-size: 16.5px; margin: 0; }
+        .timeline li::before { content: ""; position: absolute; left: -7px; top: 8px; width: 12px; height: 12px; border-radius: 50%; background: var(--orange); }
+        .timeline .gap { color: var(--muted); font-size: 14.5px; display: block; }
+
+        /* FAQ */
+        .faq details { border-top: 1px solid var(--line); padding: 14px 0; }
+        .faq details:last-child { border-bottom: 1px solid var(--line); }
+        .faq summary { font-weight: 700; color: var(--navy); cursor: pointer; font-size: 18px; list-style: none; display: flex; justify-content: space-between; gap: 12px; }
+        .faq summary::-webkit-details-marker { display: none; }
+        .faq summary::after { content: "+"; color: var(--orange-deep); font-weight: 700; flex: 0 0 auto; }
+        .faq details[open] summary::after { content: "–"; }
+        .faq details p { margin: 12px 0 4px; font-size: 17px; }
+
+        /* CTA */
+        .cta { background: var(--wash); border: 1px solid var(--line); border-radius: 12px; padding: 30px 26px; margin: 40px 0 10px; text-align: center; }
+        .cta h2 { margin: 0 0 10px; font-size: 25px; }
+        .cta p { color: #48535f; margin-bottom: 18px; }
+        .btn-primary { display: inline-block; background-color: var(--orange); color: #12100a; font-weight: 700; padding: 14px 28px; border-radius: 8px; text-decoration: none; font-size: 17px; }
+        .btn-primary:hover { background-color: #ffad2e; }
+        .cta-micro { font-size: 14.5px; color: var(--muted); margin: 12px 0 0; }
+
+        .byline-box { display: flex; gap: 14px; align-items: flex-start; border-top: 1px solid var(--line); margin-top: 36px; padding-top: 22px; font-size: 16px; color: #48535f; }
+        .byline-box img { width: 44px; height: 44px; border-radius: 8px; flex: 0 0 auto; }
+
+        /* ---------- Footer (mirrors landing.html) ---------- */
+        .contact-section { background-color: var(--navy); color: #fff; padding: 44px 20px; text-align: center; margin-top: 50px; }
+        .contact-section h2 { color: #fff; margin-bottom: 12px; font-size: 22px; }
+        .contact-section p { color: #9fb0c4; margin-bottom: 12px; }
+        .contact-section a { color: var(--orange); text-decoration: none; font-size: 19px; }
+        .contact-section a:hover { text-decoration: underline; }
+        footer { background-color: var(--navy); color: #fff; padding: 0 20px 36px; text-align: center; }
+        .footer-links { display: flex; justify-content: center; gap: 26px; margin-bottom: 16px; flex-wrap: wrap; }
+        .footer-links a { color: #fff; text-decoration: none; opacity: 0.75; }
+        .footer-links a:hover { opacity: 1; }
+
+        @media (max-width: 760px) {
+            .post-head { padding: 84px 18px 30px; }
+            .post-head h1 { font-size: 29px; }
+            .post { font-size: 17px; padding: 28px 18px 10px; }
+            .post h2 { font-size: 23px; }
+            .lede { font-size: 19px; }
+            .nav-links a { padding: 8px 12px; font-size: 14px; }
+            .data-table { font-size: 14.5px; }
+            .data-table th, .data-table td { padding: 8px 8px; }
+        }
+    </style>
+</head>
+<body>
+    <nav id="siteNav">
+        <div class="nav-container">
+            <a href="/" class="logo">
+                <img src="{{ url_for('static', filename='screenshots/icon-512.png') }}" width="34" height="34" alt="">
+                <span>Screenshot Tracker</span>
+            </a>
+            <div class="nav-links">
+                <a href="{{ url_for('auth.login') }}" class="btn-login">Log in</a>
+                <a href="/#pricing" class="btn-plans">See plans</a>
+            </div>
+        </div>
+    </nav>
+
+    <header class="post-head">
+        <div class="post-head-inner">
+            <p class="post-kicker">Amazon badges, explained</p>
+            <h1>How long does the Amazon bestseller badge last?</h1>
+            <p class="post-meta">By <a href="/">Josh Matern</a>, founder of Screenshot Tracker · September 18, 2026 · 7 min read</p>
+        </div>
+    </header>
+
+    <article class="post">
+        <p class="lede">Sometimes days. Often hours. Occasionally less than one. There is no fixed duration, because the badge isn't an award you keep. It's a live label that says "right now, this book is #1 here," and Amazon re-decides "right now" about once an hour.</p>
+
+        <p>I run a service that checks authors' Amazon pages every hour and screenshots the badge the moment it appears, so I have something most answers to this question don't: timestamps. Below is what the badge actually did on real books we monitored this summer, why it behaves that way, and what to do about it.</p>
+
+        <h2>What the badge really is</h2>
+
+        <p>Amazon's orange <strong>#1 Best Seller</strong> badge appears on a product page when that book holds the #1 spot in at least one category's bestseller chart. The <strong>#1 New Release</strong> badge works the same way for the new-release chart, which is only open to books published recently, roughly the last month.</p>
+
+        <p>Both charts are built from Amazon's sales rank, which Amazon says is updated hourly. Sales rank is relative: it doesn't measure how many copies you sold, it measures how you did compared with every other book in that category over a recent window that weights the last few hours most heavily. So the badge isn't tied to a sales threshold you cross and keep. Whoever had the strongest recent hour in the category gets it, and that is recomputed all day and all night.</p>
+
+        <div class="callout">
+            <p><strong>The practical consequence:</strong> your badge can disappear because of something a different author did at 3am. You sold the same as you did an hour ago; they sold more. The badge moved. Nobody tells you.</p>
+        </div>
+
+        <h2>What we actually observed</h2>
+
+        <p>Our monitor records the moment a badge appears on a tracked book, and it only records a new appearance after the badge has been absent on a previous check. So every extra entry below is a badge that went away and came back. Titles are withheld and identifying details in the screenshot are blurred.</p>
+
+        <h3>A business book: seven appearances in three days</h3>
+
+        <p>This one launched in late August into a competitive category. Here is every time the badge came back after having disappeared, in the monitor's clock (UTC):</p>
+
+        <ul class="timeline">
+            <li>Aug 24, 02:24 — badge first seen</li>
+            <li>Aug 24, 05:28 — back again <span class="gap">gone and returned within about 3 hours</span></li>
+            <li>Aug 25, 01:43 — back again</li>
+            <li>Aug 25, 18:57 — back again</li>
+            <li>Aug 26, 09:08 — back again</li>
+            <li>Aug 26, 21:17 — back again</li>
+            <li>Aug 27, 00:20 — back again <span class="gap">six losses and six recoveries in about 70 hours</span></li>
+        </ul>
+
+        <p>Six times in under three days this author's badge vanished and reappeared. If they had checked the page once a day, they would have seen it on some days and not others and had no idea why. If they had checked once and never again, there's a real chance they'd have caught a gap and concluded they never hit #1 at all.</p>
+
+        <figure>
+            <picture>
+                <source media="(max-width: 700px)"
+                        srcset="{{ url_for('static', filename='screenshots/blog-flicker-badge-mobile.webp') }}">
+                <img src="{{ url_for('static', filename='screenshots/blog-flicker-badge.webp') }}"
+                     width="800" height="160"
+                     alt="Crop of an Amazon product page showing the orange #1 Best Seller badge in the Entrepreneurship category, with the title and author blurred">
+            </picture>
+            <figcaption>One of the captures from that run: #1 Best Seller in Entrepreneurship. The book's title and author are blurred. Within hours of this capture, the badge was gone again.</figcaption>
+        </figure>
+
+        <h3>A cozy mystery: six appearances in seventeen days</h3>
+
+        <p>A very different pattern. This Kindle title earned a Best Seller badge in mid-July and then kept losing it and winning it back over two and a half weeks:</p>
+
+        <table class="data-table">
+            <thead><tr><th>Badge returned</th><th>Time since previous appearance</th></tr></thead>
+            <tbody>
+                <tr><td>Jul 17</td><td>first appearance</td></tr>
+                <tr><td>Jul 20</td><td>about 3 days</td></tr>
+                <tr><td>Jul 25</td><td>about 6 days</td></tr>
+                <tr><td>Jul 27</td><td>about 1.5 days</td></tr>
+                <tr><td>Jul 31</td><td>about 4 days</td></tr>
+                <tr><td>Aug 2</td><td>about 3 days</td></tr>
+            </tbody>
+        </table>
+        <p class="table-note">Each row is a return after at least one hourly check found no badge. How long each stay lasted is not something we recorded until recently; we've since started logging every hourly check so we can publish actual durations, and this page will be updated when there's enough data.</p>
+
+        <p>Two books, two rhythms. The business book fought hour by hour against close competitors; the mystery drifted in and out of #1 as its category's leaders traded places over days. Neither author could have predicted when to look.</p>
+
+        <h2>Why it disappears (and comes back)</h2>
+
+        <p>Every case we've seen comes down to one of four things.</p>
+
+        <p><strong>A competitor had a better hour.</strong> This is nearly all of them. Categories deep in the tree can be won with a handful of sales, which also means they can be lost to a handful of sales. A promo, a newsletter send, or a BookBub feature for someone else's book takes the badge for exactly as long as their spike lasts.</p>
+
+        <p><strong>Your own sales are lumpy.</strong> Launch-day buyers arrive in waves. Between waves, rank decays, and if the gap is wide enough the badge goes with it, then returns on the next wave. This is the flicker pattern in the business book above.</p>
+
+        <p><strong>The new-release window closed.</strong> The #1 New Release badge has an expiry the Best Seller badge doesn't. When your book ages out of the new-release chart, the badge disappears permanently, no matter how well it's selling. This one does not come back.</p>
+
+        <p><strong>You're looking at a different storefront.</strong> Badges are computed per marketplace. A book can be #1 on Amazon.co.uk and unranked on Amazon.com at the same moment. Authors sometimes report a badge "disappearing" when they've simply followed a link to a different country's store. Check the domain before you panic.</p>
+
+        <h2>Why this matters more than it seems</h2>
+
+        <p>The badge itself is temporary by design, but the claim it supports is permanent. "Amazon #1 Best Seller" on a cover, in a bio, or in a press kit is a line authors use for years. And the only evidence is a screenshot taken while the badge was visible. Amazon publishes no history of who held #1 and when; once the badge is gone, there is nothing to retrieve.</p>
+
+        <p>That's the trap. The moment worth documenting is the moment you're least likely to be looking. Launch week is chaotic, the badge often first appears overnight, and it may be gone before you've had coffee.</p>
+
+        <h2>How to make sure you capture it</h2>
+
+        <p>If you're doing it manually, do it properly: a full-page screenshot (not a crop) that shows the badge, the category name, your title, and the browser's URL bar with the date visible somewhere on screen. Take one every time you see it, since the first one is rarely the best one. Check right after any promotion lands and again first thing in the morning, because overnight is when badges most often change hands.</p>
+
+        <p>If you'd rather not refresh a product page at 2am, this is exactly why I built <a href="/">Screenshot Tracker</a>. It checks your book's page every hour, and the moment a Best Seller or #1 New Release badge appears it emails you the timestamped, full-page screenshot. It caught every one of the appearances in the tables above, most of them in the middle of the night.</p>
+
+        <div class="cta">
+            <h2>Never miss your badge again</h2>
+            <p>Hourly checks, day and night. The screenshot lands in your inbox the moment a badge appears.</p>
+            <a href="/#pricing" class="btn-primary">Start tracking my book</a>
+            <p class="cta-micro">Cancel anytime · From $14.99 · Set up in two minutes</p>
+        </div>
+
+        <h2 id="faq">Frequently asked questions</h2>
+
+        <div class="faq">
+            <details>
+                <summary>How long does the Amazon Best Seller badge last?</summary>
+                <p>There is no fixed duration. The badge is shown while your book is ranked #1 in a category, and Amazon recalculates sales rank roughly every hour. In books we monitor, a badge has stayed up for days but has also disappeared within a single hour. One business book lost and regained its badge six times in under three days.</p>
+            </details>
+            <details>
+                <summary>Why did my Amazon bestseller badge disappear?</summary>
+                <p>Another book outsold yours in that category during the last ranking window, so it took the #1 spot and the badge moved with it. Sales rank is relative, so a quiet hour for you or a strong hour for a competitor is enough. Amazon does not notify you when this happens.</p>
+            </details>
+            <details>
+                <summary>How long does the #1 New Release badge last?</summary>
+                <p>The #1 New Release badge is only available while your book counts as a new release, roughly the first month after publication, and within that window it follows the same hour-by-hour ranking as the Best Seller badge. Once the new-release window closes the badge is gone for good, regardless of sales.</p>
+            </details>
+            <details>
+                <summary>Can I get the bestseller badge back after it disappears?</summary>
+                <p>Yes, if your book returns to #1 in the category. The badge is not a one-time award; it reflects the current ranking. Books we track regularly regain a badge hours or days after losing it, which is also why it is worth capturing every time it appears.</p>
+            </details>
+            <details>
+                <summary>How do I prove my book was an Amazon bestseller?</summary>
+                <p>A timestamped screenshot of the product page showing the badge and the category is the accepted proof. Amazon keeps no public history of who held a badge and when, so if you did not capture it while it was visible there is no way to retrieve it later.</p>
+            </details>
+        </div>
+
+        <div class="byline-box">
+            <img src="{{ url_for('static', filename='screenshots/icon-512.png') }}" width="44" height="44" alt="">
+            <p><strong>Josh Matern</strong> is the founder of Screenshot Tracker. He built it after watching authors lose bestseller badges they never got to document. The observations on this page come from the service's own monitoring logs; titles are withheld and screenshots are blurred.</p>
+        </div>
+    </article>
+
+    <div class="contact-section">
+        <h2>Need help?</h2>
+        <p>We're here to help you track your Amazon success</p>
+        <a href="mailto:support@screenshottracker.com">support@screenshottracker.com</a>
+    </div>
+    <footer>
+        <div class="footer-links">
+            <a href="/">Home</a>
+            <a href="/blog">Blog</a>
+            <a href="/terms">Terms of Service</a>
+            <a href="/privacy">Privacy Policy</a>
+            <a href="/refunds">Refund Policy</a>
+        </div>
+        <p style="opacity: 0.6;">© 2026 Screenshot Tracker. Not affiliated with Amazon.</p>
+    </footer>
+</body>
+</html>
