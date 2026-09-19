@@ -1456,20 +1456,77 @@ class EmailNotifier:
         else:
             return all([self.smtp_server, self.username, self.password])
 
+    @staticmethod
+    def _resend_attachments(attachments):
+        """Convert email.mime attachment objects into Resend's attachment shape.
+
+        Why this exists: every caller in this file builds `MIMEImage` objects,
+        because that is what the SMTP path needs (`_send_via_smtp` calls
+        `msg.attach(...)` on them directly). Resend's API does not take MIME
+        objects - it takes {"filename", "content"} where content is base64 -
+        so the two transports cannot share the same attachment objects.
+
+        Before this existed, `_send_via_resend` accepted `attachments` and
+        silently ignored it. Verified consequence: the badge notification sent
+        2026-09-10 00:31 UTC (Resend id 9a5eec1e-...) was delivered with no
+        attachment at all, while its body promised "The full page screenshot is
+        attached". Customers on the Resend path never received their capture.
+
+        `content_id` is preserved so that any body using <img src="cid:name">
+        still resolves - Resend supports inline CID attachments.
+        """
+        converted = []
+        for att in attachments or []:
+            # Allow a caller to pass Resend's native shape straight through.
+            if isinstance(att, dict):
+                converted.append(att)
+                continue
+
+            raw = att.get_payload(decode=True)
+            if not raw:
+                continue
+
+            item = {
+                "filename": att.get_filename() or "attachment",
+                "content": base64.b64encode(raw).decode("ascii"),
+            }
+
+            # MIME stores the id as "<screenshot>"; Resend wants it bare.
+            cid = att.get("Content-ID")
+            if cid:
+                item["content_id"] = cid.strip("<>")
+
+            ctype = att.get_content_type()
+            if ctype:
+                item["content_type"] = ctype
+
+            converted.append(item)
+        return converted
+
     def _send_via_resend(self, recipient, subject, html_content, attachments=None):
         try:
             import resend
             resend.api_key = os.environ.get('RESEND_API_KEY')
 
-            # Try their exact format from docs
-            email = resend.Emails.send({
+            payload = {
                 "from": "Screenshot Tracker <noreply@screenshottracker.com>",
                 "to": [recipient] if not isinstance(recipient, list) else recipient,
                 "subject": subject,
                 "html": html_content
-            })
+            }
 
-            print(f"✅ Resend response: {email}")
+            converted = self._resend_attachments(attachments)
+            if converted:
+                payload["attachments"] = converted
+                # Resend caps the whole message at 40MB after base64 encoding.
+                total = sum(len(a.get("content", "")) for a in converted
+                            if isinstance(a.get("content"), str))
+                if total > 38_000_000:
+                    print(f"⚠️ Resend attachments ~{total} bytes, near the 40MB cap")
+
+            email = resend.Emails.send(payload)
+
+            print(f"✅ Resend response: {email} (attachments: {len(converted)})")
             return True
 
         except Exception as e:
